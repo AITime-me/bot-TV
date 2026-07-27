@@ -54,9 +54,18 @@ production-зависимостей для Python 3.12. Platform-specific зав
 передаются через environment; `.env.example` служит только перечнем имён и
 безопасных defaults.
 
-PostgreSQL (BOT-CORE-FOUNDATION-01A) опционален для `BOT_MODE=OFF` health-запуска.
-Для миграций и inbound persistence задайте `DATABASE_URL` в форме
-`postgresql+asyncpg://...`. Миграции: `alembic upgrade head`.
+PostgreSQL (BOT-CORE-FOUNDATION-01A / BOT-CORE-INGRESS-01B) опционален для
+`BOT_MODE=OFF` health-запуска. Для миграций и durable ingress задайте
+`DATABASE_URL` в форме `postgresql+asyncpg://...`. Миграции:
+`alembic upgrade head`.
+
+Durable ingress (01B): событие сначала фиксируется в `ingress_events`, и только
+после успешного commit синтетический адаптер подтверждает приём. Worker
+захватывает строку через lease (`FOR UPDATE SKIP LOCKED` + fencing token) и
+затем переиспользует foundation `InboundService` для conversation/inbox/outbox.
+Реальные channel adapters, AI, ReplyPlan и Outbound Arbiter в этот этап не
+входят (см. `docs/adr/002-durable-ingress.md`).
+
 Интеграция режимов с control plane `online-zapis-tv` запрещена до
 `CONTRACT-MODE-01` (см. `docs/adr/001-mode-contract-deferred.md`).
 
@@ -76,3 +85,19 @@ python -m pytest -p no:cacheprovider
 `requirements-dev.txt` фиксирует прямые dev-зависимости и подключает
 `requirements.txt`; `requirements-dev-lock.txt` содержит полный
 воспроизводимый набор для тестов.
+
+Без `BOT_TV_TEST_DATABASE_URL` PostgreSQL-интеграционные тесты пропускаются.
+Для полного прогона на изолированной test-БД задайте переменную только в
+текущей shell-сессии (не в файлах репозитория):
+
+```powershell
+# PowerShell example — use a disposable test database name with a discrete
+# "test" segment. Never point this at production/staging.
+$env:BOT_TV_TEST_DATABASE_URL = "postgresql+asyncpg://USER:PASSWORD@127.0.0.1:5432/bot_tv_foundation_test"
+python -m pytest -p no:cacheprovider
+Remove-Item Env:BOT_TV_TEST_DATABASE_URL
+```
+
+`DATABASE_URL` для destructive fixtures никогда не используется. Имя БД должно
+содержать отдельный сегмент `test` (`bot_tv_test`, `test_bot`, …). Пароль и
+полный URL не должны попадать в логи или коммиты.

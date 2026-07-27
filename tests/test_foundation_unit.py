@@ -137,17 +137,58 @@ def test_pytest_ini_uses_session_loop_for_fixtures_and_tests() -> None:
 
 
 def test_pg_harness_does_not_restore_schema_via_create_all() -> None:
-    source = (_REPO_ROOT / "tests" / "test_foundation_pg.py").read_text(
+    for relative in (
+        ("tests", "conftest.py"),
+        ("tests", "pg_harness.py"),
+        ("tests", "test_foundation_pg.py"),
+    ):
+        source = _REPO_ROOT.joinpath(*relative).read_text(encoding="utf-8")
+        assert "Base.metadata.create_all" not in source
+        assert ".create_all(" not in source
+    conftest = (_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    harness = (_REPO_ROOT / "tests" / "pg_harness.py").read_text(encoding="utf-8")
+    assert "run_alembic_command_async" in conftest
+    assert "assert_postgres_reachable" in harness
+    assert "pytest.skip" in harness
+    assert "except Exception:\n        return False" not in harness
+    assert "except Exception:\n        pytest.skip" not in harness
+    foundation_pg = (_REPO_ROOT / "tests" / "test_foundation_pg.py").read_text(
         encoding="utf-8"
     )
-    assert "Base.metadata.create_all" not in source
-    assert ".create_all(" not in source
-    assert "run_alembic_command_async" in source
-    assert "assert_postgres_reachable" in source
-    assert "pytest.skip" in source
-    # Broad swallow of connection failures must not become SKIP.
-    assert "except Exception:\n        return False" not in source
-    assert "except Exception:\n        pytest.skip" not in source
+    assert "run_alembic_command_async" in foundation_pg
+
+
+def test_pg_harness_hides_test_database_url() -> None:
+    conftest = (_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    harness = (_REPO_ROOT / "tests" / "pg_harness.py").read_text(encoding="utf-8")
+    # The session fixture must hand out the redacting wrapper, not a raw str.
+    assert "def pg_database_url() -> SecretDatabaseUrl:" in conftest
+    assert "resolve_secret_test_database_url" in harness
+    assert "scrub_secrets" in harness
+    assert "secret.target()" in harness
+    # The revealed URL must be passed inline, never bound to a local variable
+    # that pytest --showlocals would print.
+    combined = conftest + "\n" + harness
+    assert (
+        re.search(
+            r"^\s*\w+\s*=\s*(reveal_database_url\(|\w+\.reveal\(\))",
+            combined,
+            re.MULTILINE,
+        )
+        is None
+    )
+    # Async fixtures must be declared, never resolved from a running loop.
+    assert "getfixturevalue(" not in combined
+    foundation_pg = (_REPO_ROOT / "tests" / "test_foundation_pg.py").read_text(
+        encoding="utf-8"
+    )
+    assert "session_factory: async_sessionmaker[AsyncSession]," in foundation_pg
+    assert "getfixturevalue(" not in foundation_pg
+    assert "run_alembic_command_async" in conftest
+    assert "assert_postgres_reachable" in harness
+    assert "pytest.skip" in harness
+    assert "except Exception:\n        return False" not in harness
+    assert "except Exception:\n        pytest.skip" not in harness
 
 
 @pytest.mark.asyncio
@@ -233,7 +274,7 @@ async def test_alembic_helper_runs_inside_running_event_loop(
 async def test_unreachable_safe_test_url_fails_not_skips(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.test_foundation_pg import assert_postgres_reachable
+    from tests.pg_harness import assert_postgres_reachable
 
     monkeypatch.setenv(
         "BOT_TV_TEST_DATABASE_URL",
@@ -385,30 +426,6 @@ def test_alembic_failure_message_is_scrubbed(tmp_path: Path) -> None:
     assert "127.0.0.1:5432/bot_tv_foundation_test" in message
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-
-
-def test_pg_harness_hides_test_database_url() -> None:
-    source = (_REPO_ROOT / "tests" / "test_foundation_pg.py").read_text(
-        encoding="utf-8"
-    )
-    # The session fixture must hand out the redacting wrapper, not a raw str.
-    assert "def pg_database_url() -> SecretDatabaseUrl:" in source
-    assert "resolve_secret_test_database_url" in source
-    assert "scrub_secrets" in source
-    assert "secret.target()" in source
-    # The revealed URL must be passed inline, never bound to a local variable
-    # that pytest --showlocals would print.
-    assert (
-        re.search(
-            r"^\s*\w+\s*=\s*(reveal_database_url\(|\w+\.reveal\(\))",
-            source,
-            re.MULTILINE,
-        )
-        is None
-    )
-    # Async fixtures must be declared, never resolved from a running loop.
-    assert "getfixturevalue(" not in source
-    assert "session_factory: async_sessionmaker[AsyncSession]," in source
 
 
 @pytest.mark.asyncio
@@ -623,11 +640,17 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "ck_inbox_processing_status",
         "ck_outbox_destination_type",
         "ck_outbox_delivery_status",
+        "ck_ingress_channel",
+        "ck_ingress_event_type",
+        "ck_ingress_status",
+        "ck_ingress_attempt_count_nonnegative",
+        "ck_ingress_lease_version_nonnegative",
     }
     expected_uniques = {
         "uq_conversations_channel_external_id",
         "uq_inbox_channel_external_message_id",
         "uq_outbox_source_inbox_destination",
+        "uq_ingress_channel_external_event_id",
     }
     for name in expected_checks | expected_uniques:
         assert name in rendered, f"missing constraint in metadata DDL: {name}"

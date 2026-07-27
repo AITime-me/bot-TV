@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -16,9 +15,8 @@ from sqlalchemy import CheckConstraint, UniqueConstraint, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.config import Settings
 from app.db.base import Base
-from app.db.session import create_engine, create_session_factory, session_scope
+from app.db.session import session_scope
 from app.models.conversation import Conversation, ConversationStatus
 from app.models.inbox import InboxMessage
 from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
@@ -26,21 +24,25 @@ from app.repositories import messages as message_repo
 from app.schemas.inbound import SyntheticInboundEvent
 from app.services.inbound import InboundService
 from tests.foundation_test_db import (
-    PgDatabaseUnavailableError,
     SecretDatabaseUrl,
-    UnsafeTestDatabaseError,
-    as_secret_database_url,
     assert_safe_test_database_url,
-    resolve_secret_test_database_url,
     run_alembic_command_async,
-    scrub_secrets,
 )
+from tests.pg_harness import assert_postgres_reachable, truncate_foundation_tables
 
 import app.models  # noqa: F401 — register metadata
 
+# Re-export for unit tests that probe reachability helpers.
+__all__ = ["assert_postgres_reachable"]
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _ALEMBIC_INI = _REPO_ROOT / "alembic.ini"
-_FOUNDATION_TABLES = ("outbox_messages", "inbox_messages", "conversations")
+_FOUNDATION_TABLES = (
+    "outbox_messages",
+    "inbox_messages",
+    "conversations",
+    "ingress_events",
+)
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
 # and adds casts/parentheses, so the applied CHECK is verified by column plus
@@ -66,6 +68,14 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "delivery_status",
         frozenset({"PENDING", "CANCELLED"}),
     ),
+    "ck_ingress_channel": ("channel", frozenset({"synthetic"})),
+    "ck_ingress_event_type": ("event_type", frozenset({"SYNTHETIC_MESSAGE"})),
+    "ck_ingress_status": (
+        "status",
+        frozenset({"RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "DEAD"}),
+    ),
+    "ck_ingress_attempt_count_nonnegative": ("attempt_count", frozenset()),
+    "ck_ingress_lease_version_nonnegative": ("lease_version", frozenset()),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
@@ -81,75 +91,25 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
         "source_inbox_id",
         "destination_type",
     ),
+    "uq_ingress_channel_external_event_id": (
+        "channel",
+        "external_event_id",
+    ),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_inbox_messages_conversation_id": ("conversation_id",),
     "ix_outbox_messages_conversation_id": ("conversation_id",),
     "ix_outbox_messages_source_inbox_id": ("source_inbox_id",),
+    "ix_ingress_events_status_created_at": ("status", "created_at"),
+    "ix_ingress_events_next_attempt_at": ("next_attempt_at",),
+    "ix_ingress_events_lease_until": ("lease_until",),
+    "ix_ingress_events_correlation_id": ("correlation_id",),
 }
 
 
-def _require_safe_test_url() -> SecretDatabaseUrl:
-    url = resolve_secret_test_database_url(os.environ)
-    if url is None:
-        pytest.skip(
-            "PostgreSQL unavailable: set BOT_TV_TEST_DATABASE_URL "
-            "(database name must contain a discrete 'test' segment) to run "
-            "foundation integration tests; DATABASE_URL is never used"
-        )
-    try:
-        assert_safe_test_database_url(url)
-    except UnsafeTestDatabaseError as error:
-        pytest.fail(f"unsafe BOT_TV_TEST_DATABASE_URL: {error}")
-    return url
-
-
-async def assert_postgres_reachable(url: str | SecretDatabaseUrl) -> None:
-    """Fail hard when a safe test URL is set but PostgreSQL is unreachable.
-
-    The raised message keeps only host:port/database plus a scrubbed driver
-    message; the cause chain is suppressed so the driver cannot print the URL.
-    """
-    secret = as_secret_database_url(url)
-    assert_safe_test_database_url(secret)
-    # Settings redacts its repr, so the revealed URL is never bound to a local.
-    settings = Settings(database_url=secret.reveal())
-    engine = create_engine(settings)
-    failure: str | None = None
-    try:
-        async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
-    except Exception as exc:
-        failure = (
-            "BOT_TV_TEST_DATABASE_URL is set but PostgreSQL is unreachable at "
-            f"{secret.target()} "
-            f"({type(exc).__name__}: {scrub_secrets(str(exc), secret)})"
-        )
-    finally:
-        await engine.dispose()
-    if failure is not None:
-        # Raised outside the except block so the driver exception cannot stay
-        # reachable through __cause__/__context__ with the URL inside.
-        raise PgDatabaseUnavailableError(failure)
-
-
-async def _truncate_foundation_tables(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory() as session:
-        async with session.begin():
-            present = await session.scalar(
-                text("SELECT to_regclass('public.conversations') IS NOT NULL")
-            )
-            if not present:
-                return
-            await session.execute(
-                text(
-                    "TRUNCATE outbox_messages, inbox_messages, conversations "
-                    "RESTART IDENTITY CASCADE"
-                )
-            )
+def _compact_sql(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql.strip()).replace('"', "")
 
 
 async def _table_names(session: AsyncSession) -> set[str]:
@@ -160,10 +120,6 @@ async def _table_names(session: AsyncSession) -> set[str]:
         )
     )
     return set(rows.all())
-
-
-def _compact_sql(sql: str) -> str:
-    return re.sub(r"\s+", " ", sql.strip()).replace('"', "")
 
 
 def _check_literals(definition: str) -> frozenset[str]:
@@ -183,6 +139,8 @@ def _assert_check_semantics(name: str, definition: str) -> None:
     assert actual == allowed, (
         f"{name} allows {sorted(actual)}, expected {sorted(allowed)}"
     )
+    if name.endswith("_nonnegative"):
+        assert ">=" in definition or ">" in definition
 
 
 async def _assert_foundation_schema(session: AsyncSession) -> None:
@@ -295,51 +253,6 @@ async def _assert_autogenerate_empty(engine: AsyncEngine) -> None:
     assert diffs == [], f"unexpected autogenerate drift: {diffs!r}"
 
 
-@pytest.fixture(scope="session")
-def pg_database_url() -> SecretDatabaseUrl:
-    return _require_safe_test_url()
-
-
-@pytest_asyncio.fixture(scope="session")
-async def pg_engine(
-    pg_database_url: SecretDatabaseUrl,
-) -> AsyncIterator[AsyncEngine]:
-    assert_safe_test_database_url(pg_database_url)
-    await assert_postgres_reachable(pg_database_url)
-
-    settings = Settings(database_url=pg_database_url.reveal())
-    engine = create_engine(settings)
-
-    # Schema comes only from Alembic migration — never ORM create_all.
-    await run_alembic_command_async(
-        alembic_ini=_ALEMBIC_INI,
-        command_name="upgrade",
-        revision="head",
-        database_url=pg_database_url,
-    )
-    await engine.dispose()
-    try:
-        yield engine
-    finally:
-        await engine.dispose()
-        try:
-            await run_alembic_command_async(
-                alembic_ini=_ALEMBIC_INI,
-                command_name="downgrade",
-                revision="base",
-                database_url=pg_database_url,
-            )
-        finally:
-            await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def session_factory(
-    pg_engine: AsyncEngine,
-) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(pg_engine)
-
-
 @pytest_asyncio.fixture(autouse=True)
 async def foundation_row_cleanup(
     request: pytest.FixtureRequest,
@@ -355,11 +268,11 @@ async def foundation_row_cleanup(
     if request.node.get_closest_marker("no_foundation_row_cleanup"):
         yield
         return
-    await _truncate_foundation_tables(session_factory)
+    await truncate_foundation_tables(session_factory)
     try:
         yield
     finally:
-        await _truncate_foundation_tables(session_factory)
+        await truncate_foundation_tables(session_factory)
 
 
 @pytest_asyncio.fixture
