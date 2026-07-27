@@ -54,6 +54,12 @@ production-зависимостей для Python 3.12. Platform-specific зав
 передаются через environment; `.env.example` служит только перечнем имён и
 безопасных defaults.
 
+PostgreSQL (BOT-CORE-FOUNDATION-01A) опционален для `BOT_MODE=OFF` health-запуска.
+Для миграций и inbound persistence задайте `DATABASE_URL` в форме
+`postgresql+asyncpg://...`. Миграции: `alembic upgrade head`.
+Интеграция режимов с control plane `online-zapis-tv` запрещена до
+`CONTRACT-MODE-01` (см. `docs/adr/001-mode-contract-deferred.md`).
+
 Health endpoints:
 
 - `GET /health` — совместимый базовый ответ;

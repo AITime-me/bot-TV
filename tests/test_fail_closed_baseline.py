@@ -284,6 +284,9 @@ def test_health_responses_do_not_expose_secret_values() -> None:
         "AMOCRM_CLIENT_SECRET": "synthetic-amocrm-secret",
         "TELEGRAM_BOT_TOKEN": "synthetic-telegram-secret",
         "YANDEX_API_KEY": "synthetic-ai-secret",
+        "DATABASE_URL": (
+            "postgresql+asyncpg://bot:synthetic-db-secret@127.0.0.1:5432/bot"
+        ),
     }
     client = TestClient(create_app(Settings.from_env(fake_secrets)))
 
@@ -296,3 +299,5 @@ def test_health_responses_do_not_expose_secret_values() -> None:
 
     for secret in fake_secrets.values():
         assert secret not in serialized
+    assert "synthetic-db-secret" not in serialized
+    assert "DATABASE_URL" not in serialized
