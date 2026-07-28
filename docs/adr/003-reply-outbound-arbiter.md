@@ -79,6 +79,12 @@ delivered, and fail-closed mode (automatic real outbound always false).
 ### Lease / fencing
 ReplyPlan and OutboundMessage use `FOR UPDATE SKIP LOCKED`, lease TTL,
 `lease_token` + `lease_version`, retries, and `DEAD` after max attempts.
+`max_attempts` persisted on each row is the only limit used by claim, explicit
+failure, and exhausted-lease recovery. Before a normal claim, an expired
+`PROCESSING` row whose final attempt was already issued is moved to `DEAD`
+without dispatching a ReplyPlan or invoking the outbound sink. ReplyPlan
+recovery locks Conversation first and transactionally enqueues the same
+`REPLY_PLAN_STATE_CHANGED(DEAD)` mirror fact as explicit final failure.
 
 ### Out of scope
 Real VK/MAX/Telegram/site adapters, amoCRM, n8n, AI, public webhooks, real
@@ -86,5 +92,7 @@ sends, full handoff workflows, and online-zapis-tv integration.
 
 ## Consequences
 
-Workers can recover after crash using leased rows. Stale workers cannot
-complete superseded plans or admit outdated outbound messages.
+Workers can recover after crash using leased rows. A crash during the final
+allowed attempt is terminalized on the next claim cycle, so an expired row
+cannot remain permanently `PROCESSING`. Stale workers cannot complete
+superseded plans or admit outdated outbound messages.

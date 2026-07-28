@@ -371,6 +371,78 @@ async def test_expired_lease_is_reclaimed_and_stale_completion_is_rejected(
 
 
 @pytest.mark.asyncio
+async def test_expired_final_mirror_lease_recovers_to_dead_without_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        await InboundService(session).accept(_inbound("mirror-msg-final-lease"))
+        job = await session.scalar(select(AmoCrmMirrorJob))
+        assert job is not None
+        job.max_attempts = 1
+        await session.flush()
+
+    crashed_worker = AmoCrmMirrorWorker(
+        session_factory,
+        worker_id="mirror-crashed",
+    )
+    stale_claim = await crashed_worker.claim_one()
+    assert stale_claim is not None
+    assert stale_claim.attempt_count == stale_claim.max_attempts == 1
+
+    async with session_scope(session_factory) as session:
+        expired = await db_now(session) - timedelta(seconds=5)
+        await session.execute(
+            update(AmoCrmMirrorJob)
+            .where(AmoCrmMirrorJob.id == stale_claim.job_id)
+            .values(lease_until=expired)
+        )
+
+    recovery_worker = AmoCrmMirrorWorker(
+        session_factory,
+        worker_id="mirror-recovery",
+    )
+    assert await recovery_worker.claim_one() is None
+    assert crashed_worker.adapter.calls == []
+    assert recovery_worker.adapter.calls == []
+
+    async with session_scope(session_factory) as session:
+        job = await mirror_repo.get_by_id(session, job_id=stale_claim.job_id)
+        assert job is not None
+        assert job.status == AmoCrmMirrorStatus.DEAD.value
+        assert job.attempt_count == job.max_attempts == 1
+        assert job.lease_owner is None
+        assert job.lease_token is None
+        assert job.lease_until is None
+        assert job.lease_version == stale_claim.lease_version
+        assert job.error_code == "LEASE_ATTEMPTS_EXHAUSTED"
+        assert job.skip_reason is None
+
+    with pytest.raises(StaleAmoCrmMirrorLeaseError):
+        async with session_scope(session_factory) as session:
+            await mirror_repo.complete_with_lease(
+                session,
+                job_id=stale_claim.job_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+            )
+    with pytest.raises(StaleAmoCrmMirrorLeaseError):
+        async with session_scope(session_factory) as session:
+            await mirror_repo.fail_with_lease(
+                session,
+                job_id=stale_claim.job_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+                error_code="STALE_WORKER",
+            )
+
+    async with session_scope(session_factory) as session:
+        later = await db_now(session) + timedelta(hours=1)
+    assert await recovery_worker.claim_one(now=later) is None
+    assert crashed_worker.adapter.calls == []
+    assert recovery_worker.adapter.calls == []
+
+
+@pytest.mark.asyncio
 async def test_bot_action_job_is_skipped_after_manager_takeover(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -475,6 +547,10 @@ async def test_adapter_failure_retries_on_pg_clock_then_dies(
 ) -> None:
     async with session_scope(session_factory) as session:
         await InboundService(session).accept(_inbound("mirror-msg-retry"))
+        job = await session.scalar(select(AmoCrmMirrorJob))
+        assert job is not None
+        job.max_attempts = 2
+        await session.flush()
 
     worker = AmoCrmMirrorWorker(
         session_factory,
@@ -482,7 +558,6 @@ async def test_adapter_failure_retries_on_pg_clock_then_dies(
         adapter=NoopAmoCrmMirrorAdapter(
             forced_outcome=AmoCrmMirrorOutcome.TRANSIENT_ERROR
         ),
-        max_attempts=2,
         retry_delay_seconds=1,
     )
 

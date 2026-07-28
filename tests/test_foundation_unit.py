@@ -653,6 +653,7 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "ck_ingress_event_type",
         "ck_ingress_status",
         "ck_ingress_attempt_count_nonnegative",
+        "ck_ingress_max_attempts_positive",
         "ck_ingress_lease_version_nonnegative",
         "ck_reply_plans_plan_type",
         "ck_reply_plans_status",

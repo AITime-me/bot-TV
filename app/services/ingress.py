@@ -68,8 +68,16 @@ class SyntheticIngressAdapter:
     are out of scope for BOT-CORE-INGRESS-01B.
     """
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ) -> None:
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
         self._session_factory = session_factory
+        self._max_attempts = max_attempts
 
     async def accept(self, event: SyntheticIngressEvent) -> IngressAck:
         """Persist first; ACK only after commit succeeds."""
@@ -87,6 +95,7 @@ class SyntheticIngressAdapter:
                     event_type=IngressEventType(event.event_type),
                     envelope_json=event.safe_envelope(),
                     correlation_id=correlation_id,
+                    max_attempts=self._max_attempts,
                 )
                 ack = IngressAck(
                     accepted=True,
@@ -117,13 +126,11 @@ class IngressWorker:
         *,
         worker_id: str,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
-        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
-        self._max_attempts = max_attempts
         self._retry_delay_seconds = retry_delay_seconds
 
     async def claim_one(self) -> IngressClaim | None:
@@ -132,7 +139,6 @@ class IngressWorker:
                 session,
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
-                max_attempts=self._max_attempts,
             )
 
     async def process_claimed(self, claim: IngressClaim) -> IngressProcessResult:
@@ -173,7 +179,6 @@ class IngressWorker:
                 lease_token=claim.lease_token,
                 lease_version=claim.lease_version,
                 error_code=error_code,
-                max_attempts=self._max_attempts,
                 retry_delay_seconds=self._retry_delay_seconds,
             )
 

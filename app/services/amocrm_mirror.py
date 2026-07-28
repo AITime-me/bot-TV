@@ -193,14 +193,12 @@ class AmoCrmMirrorWorker:
         worker_id: str,
         adapter: NoopAmoCrmMirrorAdapter | None = None,
         lease_seconds: int = mirror_repo.DEFAULT_LEASE_SECONDS,
-        max_attempts: int = mirror_repo.DEFAULT_MAX_ATTEMPTS,
         retry_delay_seconds: int = mirror_repo.DEFAULT_RETRY_DELAY_SECONDS,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
         self._adapter = adapter if adapter is not None else NoopAmoCrmMirrorAdapter()
         self._lease_seconds = lease_seconds
-        self._max_attempts = max_attempts
         self._retry_delay_seconds = retry_delay_seconds
 
     @property
@@ -217,7 +215,6 @@ class AmoCrmMirrorWorker:
                 session,
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
-                max_attempts=self._max_attempts,
                 now=now,
             )
 
@@ -313,7 +310,6 @@ class AmoCrmMirrorWorker:
                 lease_token=claim.lease_token,
                 lease_version=claim.lease_version,
                 error_code=error_code,
-                max_attempts=self._max_attempts,
                 retry_delay_seconds=self._retry_delay_seconds,
             )
 

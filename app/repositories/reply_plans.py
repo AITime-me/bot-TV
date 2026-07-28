@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.clock import resolve_moment
@@ -41,6 +41,7 @@ class ReplyPlanClaim:
     not_before: datetime
     bot_response_delay_ms: int
     attempt_count: int
+    max_attempts: int
     lease_owner: str
     lease_token: uuid.UUID
     lease_version: int
@@ -57,6 +58,12 @@ class ReplyPlanClaim:
         )
 
 
+@dataclass(frozen=True)
+class ExhaustedReplyPlanLease:
+    plan_id: uuid.UUID
+    conversation_id: uuid.UUID
+
+
 def _row_to_claim(row: ReplyPlan) -> ReplyPlanClaim:
     if row.lease_token is None or row.lease_owner is None or row.lease_until is None:
         raise RuntimeError("REPLY_PLAN_LEASE_INCOMPLETE")
@@ -69,6 +76,7 @@ def _row_to_claim(row: ReplyPlan) -> ReplyPlanClaim:
         not_before=row.not_before,
         bot_response_delay_ms=row.bot_response_delay_ms,
         attempt_count=row.attempt_count,
+        max_attempts=row.max_attempts,
         lease_owner=row.lease_owner,
         lease_token=row.lease_token,
         lease_version=row.lease_version,
@@ -206,12 +214,71 @@ async def mark_ready_due_plans(
     return int(result.rowcount or 0)
 
 
+async def find_exhausted_lease(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> ExhaustedReplyPlanLease | None:
+    """Find one expired final attempt without taking a child-row lock."""
+    moment = await resolve_moment(session, now)
+    stmt = (
+        select(ReplyPlan.id, ReplyPlan.conversation_id)
+        .where(
+            ReplyPlan.status == ReplyPlanStatus.PROCESSING.value,
+            ReplyPlan.lease_until.is_not(None),
+            ReplyPlan.lease_until < moment,
+            ReplyPlan.attempt_count >= ReplyPlan.max_attempts,
+        )
+        .order_by(ReplyPlan.lease_until, ReplyPlan.created_at)
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return ExhaustedReplyPlanLease(
+        plan_id=row.id,
+        conversation_id=row.conversation_id,
+    )
+
+
+async def recover_exhausted_lease(
+    session: AsyncSession,
+    *,
+    plan_id: uuid.UUID,
+    now: datetime | None = None,
+) -> ReplyPlan | None:
+    """Terminalize one expired final attempt after its Conversation is locked."""
+    moment = await resolve_moment(session, now)
+    stmt = (
+        update(ReplyPlan)
+        .where(
+            ReplyPlan.id == plan_id,
+            ReplyPlan.status == ReplyPlanStatus.PROCESSING.value,
+            ReplyPlan.lease_until.is_not(None),
+            ReplyPlan.lease_until < moment,
+            ReplyPlan.attempt_count >= ReplyPlan.max_attempts,
+        )
+        .values(
+            status=ReplyPlanStatus.DEAD.value,
+            cancel_reason="LEASE_ATTEMPTS_EXHAUSTED",
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            updated_at=moment,
+        )
+        .returning(ReplyPlan.id)
+    )
+    recovered_id = await session.scalar(stmt)
+    if recovered_id is None:
+        return None
+    return await get_by_id(session, plan_id=recovered_id)
+
+
 async def claim_next(
     session: AsyncSession,
     *,
     worker_id: str,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: datetime | None = None,
 ) -> ReplyPlanClaim | None:
     """Claim one due ReplyPlan with FOR UPDATE SKIP LOCKED + fencing."""
@@ -226,7 +293,7 @@ async def claim_next(
         WITH candidate AS (
             SELECT id
             FROM reply_plans
-            WHERE attempt_count < :max_attempts
+            WHERE attempt_count < max_attempts
               AND not_before <= :now
               AND (
                     status = 'READY'
@@ -258,7 +325,6 @@ async def claim_next(
     plan_id = await session.scalar(
         stmt,
         {
-            "max_attempts": max_attempts,
             "now": moment,
             "worker_id": worker_id,
             "lease_token": str(lease_token),
@@ -318,7 +384,6 @@ async def fail_with_lease(
     lease_token: uuid.UUID,
     lease_version: int,
     error_code: str,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
     now: datetime | None = None,
 ) -> ReplyPlan:
@@ -333,7 +398,7 @@ async def fail_with_lease(
     ):
         raise StaleReplyPlanLeaseError("REPLY_PLAN_STALE_LEASE")
 
-    if plan.attempt_count >= max_attempts:
+    if plan.attempt_count >= plan.max_attempts:
         target = ReplyPlanStatus.DEAD
         not_before = plan.not_before
     else:

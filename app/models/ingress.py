@@ -102,6 +102,10 @@ class IngressEvent(Base):
             name="ck_ingress_attempt_count_nonnegative",
         ),
         CheckConstraint(
+            "max_attempts > 0",
+            name="ck_ingress_max_attempts_positive",
+        ),
+        CheckConstraint(
             "lease_version >= 0",
             name="ck_ingress_lease_version_nonnegative",
         ),
@@ -131,6 +135,12 @@ class IngressEvent(Base):
         nullable=False,
         default=0,
         server_default=text("0"),
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=5,
+        server_default=text("5"),
     )
     next_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

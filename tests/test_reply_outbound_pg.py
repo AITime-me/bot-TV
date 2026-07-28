@@ -15,6 +15,7 @@ from app.config import Settings
 from app.core.outbound_policy import OutboundAction, is_automatic_outbound_allowed
 from app.db.clock import db_now
 from app.db.session import session_scope
+from app.models.amocrm_mirror import AmoCrmMirrorJob, AmoCrmMirrorJobType
 from app.models.conversation import Conversation, ConversationOwnership
 from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import (
@@ -238,10 +239,22 @@ async def test_plan_unavailable_before_not_before_without_sleep(
     async with session_scope(session_factory) as session:
         result = await InboundService(session).accept(_inbound("msg-delay"))
         assert result.reply_plan is not None
-        not_before = result.reply_plan.not_before
+        plan_id = result.reply_plan.id
+
+    # The production delay is measured from the inbound transaction timestamp,
+    # not its commit. A remote test transaction may legitimately take over five
+    # seconds, so pin this specific row well ahead of the current PostgreSQL
+    # clock immediately before exercising the no-injected-clock claim path.
+    async with session_scope(session_factory) as session:
+        not_before = await db_now(session) + timedelta(hours=1)
+        await session.execute(
+            update(ReplyPlan)
+            .where(ReplyPlan.id == plan_id)
+            .values(not_before=not_before)
+        )
+
     worker = ReplyPlanWorker(session_factory, worker_id="w-delay")
-    # not_before is 5s ahead on the PostgreSQL clock; claim returns None without
-    # sleeping and without consulting the application host clock.
+    # Claim returns None without sleeping and without consulting the host clock.
     assert await worker.claim_one() is None
     assert await worker.claim_one(now=not_before - timedelta(milliseconds=1)) is None
 
@@ -303,11 +316,12 @@ async def test_reply_plan_retry_then_dead(
     async with session_scope(session_factory) as session:
         result = await InboundService(session).accept(_inbound("msg-dead"))
         assert result.reply_plan is not None
+        result.reply_plan.max_attempts = 2
+        await session.flush()
         now = result.reply_plan.not_before + timedelta(seconds=1)
     worker = ReplyPlanWorker(
         session_factory,
         worker_id="dead-w",
-        max_attempts=2,
         retry_delay_seconds=0,
     )
     first = await worker.claim_one(now=now)
@@ -324,6 +338,84 @@ async def test_reply_plan_retry_then_dead(
     assert second is not None
     dead = await worker.fail_claimed(second, error_code="boom2")
     assert dead.status == ReplyPlanStatus.DEAD.value
+
+
+@pytest.mark.asyncio
+async def test_expired_final_reply_plan_lease_recovers_to_dead_without_dispatch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        result = await InboundService(session).accept(_inbound("msg-final-plan-lease"))
+        assert result.reply_plan is not None
+        result.reply_plan.max_attempts = 1
+        await session.flush()
+        due = result.reply_plan.not_before + timedelta(seconds=1)
+        plan_id = result.reply_plan.id
+
+    crashed_worker = ReplyPlanWorker(session_factory, worker_id="plan-crashed")
+    stale_claim = await crashed_worker.claim_one(now=due)
+    assert stale_claim is not None
+    assert stale_claim.attempt_count == stale_claim.max_attempts == 1
+
+    async with session_scope(session_factory) as session:
+        await session.execute(
+            update(ReplyPlan)
+            .where(ReplyPlan.id == plan_id)
+            .values(lease_until=due - timedelta(seconds=1))
+        )
+
+    recovery_worker = ReplyPlanWorker(session_factory, worker_id="plan-recovery")
+    assert await recovery_worker.claim_one(now=due) is None
+
+    async with session_scope(session_factory) as session:
+        plan = await session.get(ReplyPlan, plan_id)
+        assert plan is not None
+        assert plan.status == ReplyPlanStatus.DEAD.value
+        assert plan.attempt_count == plan.max_attempts == 1
+        assert plan.lease_owner is None
+        assert plan.lease_token is None
+        assert plan.lease_until is None
+        assert plan.lease_version == stale_claim.lease_version
+        assert plan.cancel_reason == "LEASE_ATTEMPTS_EXHAUSTED"
+        synthetic_count = await session.scalar(
+            select(func.count())
+            .select_from(OutboxMessage)
+            .where(
+                OutboxMessage.destination_type
+                == DestinationType.SYNTHETIC_OUTBOUND.value
+            )
+        )
+        assert synthetic_count == 0
+        dead_mirror_count = await session.scalar(
+            select(func.count())
+            .select_from(AmoCrmMirrorJob)
+            .where(
+                AmoCrmMirrorJob.job_type
+                == AmoCrmMirrorJobType.REPLY_PLAN_STATE_CHANGED.value,
+                AmoCrmMirrorJob.subject_id == plan_id,
+            )
+        )
+        assert dead_mirror_count == 1
+
+    with pytest.raises(StaleReplyPlanLeaseError):
+        async with session_scope(session_factory) as session:
+            await reply_plan_repo.complete_dispatched_with_lease(
+                session,
+                plan_id=plan_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+            )
+    with pytest.raises(StaleReplyPlanLeaseError):
+        async with session_scope(session_factory) as session:
+            await reply_plan_repo.fail_with_lease(
+                session,
+                plan_id=plan_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+                error_code="STALE_WORKER",
+            )
+
+    assert await recovery_worker.claim_one(now=due + timedelta(hours=1)) is None
 
 
 @pytest.mark.asyncio
@@ -580,6 +672,138 @@ async def test_outbound_fencing_and_early_not_before(
             )
     with pytest.raises(OutboundArbiterDenied, match="NOT_BEFORE"):
         await worker_b.process_claimed(claim_b2, now=due)
+
+
+@pytest.mark.asyncio
+async def test_expired_final_outbound_lease_recovers_to_dead_without_sink(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        result = await InboundService(session).accept(_inbound("msg-final-out-lease"))
+        assert result.reply_plan is not None
+        result.reply_plan.max_attempts = 1
+        await session.flush()
+        due = result.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-final-out")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter()
+    arbiter = OutboundArbiter(session_factory, sink=sink)
+    crashed_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-crashed",
+        arbiter=arbiter,
+    )
+    stale_claim = await crashed_worker.claim_one(now=due)
+    assert stale_claim is not None
+    assert stale_claim.outbound_id == dispatched.outbound_id
+    assert stale_claim.attempt_count == stale_claim.max_attempts == 1
+
+    async with session_scope(session_factory) as session:
+        await session.execute(
+            update(OutboxMessage)
+            .where(OutboxMessage.id == stale_claim.outbound_id)
+            .values(lease_until=due - timedelta(seconds=1))
+        )
+
+    recovery_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-recovery",
+        arbiter=arbiter,
+    )
+    assert await recovery_worker.claim_one(now=due) is None
+    assert sink.calls == []
+
+    async with session_scope(session_factory) as session:
+        outbound = await session.get(OutboxMessage, stale_claim.outbound_id)
+        assert outbound is not None
+        assert outbound.delivery_status == DeliveryStatus.DEAD.value
+        assert outbound.attempt_count == outbound.max_attempts == 1
+        assert outbound.lease_owner is None
+        assert outbound.lease_token is None
+        assert outbound.lease_until is None
+        assert outbound.lease_version == stale_claim.lease_version
+
+    with pytest.raises(StaleOutboundLeaseError):
+        async with session_scope(session_factory) as session:
+            await outbound_repo.mark_delivered_with_lease(
+                session,
+                outbound_id=stale_claim.outbound_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+            )
+    with pytest.raises(StaleOutboundLeaseError):
+        async with session_scope(session_factory) as session:
+            await outbound_repo.fail_with_lease(
+                session,
+                outbound_id=stale_claim.outbound_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+            )
+
+    assert await recovery_worker.claim_one(now=due + timedelta(hours=1)) is None
+    assert sink.calls == []
+
+
+@pytest.mark.asyncio
+async def test_outbound_persisted_custom_max_attempts_controls_claim_and_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        result = await InboundService(session).accept(_inbound("msg-out-custom-max"))
+        assert result.reply_plan is not None
+        result.reply_plan.max_attempts = 2
+        await session.flush()
+        due = result.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-custom-max")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter(
+        forced_outcome=SyntheticOutboundOutcome.TRANSIENT_ERROR,
+    )
+    worker = OutboundWorker(
+        session_factory,
+        worker_id="out-custom-max",
+        arbiter=OutboundArbiter(session_factory, sink=sink),
+    )
+
+    first = await worker.claim_one(now=due)
+    assert first is not None
+    assert first.outbound_id == dispatched.outbound_id
+    assert first.attempt_count == 1
+    assert first.max_attempts == 2
+    with pytest.raises(OutboundArbiterDenied, match="SYNTHETIC_TRANSIENT"):
+        await worker.process_claimed(first, now=due)
+
+    async with session_scope(session_factory) as session:
+        row = await session.get(OutboxMessage, first.outbound_id)
+        assert row is not None
+        assert row.delivery_status == DeliveryStatus.FAILED.value
+        assert row.attempt_count == 1
+        assert row.max_attempts == 2
+        assert row.not_before is not None
+        retry_at = row.not_before
+
+    second = await worker.claim_one(now=retry_at)
+    assert second is not None
+    assert second.attempt_count == second.max_attempts == 2
+    with pytest.raises(OutboundArbiterDenied, match="SYNTHETIC_TRANSIENT"):
+        await worker.process_claimed(second, now=retry_at)
+
+    async with session_scope(session_factory) as session:
+        row = await session.get(OutboxMessage, first.outbound_id)
+        assert row is not None
+        assert row.delivery_status == DeliveryStatus.DEAD.value
+        assert row.attempt_count == row.max_attempts == 2
+
+    assert len(sink.calls) == 2
+    assert await worker.claim_one(now=retry_at + timedelta(hours=1)) is None
 
 
 @pytest.mark.asyncio

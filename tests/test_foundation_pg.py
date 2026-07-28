@@ -91,6 +91,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "DEAD"}),
     ),
     "ck_ingress_attempt_count_nonnegative": ("attempt_count", frozenset()),
+    "ck_ingress_max_attempts_positive": ("max_attempts", frozenset()),
     "ck_ingress_lease_version_nonnegative": ("lease_version", frozenset()),
     "ck_reply_plans_plan_type": (
         "plan_type",

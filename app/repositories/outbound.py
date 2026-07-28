@@ -41,6 +41,7 @@ class OutboundClaim:
     delivery_status: str
     not_before: datetime | None
     attempt_count: int
+    max_attempts: int
     lease_owner: str
     lease_token: uuid.UUID
     lease_version: int
@@ -72,6 +73,7 @@ def _row_to_claim(row: OutboxMessage) -> OutboundClaim:
         delivery_status=row.delivery_status,
         not_before=row.not_before,
         attempt_count=row.attempt_count,
+        max_attempts=row.max_attempts,
         lease_owner=row.lease_owner,
         lease_token=row.lease_token,
         lease_version=row.lease_version,
@@ -151,17 +153,46 @@ async def insert_synthetic_outbound_if_absent(
     return row, inserted is not None
 
 
+async def recover_exhausted_leases(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Terminalize expired final attempts without invoking the outbound sink."""
+    moment = await resolve_moment(session, now)
+    stmt = (
+        update(OutboxMessage)
+        .where(
+            OutboxMessage.destination_type
+            == DestinationType.SYNTHETIC_OUTBOUND.value,
+            OutboxMessage.delivery_status == DeliveryStatus.PROCESSING.value,
+            OutboxMessage.lease_until.is_not(None),
+            OutboxMessage.lease_until < moment,
+            OutboxMessage.attempt_count >= OutboxMessage.max_attempts,
+        )
+        .values(
+            delivery_status=DeliveryStatus.DEAD.value,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            updated_at=moment,
+        )
+    )
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
 async def claim_next(
     session: AsyncSession,
     *,
     worker_id: str,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: datetime | None = None,
 ) -> OutboundClaim | None:
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     moment = await resolve_moment(session, now)
+    await recover_exhausted_leases(session, now=moment)
     lease_until = moment + timedelta(seconds=lease_seconds)
     lease_token = uuid.uuid4()
     stmt = text(
@@ -170,7 +201,7 @@ async def claim_next(
             SELECT id
             FROM outbox_messages
             WHERE destination_type = 'SYNTHETIC_OUTBOUND'
-              AND attempt_count < :max_attempts
+              AND attempt_count < max_attempts
               AND (not_before IS NULL OR not_before <= :now)
               AND (
                     delivery_status = 'PENDING'
@@ -201,7 +232,6 @@ async def claim_next(
     outbound_id = await session.scalar(
         stmt,
         {
-            "max_attempts": max_attempts,
             "now": moment,
             "worker_id": worker_id,
             "lease_token": str(lease_token),
@@ -260,7 +290,6 @@ async def fail_with_lease(
     outbound_id: uuid.UUID,
     lease_token: uuid.UUID,
     lease_version: int,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
     now: datetime | None = None,
 ) -> OutboxMessage:
@@ -275,7 +304,7 @@ async def fail_with_lease(
     ):
         raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
 
-    if row.attempt_count >= max_attempts:
+    if row.attempt_count >= row.max_attempts:
         target = DeliveryStatus.DEAD
         not_before = row.not_before
     else:

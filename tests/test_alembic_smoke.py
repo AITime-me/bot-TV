@@ -98,6 +98,10 @@ _EXPECTED_UNIQUES_09 = {
     "uq_amocrm_mirror_key",
 }
 
+_EXPECTED_CHECKS_10 = {
+    "ck_ingress_max_attempts_positive": "max_attempts > 0",
+}
+
 
 def test_alembic_metadata_imports() -> None:
     assert Conversation.__tablename__ == "conversations"
@@ -122,17 +126,22 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     config = Config(str(root / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions())
-    assert len(revisions) >= 4
+    assert len(revisions) >= 5
     by_id = {rev.revision: rev for rev in revisions}
     assert "20260727_01a_foundation" in by_id
     assert "20260727_01b_ingress" in by_id
     assert "20260727_01c_reply_outbound" in by_id
     assert "20260728_09_amocrm_mirror" in by_id
+    assert "20260728_10_attempt_exhaustion" in by_id
     assert by_id["20260727_01b_ingress"].down_revision == "20260727_01a_foundation"
     assert by_id["20260727_01c_reply_outbound"].down_revision == "20260727_01b_ingress"
     assert (
         by_id["20260728_09_amocrm_mirror"].down_revision
         == "20260727_01c_reply_outbound"
+    )
+    assert (
+        by_id["20260728_10_attempt_exhaustion"].down_revision
+        == "20260728_09_amocrm_mirror"
     )
 
     for revision_id in (
@@ -140,6 +149,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260727_01b_ingress",
         "20260727_01c_reply_outbound",
         "20260728_09_amocrm_mirror",
+        "20260728_10_attempt_exhaustion",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -189,6 +199,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_09 = (
         root / "alembic" / "versions" / "20260728_09_amocrm_mirror.py"
     ).read_text(encoding="utf-8")
+    migration_10 = (
+        root / "alembic" / "versions" / "20260728_10_attempt_exhaustion.py"
+    ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
     model_uniques: set[str] = set()
@@ -207,6 +220,7 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert _EXPECTED_UNIQUES_01C <= model_uniques
     assert set(_EXPECTED_CHECKS_09) <= set(model_checks)
     assert _EXPECTED_UNIQUES_09 <= model_uniques
+    assert set(_EXPECTED_CHECKS_10) <= set(model_checks)
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -262,3 +276,8 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert name in migration_09
 
     assert re.search(r'name=["\']uq_amocrm_mirror_key["\']', migration_09)
+
+    for name, sql in _EXPECTED_CHECKS_10.items():
+        assert name in migration_10
+        assert model_checks[name] == sql
+        assert sql in migration_10

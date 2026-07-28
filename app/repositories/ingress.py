@@ -39,6 +39,7 @@ class IngressClaim:
     event_type: str
     status: str
     attempt_count: int
+    max_attempts: int
     lease_owner: str
     lease_token: uuid.UUID
     lease_version: int
@@ -73,6 +74,7 @@ def _row_to_claim(row: IngressEvent) -> IngressClaim:
         event_type=row.event_type,
         status=row.status,
         attempt_count=row.attempt_count,
+        max_attempts=row.max_attempts,
         lease_owner=row.lease_owner,
         lease_token=row.lease_token,
         lease_version=row.lease_version,
@@ -112,12 +114,16 @@ async def insert_if_absent(
     event_type: IngressEventType,
     envelope_json: dict[str, Any],
     correlation_id: uuid.UUID,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> tuple[IngressEvent, bool]:
     """Idempotently insert RECEIVED ingress row. Does not commit.
 
     Uses INSERT ... ON CONFLICT DO NOTHING on
     uq_ingress_channel_external_event_id, then SELECT. Assumes READ COMMITTED.
     """
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be positive")
+
     existing = await get_by_channel_external(
         session,
         channel=channel,
@@ -137,6 +143,7 @@ async def insert_if_absent(
             event_type=event_type.value,
             status=IngressStatus.RECEIVED.value,
             attempt_count=0,
+            max_attempts=max_attempts,
             next_attempt_at=None,
             lease_owner=None,
             lease_token=None,
@@ -162,12 +169,40 @@ async def insert_if_absent(
     return event, inserted is not None
 
 
+async def recover_exhausted_leases(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Terminalize expired final attempts without running business processing."""
+    moment = now or _utcnow()
+    stmt = (
+        update(IngressEvent)
+        .where(
+            IngressEvent.status == IngressStatus.PROCESSING.value,
+            IngressEvent.lease_until.is_not(None),
+            IngressEvent.lease_until < moment,
+            IngressEvent.attempt_count >= IngressEvent.max_attempts,
+        )
+        .values(
+            status=IngressStatus.DEAD.value,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            next_attempt_at=None,
+            error_code="LEASE_ATTEMPTS_EXHAUSTED",
+            updated_at=moment,
+        )
+    )
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
 async def claim_next(
     session: AsyncSession,
     *,
     worker_id: str,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: datetime | None = None,
 ) -> IngressClaim | None:
     """Atomically claim one claimable ingress event for a worker.
@@ -178,10 +213,9 @@ async def claim_next(
     """
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
-    if max_attempts <= 0:
-        raise ValueError("max_attempts must be positive")
 
     moment = now or _utcnow()
+    await recover_exhausted_leases(session, now=moment)
     lease_until = moment + timedelta(seconds=lease_seconds)
     lease_token = uuid.uuid4()
 
@@ -192,7 +226,7 @@ async def claim_next(
         WITH candidate AS (
             SELECT id
             FROM ingress_events
-            WHERE attempt_count < :max_attempts
+            WHERE attempt_count < max_attempts
               AND (
                     status = 'RECEIVED'
                  OR (status = 'FAILED'
@@ -225,7 +259,6 @@ async def claim_next(
     event_id = await session.scalar(
         stmt,
         {
-            "max_attempts": max_attempts,
             "now": moment,
             "worker_id": worker_id,
             "lease_token": str(lease_token),
@@ -289,7 +322,6 @@ async def fail_with_lease(
     lease_token: uuid.UUID,
     lease_version: int,
     error_code: str,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
     now: datetime | None = None,
 ) -> IngressEvent:
@@ -305,7 +337,7 @@ async def fail_with_lease(
     ):
         raise StaleIngressLeaseError("INGRESS_STALE_LEASE")
 
-    if event.attempt_count >= max_attempts:
+    if event.attempt_count >= event.max_attempts:
         target = IngressStatus.DEAD
         next_attempt_at = None
     else:

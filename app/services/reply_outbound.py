@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.clock import resolve_moment
 from app.db.session import session_scope
 from app.models.conversation import ConversationOwnership
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
@@ -16,7 +17,6 @@ from app.repositories import reply_plans as reply_plan_repo
 from app.repositories.outbound import OutboundClaim
 from app.repositories.reply_plans import (
     DEFAULT_LEASE_SECONDS,
-    DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_DELAY_SECONDS,
     ReplyPlanClaim,
     StaleReplyPlanLeaseError,
@@ -50,23 +50,46 @@ class ReplyPlanWorker:
         *,
         worker_id: str,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
-        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
-        self._max_attempts = max_attempts
         self._retry_delay_seconds = retry_delay_seconds
 
     async def claim_one(self, *, now: datetime | None = None) -> ReplyPlanClaim | None:
         async with session_scope(self._session_factory) as session:
+            moment = await resolve_moment(session, now)
+            exhausted = await reply_plan_repo.find_exhausted_lease(
+                session,
+                now=moment,
+            )
+            if exhausted is not None:
+                # Recovery preserves the dialog lock order and emits the same
+                # terminal mirror fact as an explicit final failure.
+                await conversation_repo.lock_for_update(
+                    session,
+                    conversation_id=exhausted.conversation_id,
+                )
+                recovered = await reply_plan_repo.recover_exhausted_lease(
+                    session,
+                    plan_id=exhausted.plan_id,
+                    now=moment,
+                )
+                if recovered is not None:
+                    await enqueue_reply_plan_state_changed(
+                        session,
+                        conversation_id=recovered.conversation_id,
+                        plan_id=recovered.id,
+                        plan_status=recovered.status,
+                        context_version=recovered.context_version,
+                        correlation_id=recovered.correlation_id,
+                    )
             return await reply_plan_repo.claim_next(
                 session,
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
-                max_attempts=self._max_attempts,
-                now=now,
+                now=moment,
             )
 
     async def dispatch_claimed(
@@ -110,7 +133,7 @@ class ReplyPlanWorker:
                         payload_json=_outbound_payload_from_plan(claim.payload_json),
                         correlation_id=claim.correlation_id,
                         not_before=claim.not_before,
-                        max_attempts=self._max_attempts,
+                        max_attempts=plan_row.max_attempts,
                     )
                 )
                 plan = await reply_plan_repo.complete_dispatched_with_lease(
@@ -160,7 +183,6 @@ class ReplyPlanWorker:
                 lease_token=claim.lease_token,
                 lease_version=claim.lease_version,
                 error_code=error_code,
-                max_attempts=self._max_attempts,
                 retry_delay_seconds=self._retry_delay_seconds,
             )
             if plan.status == ReplyPlanStatus.DEAD.value:
@@ -185,13 +207,11 @@ class OutboundWorker:
         worker_id: str,
         arbiter: OutboundArbiter,
         lease_seconds: int = outbound_repo.DEFAULT_LEASE_SECONDS,
-        max_attempts: int = outbound_repo.DEFAULT_MAX_ATTEMPTS,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
         self._arbiter = arbiter
         self._lease_seconds = lease_seconds
-        self._max_attempts = max_attempts
 
     async def claim_one(self, *, now: datetime | None = None) -> OutboundClaim | None:
         async with session_scope(self._session_factory) as session:
@@ -199,7 +219,6 @@ class OutboundWorker:
                 session,
                 worker_id=self._worker_id,
                 lease_seconds=self._lease_seconds,
-                max_attempts=self._max_attempts,
                 now=now,
             )
 

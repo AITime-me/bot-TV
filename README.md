@@ -89,6 +89,14 @@ amoCRM API, OAuth, внешних идентификаторов, entity-сем�
 note/task) и клиентского текста в этапе нет; payload собирается только по
 whitelist технических полей (см. `docs/adr/004-amocrm-mirror.md`).
 
+Attempt exhaustion (BOT-TV-10): `max_attempts` хранится в каждой durable-записи
+и является единственным лимитом для claim/fail/recovery. Перед обычным claim
+очередь терминализирует истёкший `PROCESSING`, уже использовавший последнюю
+разрешённую попытку: запись атомарно переходит в `DEAD`, lease очищается, а
+business handler, outbound sink и amoCRM adapter повторно не вызываются.
+ReplyPlan recovery сохраняет dialog lock order и ставит терминальное
+`REPLY_PLAN_STATE_CHANGED(DEAD)` в mirror outbox.
+
 Интеграция режимов с control plane `online-zapis-tv` запрещена до
 `CONTRACT-MODE-01` (см. `docs/adr/001-mode-contract-deferred.md`).
 

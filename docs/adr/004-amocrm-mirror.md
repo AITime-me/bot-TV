@@ -163,6 +163,15 @@ job becomes `DEAD`. There is no automatic resurrection, and editing `status` or
 contract. A safe operator replay/requeue — issuing a fresh lease and writing an
 audit trail — is a separate future action, deliberately not implemented here.
 
+BOT-TV-10 makes the persisted job `max_attempts` the only limit used by claim,
+explicit failure, and recovery. At the start of a claim cycle, an expired
+`PROCESSING` job with `attempt_count >= max_attempts` is atomically moved to
+`DEAD`, its lease is cleared, and the adapter is not called. The old
+token/version/owner therefore cannot complete or fail the terminal job. The
+same exhausted-lease rule applies to ingress, ReplyPlan, and synthetic outbound;
+ingress receives its persisted `max_attempts` column in
+`20260728_10_attempt_exhaustion`.
+
 ### Personal data
 
 `payload_json` is produced by a single whitelist builder, `safe_mirror_payload()`,

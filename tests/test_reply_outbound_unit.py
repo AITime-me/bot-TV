@@ -121,6 +121,7 @@ def _arbiter_claim(
         delivery_status=DeliveryStatus.PROCESSING.value,
         not_before=_FIXED_NOW - timedelta(seconds=1),
         attempt_count=1,
+        max_attempts=5,
         lease_owner="unit-worker",
         lease_token=lease_token,
         lease_version=lease_version,

@@ -212,12 +212,41 @@ async def enqueue_if_absent(
     return job, inserted is not None
 
 
+async def recover_exhausted_leases(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Terminalize expired final attempts without invoking the mirror adapter."""
+    moment = await resolve_moment(session, now)
+    stmt = (
+        update(AmoCrmMirrorJob)
+        .where(
+            AmoCrmMirrorJob.status == AmoCrmMirrorStatus.PROCESSING.value,
+            AmoCrmMirrorJob.lease_until.is_not(None),
+            AmoCrmMirrorJob.lease_until < moment,
+            AmoCrmMirrorJob.attempt_count >= AmoCrmMirrorJob.max_attempts,
+        )
+        .values(
+            status=AmoCrmMirrorStatus.DEAD.value,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            next_attempt_at=None,
+            error_code="LEASE_ATTEMPTS_EXHAUSTED",
+            skip_reason=None,
+            updated_at=moment,
+        )
+    )
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
 async def claim_next(
     session: AsyncSession,
     *,
     worker_id: str,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: datetime | None = None,
 ) -> AmoCrmMirrorClaim | None:
     """Claim one due mirror job with FOR UPDATE SKIP LOCKED + fencing.
@@ -226,10 +255,9 @@ async def claim_next(
     """
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
-    if max_attempts <= 0:
-        raise ValueError("max_attempts must be positive")
 
     moment = await resolve_moment(session, now)
+    await recover_exhausted_leases(session, now=moment)
     lease_until = moment + timedelta(seconds=lease_seconds)
     lease_token = uuid.uuid4()
     stmt = text(
@@ -237,7 +265,7 @@ async def claim_next(
         WITH candidate AS (
             SELECT id
             FROM amocrm_mirror_jobs
-            WHERE attempt_count < :max_attempts
+            WHERE attempt_count < max_attempts
               AND (
                     status = 'PENDING'
                  OR (status = 'FAILED'
@@ -270,7 +298,6 @@ async def claim_next(
     job_id = await session.scalar(
         stmt,
         {
-            "max_attempts": max_attempts,
             "now": moment,
             "worker_id": worker_id,
             "lease_token": str(lease_token),
@@ -379,7 +406,6 @@ async def fail_with_lease(
     lease_token: uuid.UUID,
     lease_version: int,
     error_code: str,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
     now: datetime | None = None,
 ) -> AmoCrmMirrorJob:
@@ -395,7 +421,7 @@ async def fail_with_lease(
     ):
         raise StaleAmoCrmMirrorLeaseError("AMOCRM_MIRROR_STALE_LEASE")
 
-    if job.attempt_count >= max_attempts:
+    if job.attempt_count >= job.max_attempts:
         target = AmoCrmMirrorStatus.DEAD
         next_attempt_at = None
     else:

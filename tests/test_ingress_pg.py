@@ -233,13 +233,12 @@ async def test_stale_worker_cannot_complete(
 async def test_retry_after_failed_then_dead_on_limit(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    adapter = SyntheticIngressAdapter(session_factory)
+    adapter = SyntheticIngressAdapter(session_factory, max_attempts=2)
     await adapter.accept(_event(external_event_id="evt-retry-dead"))
     worker = IngressWorker(
         session_factory,
         worker_id="worker-retry",
         lease_seconds=30,
-        max_attempts=2,
         retry_delay_seconds=0,
     )
 
@@ -257,6 +256,62 @@ async def test_retry_after_failed_then_dead_on_limit(
     assert dead.status == IngressStatus.DEAD.value
 
     assert await worker.claim_one() is None
+
+
+@pytest.mark.asyncio
+async def test_expired_final_ingress_lease_recovers_to_dead_without_processing(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = SyntheticIngressAdapter(session_factory, max_attempts=1)
+    await adapter.accept(_event(external_event_id="evt-final-lease"))
+
+    crashed_worker = IngressWorker(session_factory, worker_id="worker-crashed")
+    stale_claim = await crashed_worker.claim_one()
+    assert stale_claim is not None
+    assert stale_claim.attempt_count == stale_claim.max_attempts == 1
+
+    async with session_scope(session_factory) as session:
+        await session.execute(
+            update(IngressEvent)
+            .where(IngressEvent.id == stale_claim.event_id)
+            .values(lease_until=datetime.now(timezone.utc) - timedelta(seconds=5))
+        )
+
+    recovery_worker = IngressWorker(session_factory, worker_id="worker-recovery")
+    assert await recovery_worker.claim_one() is None
+
+    async with session_scope(session_factory) as session:
+        row = await session.get(IngressEvent, stale_claim.event_id)
+        assert row is not None
+        assert row.status == IngressStatus.DEAD.value
+        assert row.attempt_count == row.max_attempts == 1
+        assert row.lease_owner is None
+        assert row.lease_token is None
+        assert row.lease_until is None
+        assert row.lease_version == stale_claim.lease_version
+        assert row.error_code == "LEASE_ATTEMPTS_EXHAUSTED"
+        assert await session.scalar(select(func.count()).select_from(InboxMessage)) == 0
+        assert await session.scalar(select(func.count()).select_from(OutboxMessage)) == 0
+
+    with pytest.raises(StaleIngressLeaseError):
+        async with session_scope(session_factory) as session:
+            await ingress_repo.complete_with_lease(
+                session,
+                event_id=stale_claim.event_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+            )
+    with pytest.raises(StaleIngressLeaseError):
+        async with session_scope(session_factory) as session:
+            await ingress_repo.fail_with_lease(
+                session,
+                event_id=stale_claim.event_id,
+                lease_token=stale_claim.lease_token,
+                lease_version=stale_claim.lease_version,
+                error_code="STALE_WORKER",
+            )
+
+    assert await recovery_worker.claim_one() is None
 
 
 @pytest.mark.asyncio
