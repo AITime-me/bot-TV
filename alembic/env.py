@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.config import Settings, normalize_async_database_url
 from app.db.base import Base
 from app.models import (  # noqa: F401 — register metadata
+    AmoCrmMirrorJob,
     Conversation,
     InboxMessage,
     IngressEvent,

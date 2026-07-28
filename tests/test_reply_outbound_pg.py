@@ -314,7 +314,13 @@ async def test_reply_plan_retry_then_dead(
     assert first is not None
     failed = await worker.fail_claimed(first, error_code="boom")
     assert failed.status == ReplyPlanStatus.FAILED.value
-    second = await worker.claim_one(now=now)
+    # fail_claimed resolves next not_before on the PostgreSQL clock (it does
+    # not reuse the test's injected claim time), so retry must follow the
+    # value actually stored on the row.
+    retry_at = failed.not_before
+    assert retry_at is not None
+    assert await worker.claim_one(now=retry_at - timedelta(milliseconds=1)) is None
+    second = await worker.claim_one(now=retry_at)
     assert second is not None
     dead = await worker.fail_claimed(second, error_code="boom2")
     assert dead.status == ReplyPlanStatus.DEAD.value

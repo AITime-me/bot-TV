@@ -21,6 +21,7 @@ from app.repositories.reply_plans import (
     ReplyPlanClaim,
     StaleReplyPlanLeaseError,
 )
+from app.services.amocrm_mirror import enqueue_reply_plan_state_changed
 from app.services.outbound_arbiter import ArbiterAdmitResult, OutboundArbiter
 
 
@@ -118,6 +119,15 @@ class ReplyPlanWorker:
                     lease_token=claim.lease_token,
                     lease_version=claim.lease_version,
                 )
+                # Last table in the lock order.
+                await enqueue_reply_plan_state_changed(
+                    session,
+                    conversation_id=claim.conversation_id,
+                    plan_id=plan.id,
+                    plan_status=plan.status,
+                    context_version=claim.context_version,
+                    correlation_id=claim.correlation_id,
+                )
                 return ReplyPlanDispatchResult(
                     plan_id=plan.id,
                     plan_status=plan.status,
@@ -137,7 +147,14 @@ class ReplyPlanWorker:
         error_code: str,
     ) -> ReplyPlan:
         async with session_scope(self._session_factory) as session:
-            return await reply_plan_repo.fail_with_lease(
+            # A DEAD plan is mirrored from here, and that INSERT takes FOR KEY
+            # SHARE on the dialog row, so the conversation lock must come first
+            # even though the plan update alone would not need it.
+            await conversation_repo.lock_for_update(
+                session,
+                conversation_id=claim.conversation_id,
+            )
+            plan = await reply_plan_repo.fail_with_lease(
                 session,
                 plan_id=claim.plan_id,
                 lease_token=claim.lease_token,
@@ -146,6 +163,16 @@ class ReplyPlanWorker:
                 max_attempts=self._max_attempts,
                 retry_delay_seconds=self._retry_delay_seconds,
             )
+            if plan.status == ReplyPlanStatus.DEAD.value:
+                await enqueue_reply_plan_state_changed(
+                    session,
+                    conversation_id=claim.conversation_id,
+                    plan_id=plan.id,
+                    plan_status=plan.status,
+                    context_version=claim.context_version,
+                    correlation_id=claim.correlation_id,
+                )
+            return plan
 
 
 class OutboundWorker:

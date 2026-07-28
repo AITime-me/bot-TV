@@ -10,6 +10,7 @@ from app.db.session import session_scope
 from app.models.conversation import Conversation
 from app.repositories import conversations as conversation_repo
 from app.repositories import reply_plans as reply_plan_repo
+from app.services.amocrm_mirror import enqueue_manager_takeover
 
 
 @dataclass(frozen=True)
@@ -34,15 +35,12 @@ class ManagerTakeoverService:
         now: datetime | None = None,
     ) -> ManagerTakeoverResult:
         async with session_scope(self._session_factory) as session:
-            conversation, changed = await conversation_repo.apply_manager_takeover(
+            outcome = await apply_manager_takeover_in_session(
                 session,
                 conversation_id=conversation_id,
                 now=now,
             )
-            cancelled = await reply_plan_repo.cancel_open_plans_for_takeover(
-                session,
-                conversation_id=conversation_id,
-            )
+            conversation, cancelled, changed = outcome
             return ManagerTakeoverResult(
                 conversation_id=conversation.id,
                 changed=changed,
@@ -68,4 +66,12 @@ async def apply_manager_takeover_in_session(
         session,
         conversation_id=conversation_id,
     )
+    if changed:
+        # Last table in the lock order, after the dialog row lock taken by
+        # apply_manager_takeover and after the plan cancellations.
+        await enqueue_manager_takeover(
+            session,
+            conversation_id=conversation.id,
+            correlation_id=uuid.uuid4(),
+        )
     return conversation, cancelled, changed

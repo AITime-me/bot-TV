@@ -73,9 +73,14 @@ async def truncate_foundation_tables(
             has_reply_plans = await session.scalar(
                 text("SELECT to_regclass('public.reply_plans') IS NOT NULL")
             )
+            has_mirror_jobs = await session.scalar(
+                text("SELECT to_regclass('public.amocrm_mirror_jobs') IS NOT NULL")
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
+            if has_mirror_jobs:
+                tables.insert(0, "amocrm_mirror_jobs")
             if has_ingress:
                 tables.append("ingress_events")
             await session.execute(

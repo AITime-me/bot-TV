@@ -8,7 +8,14 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import CheckConstraint, UniqueConstraint
 
 from app.db.base import Base
-from app.models import Conversation, InboxMessage, IngressEvent, OutboxMessage, ReplyPlan
+from app.models import (
+    AmoCrmMirrorJob,
+    Conversation,
+    InboxMessage,
+    IngressEvent,
+    OutboxMessage,
+    ReplyPlan,
+)
 
 
 _EXPECTED_CHECKS_01A_STABLE = {
@@ -65,6 +72,32 @@ _EXPECTED_UNIQUES_01C = {
     "uq_outbox_reply_plan_destination",
 }
 
+_EXPECTED_CHECKS_09 = {
+    "ck_amocrm_mirror_job_type": (
+        "job_type IN ('CLIENT_MESSAGE_RECEIVED_META', "
+        "'REPLY_PLAN_STATE_CHANGED', 'MANAGER_TAKEOVER', "
+        "'OUTBOUND_DELIVERED_META')"
+    ),
+    "ck_amocrm_mirror_subject_kind": (
+        "subject_kind IN ('CONVERSATION', 'INBOX_MESSAGE', 'REPLY_PLAN', "
+        "'OUTBOX_MESSAGE')"
+    ),
+    "ck_amocrm_mirror_status": (
+        "status IN ('PENDING', 'PROCESSING', 'MIRRORED', 'SKIPPED', "
+        "'FAILED', 'DEAD')"
+    ),
+    "ck_amocrm_mirror_attempt_count_nonnegative": "attempt_count >= 0",
+    "ck_amocrm_mirror_max_attempts_positive": "max_attempts > 0",
+    "ck_amocrm_mirror_lease_version_nonnegative": "lease_version >= 0",
+    "ck_amocrm_mirror_context_version_nonnegative": (
+        "context_version IS NULL OR context_version >= 0"
+    ),
+}
+
+_EXPECTED_UNIQUES_09 = {
+    "uq_amocrm_mirror_key",
+}
+
 
 def test_alembic_metadata_imports() -> None:
     assert Conversation.__tablename__ == "conversations"
@@ -72,6 +105,7 @@ def test_alembic_metadata_imports() -> None:
     assert OutboxMessage.__tablename__ == "outbox_messages"
     assert IngressEvent.__tablename__ == "ingress_events"
     assert ReplyPlan.__tablename__ == "reply_plans"
+    assert AmoCrmMirrorJob.__tablename__ == "amocrm_mirror_jobs"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -79,6 +113,7 @@ def test_alembic_metadata_imports() -> None:
         "outbox_messages",
         "ingress_events",
         "reply_plans",
+        "amocrm_mirror_jobs",
     }
 
 
@@ -87,18 +122,24 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     config = Config(str(root / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions())
-    assert len(revisions) >= 3
+    assert len(revisions) >= 4
     by_id = {rev.revision: rev for rev in revisions}
     assert "20260727_01a_foundation" in by_id
     assert "20260727_01b_ingress" in by_id
     assert "20260727_01c_reply_outbound" in by_id
+    assert "20260728_09_amocrm_mirror" in by_id
     assert by_id["20260727_01b_ingress"].down_revision == "20260727_01a_foundation"
     assert by_id["20260727_01c_reply_outbound"].down_revision == "20260727_01b_ingress"
+    assert (
+        by_id["20260728_09_amocrm_mirror"].down_revision
+        == "20260727_01c_reply_outbound"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
         "20260727_01b_ingress",
         "20260727_01c_reply_outbound",
+        "20260728_09_amocrm_mirror",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -118,6 +159,21 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert "'SENT'" not in reply
     assert "op.drop_table" in reply
 
+    mirror = Path(by_id["20260728_09_amocrm_mirror"].path).read_text(encoding="utf-8")
+    assert "amocrm_mirror_jobs" in mirror
+    assert "op.create_table" in mirror
+    assert 'op.drop_table("amocrm_mirror_jobs")' in mirror
+    assert "'SENT'" not in mirror
+    # CURSOR-09 ships one table only: no external-entity mapping, no direction
+    # column, and no amoCRM entity semantics.
+    assert mirror.count("op.create_table(") == 1
+    for absent in (
+        "amocrm_entity_links",
+        "external_entity_id",
+        'sa.Column("direction"',
+    ):
+        assert absent not in mirror, f"out-of-scope object in migration: {absent}"
+
 
 def test_model_migration_check_and_unique_parity() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -129,6 +185,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_01c = (
         root / "alembic" / "versions" / "20260727_01c_reply_outbound.py"
+    ).read_text(encoding="utf-8")
+    migration_09 = (
+        root / "alembic" / "versions" / "20260728_09_amocrm_mirror.py"
     ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
@@ -146,6 +205,8 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert _EXPECTED_UNIQUES_01B <= model_uniques
     assert set(_EXPECTED_CHECKS_01C) <= set(model_checks)
     assert _EXPECTED_UNIQUES_01C <= model_uniques
+    assert set(_EXPECTED_CHECKS_09) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_09 <= model_uniques
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -190,3 +251,14 @@ def test_model_migration_check_and_unique_parity() -> None:
         r'name=["\']uq_reply_plans_conversation_context_version["\']',
         migration_01c,
     )
+
+    for name, sql in _EXPECTED_CHECKS_09.items():
+        assert name in migration_09
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_09, f"{name} missing {token}"
+
+    for name in _EXPECTED_UNIQUES_09:
+        assert name in migration_09
+
+    assert re.search(r'name=["\']uq_amocrm_mirror_key["\']', migration_09)

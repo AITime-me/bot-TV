@@ -656,6 +656,10 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "ck_ingress_lease_version_nonnegative",
         "ck_reply_plans_plan_type",
         "ck_reply_plans_status",
+        "ck_amocrm_mirror_job_type",
+        "ck_amocrm_mirror_subject_kind",
+        "ck_amocrm_mirror_status",
+        "ck_amocrm_mirror_context_version_nonnegative",
     }
     expected_uniques = {
         "uq_conversations_channel_external_id",
@@ -665,6 +669,7 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "uq_outbox_reply_plan_destination",
         "uq_ingress_channel_external_event_id",
         "uq_reply_plans_conversation_context_version",
+        "uq_amocrm_mirror_key",
     }
     for name in expected_checks | expected_uniques:
         assert name in rendered, f"missing constraint in metadata DDL: {name}"

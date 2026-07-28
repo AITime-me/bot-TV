@@ -18,6 +18,7 @@ from app.repositories import conversations as conversation_repo
 from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.repositories.outbound import OutboundClaim, StaleOutboundLeaseError
+from app.services.amocrm_mirror import enqueue_outbound_delivered
 from app.services.synthetic_outbound import (
     SyntheticOutboundAdapter,
     SyntheticOutboundOutcome,
@@ -178,6 +179,18 @@ class OutboundArbiter:
             outbound_id=claim.outbound_id,
             lease_token=claim.lease_token,
             lease_version=claim.lease_version,
+        )
+        # Last table in the lock order; the dialog row is already locked above.
+        await enqueue_outbound_delivered(
+            session,
+            conversation_id=delivered.conversation_id,
+            outbound_id=delivered.id,
+            context_version=delivered.context_version,
+            correlation_id=(
+                delivered.correlation_id
+                if delivered.correlation_id is not None
+                else uuid.uuid4()
+            ),
         )
         return ArbiterAdmitResult(
             admitted=True,

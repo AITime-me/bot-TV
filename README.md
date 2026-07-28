@@ -75,6 +75,20 @@ ReplyPlan / Outbound Arbiter (01C): каждое новое inbox-сообщен
 входят (см. `docs/adr/002-durable-ingress.md` и
 `docs/adr/003-reply-outbound-arbiter.md`).
 
+amoCRM mirror (CURSOR-09): односторонний исходящий transactional outbox
+`amocrm_mirror_jobs`. Четыре доменных события bot-TV (новое клиентское
+сообщение, терминальное состояние `ReplyPlan` `DISPATCHED`/`DEAD`, manager
+takeover, допуск synthetic outbound) ставятся в очередь внутри той же
+транзакции, что и сам домен, поэтому job существует ровно тогда, когда
+изменение закоммичено. `amocrm_mirror_jobs` — последняя таблица в lock order
+`conversations → inbox_messages → reply_plans → outbox_messages →
+amocrm_mirror_jobs`. Worker захватывает job через lease с fencing token,
+перепроверяет живое состояние диалога под блокировкой и переводит устаревшее
+событие в терминальный `SKIPPED`. Adapter — локальный no-op sink: реального
+amoCRM API, OAuth, внешних идентификаторов, entity-семантики (lead/contact/
+note/task) и клиентского текста в этапе нет; payload собирается только по
+whitelist технических полей (см. `docs/adr/004-amocrm-mirror.md`).
+
 Интеграция режимов с control plane `online-zapis-tv` запрещена до
 `CONTRACT-MODE-01` (см. `docs/adr/001-mode-contract-deferred.md`).
 

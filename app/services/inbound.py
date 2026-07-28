@@ -21,6 +21,7 @@ from app.repositories import conversations as conversation_repo
 from app.repositories import messages as message_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.schemas.inbound import SyntheticInboundEvent
+from app.services.amocrm_mirror import enqueue_client_message_received
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,18 @@ class InboundService:
                 "context_version": conversation.context_version,
             },
         )
+
+        if created_inbox:
+            # Last table in the lock order: enqueued only after every other row
+            # of this dialog subtree has been written, and only for a genuinely
+            # new client message.
+            await enqueue_client_message_received(
+                self._session,
+                conversation_id=conversation.id,
+                inbox_id=inbox.id,
+                context_version=conversation.context_version,
+                correlation_id=uuid.uuid4(),
+            )
 
         return InboundAcceptResult(
             conversation=conversation,

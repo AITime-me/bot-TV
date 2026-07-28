@@ -338,8 +338,10 @@ _CLOCK_SENSITIVE_MODULES = (
     ("app", "repositories", "reply_plans.py"),
     ("app", "repositories", "outbound.py"),
     ("app", "repositories", "conversations.py"),
+    ("app", "repositories", "amocrm_mirror.py"),
     ("app", "services", "outbound_arbiter.py"),
     ("app", "services", "takeover.py"),
+    ("app", "services", "amocrm_mirror.py"),
 )
 
 

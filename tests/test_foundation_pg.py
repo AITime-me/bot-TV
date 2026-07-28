@@ -43,6 +43,7 @@ _FOUNDATION_TABLES = (
     "conversations",
     "ingress_events",
     "reply_plans",
+    "amocrm_mirror_jobs",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -115,6 +116,45 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     "ck_reply_plans_max_attempts_positive": ("max_attempts", frozenset()),
     "ck_reply_plans_lease_version_nonnegative": ("lease_version", frozenset()),
     "ck_reply_plans_context_version_nonnegative": ("context_version", frozenset()),
+    "ck_amocrm_mirror_job_type": (
+        "job_type",
+        frozenset(
+            {
+                "CLIENT_MESSAGE_RECEIVED_META",
+                "REPLY_PLAN_STATE_CHANGED",
+                "MANAGER_TAKEOVER",
+                "OUTBOUND_DELIVERED_META",
+            }
+        ),
+    ),
+    "ck_amocrm_mirror_subject_kind": (
+        "subject_kind",
+        frozenset(
+            {
+                "CONVERSATION",
+                "INBOX_MESSAGE",
+                "REPLY_PLAN",
+                "OUTBOX_MESSAGE",
+            }
+        ),
+    ),
+    "ck_amocrm_mirror_status": (
+        "status",
+        frozenset(
+            {
+                "PENDING",
+                "PROCESSING",
+                "MIRRORED",
+                "SKIPPED",
+                "FAILED",
+                "DEAD",
+            }
+        ),
+    ),
+    "ck_amocrm_mirror_attempt_count_nonnegative": ("attempt_count", frozenset()),
+    "ck_amocrm_mirror_max_attempts_positive": ("max_attempts", frozenset()),
+    "ck_amocrm_mirror_lease_version_nonnegative": ("lease_version", frozenset()),
+    "ck_amocrm_mirror_context_version_nonnegative": ("context_version", frozenset()),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
@@ -143,6 +183,7 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
         "conversation_id",
         "context_version",
     ),
+    "uq_amocrm_mirror_key": ("mirror_key",),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -159,6 +200,9 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_reply_plans_status_not_before": ("status", "not_before"),
     "ix_reply_plans_lease_until": ("lease_until",),
     "ix_reply_plans_conversation_id": ("conversation_id",),
+    "ix_amocrm_mirror_jobs_status_next_attempt_at": ("status", "next_attempt_at"),
+    "ix_amocrm_mirror_jobs_lease_until": ("lease_until",),
+    "ix_amocrm_mirror_jobs_conversation_id": ("conversation_id",),
 }
 
 
