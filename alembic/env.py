@@ -15,6 +15,7 @@ from app.models import (  # noqa: F401 — register metadata
     InboxMessage,
     IngressEvent,
     OutboxMessage,
+    ReplyPlan,
 )
 
 config = context.config

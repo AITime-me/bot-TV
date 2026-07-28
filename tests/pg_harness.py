@@ -70,17 +70,18 @@ async def truncate_foundation_tables(
             has_ingress = await session.scalar(
                 text("SELECT to_regclass('public.ingress_events') IS NOT NULL")
             )
+            has_reply_plans = await session.scalar(
+                text("SELECT to_regclass('public.reply_plans') IS NOT NULL")
+            )
+            tables = ["outbox_messages", "inbox_messages", "conversations"]
+            if has_reply_plans:
+                tables.insert(0, "reply_plans")
             if has_ingress:
-                await session.execute(
-                    text(
-                        "TRUNCATE outbox_messages, inbox_messages, conversations, "
-                        "ingress_events RESTART IDENTITY CASCADE"
-                    )
+                tables.append("ingress_events")
+            await session.execute(
+                text(
+                    "TRUNCATE "
+                    + ", ".join(tables)
+                    + " RESTART IDENTITY CASCADE"
                 )
-            else:
-                await session.execute(
-                    text(
-                        "TRUNCATE outbox_messages, inbox_messages, conversations "
-                        "RESTART IDENTITY CASCADE"
-                    )
-                )
+            )

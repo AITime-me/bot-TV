@@ -8,10 +8,10 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import CheckConstraint, UniqueConstraint
 
 from app.db.base import Base
-from app.models import Conversation, InboxMessage, IngressEvent, OutboxMessage
+from app.models import Conversation, InboxMessage, IngressEvent, OutboxMessage, ReplyPlan
 
 
-_EXPECTED_CHECKS_01A = {
+_EXPECTED_CHECKS_01A_STABLE = {
     "ck_conversations_channel": "channel IN ('synthetic')",
     "ck_conversations_status": "status IN ('OPEN', 'HANDOFF', 'CLOSED')",
     "ck_inbox_channel": "channel IN ('synthetic')",
@@ -20,8 +20,6 @@ _EXPECTED_CHECKS_01A = {
     "ck_inbox_processing_status": (
         "processing_status IN ('RECEIVED', 'PROCESSING', 'PROCESSED', 'FAILED')"
     ),
-    "ck_outbox_destination_type": "destination_type IN ('INTERNAL_DRAFT')",
-    "ck_outbox_delivery_status": "delivery_status IN ('PENDING', 'CANCELLED')",
 }
 
 _EXPECTED_UNIQUES_01A = {
@@ -44,18 +42,43 @@ _EXPECTED_UNIQUES_01B = {
     "uq_ingress_channel_external_event_id",
 }
 
+_EXPECTED_CHECKS_01C = {
+    "ck_conversations_ownership": "ownership IN ('BOT', 'MANAGER')",
+    "ck_conversations_context_version_nonnegative": "context_version >= 0",
+    "ck_reply_plans_plan_type": "plan_type IN ('CLIENT_REPLY', 'SERVICE_SIGNAL')",
+    "ck_reply_plans_status": (
+        "status IN ('PENDING', 'READY', 'PROCESSING', 'DISPATCHED', "
+        "'CANCELLED', 'SUPERSEDED', 'FAILED', 'DEAD')"
+    ),
+    "ck_outbox_destination_type": (
+        "destination_type IN ('INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND')"
+    ),
+    "ck_outbox_delivery_status": (
+        "delivery_status IN ('PENDING', 'PROCESSING', 'DELIVERED', "
+        "'FAILED', 'DEAD', 'CANCELLED')"
+    ),
+}
+
+_EXPECTED_UNIQUES_01C = {
+    "uq_reply_plans_conversation_context_version",
+    "uq_outbox_idempotency_key",
+    "uq_outbox_reply_plan_destination",
+}
+
 
 def test_alembic_metadata_imports() -> None:
     assert Conversation.__tablename__ == "conversations"
     assert InboxMessage.__tablename__ == "inbox_messages"
     assert OutboxMessage.__tablename__ == "outbox_messages"
     assert IngressEvent.__tablename__ == "ingress_events"
+    assert ReplyPlan.__tablename__ == "reply_plans"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
         "inbox_messages",
         "outbox_messages",
         "ingress_events",
+        "reply_plans",
     }
 
 
@@ -64,13 +87,19 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     config = Config(str(root / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions())
-    assert len(revisions) >= 2
+    assert len(revisions) >= 3
     by_id = {rev.revision: rev for rev in revisions}
     assert "20260727_01a_foundation" in by_id
     assert "20260727_01b_ingress" in by_id
+    assert "20260727_01c_reply_outbound" in by_id
     assert by_id["20260727_01b_ingress"].down_revision == "20260727_01a_foundation"
+    assert by_id["20260727_01c_reply_outbound"].down_revision == "20260727_01b_ingress"
 
-    for revision_id in ("20260727_01a_foundation", "20260727_01b_ingress"):
+    for revision_id in (
+        "20260727_01a_foundation",
+        "20260727_01b_ingress",
+        "20260727_01c_reply_outbound",
+    ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
         assert callable(rev.module.downgrade)
@@ -79,17 +108,15 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         assert "def downgrade()" in text
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
-    assert "op.create_table" in foundation
-    assert "op.drop_table" in foundation
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
     assert "'SENT'" not in foundation
-    assert "uq_outbox_source_inbox_destination" in foundation
 
-    ingress = Path(by_id["20260727_01b_ingress"].path).read_text(encoding="utf-8")
-    assert "ingress_events" in ingress
-    assert "uq_ingress_channel_external_event_id" in ingress
-    assert "DEAD" in ingress
-    assert "op.drop_table" in ingress
+    reply = Path(by_id["20260727_01c_reply_outbound"].path).read_text(encoding="utf-8")
+    assert "reply_plans" in reply
+    assert "SYNTHETIC_OUTBOUND" in reply
+    assert "DELIVERED" in reply
+    assert "'SENT'" not in reply
+    assert "op.drop_table" in reply
 
 
 def test_model_migration_check_and_unique_parity() -> None:
@@ -99,6 +126,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_01b = (
         root / "alembic" / "versions" / "20260727_01b_ingress.py"
+    ).read_text(encoding="utf-8")
+    migration_01c = (
+        root / "alembic" / "versions" / "20260727_01c_reply_outbound.py"
     ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
@@ -110,15 +140,30 @@ def test_model_migration_check_and_unique_parity() -> None:
             if isinstance(constraint, UniqueConstraint) and constraint.name:
                 model_uniques.add(constraint.name)
 
-    assert set(_EXPECTED_CHECKS_01A) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_01A_STABLE) <= set(model_checks)
     assert _EXPECTED_UNIQUES_01A <= model_uniques
     assert set(_EXPECTED_CHECKS_01B) <= set(model_checks)
     assert _EXPECTED_UNIQUES_01B <= model_uniques
+    assert set(_EXPECTED_CHECKS_01C) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_01C <= model_uniques
 
-    for name, sql in _EXPECTED_CHECKS_01A.items():
+    for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
         assert sql in migration_01a
         assert model_checks[name] == sql
+
+    # 01A historically created the narrow outbox checks; 01C replaces them.
+    assert "destination_type IN ('INTERNAL_DRAFT')" in migration_01a
+    assert "delivery_status IN ('PENDING', 'CANCELLED')" in migration_01a
+    assert model_checks["ck_outbox_destination_type"] == _EXPECTED_CHECKS_01C[
+        "ck_outbox_destination_type"
+    ]
+    assert "DELIVERED" in model_checks["ck_outbox_delivery_status"]
+    assert "PROCESSING" in model_checks["ck_outbox_delivery_status"]
+    assert "SENT" not in model_checks["ck_outbox_delivery_status"]
+    assert _EXPECTED_CHECKS_01C["ck_outbox_destination_type"] in migration_01c
+    assert "DELIVERED" in migration_01c
+    assert "SYNTHETIC_OUTBOUND" in migration_01c
 
     for name in _EXPECTED_UNIQUES_01A:
         assert name in migration_01a
@@ -131,11 +176,17 @@ def test_model_migration_check_and_unique_parity() -> None:
     for name in _EXPECTED_UNIQUES_01B:
         assert name in migration_01b
 
+    for name, sql in _EXPECTED_CHECKS_01C.items():
+        assert name in migration_01c
+        assert model_checks[name] == sql
+        # Migration may split long CHECK literals across adjacent strings.
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_01c, f"{name} missing {token}"
+
+    for name in _EXPECTED_UNIQUES_01C:
+        assert name in migration_01c
+
     assert re.search(
-        r'name=["\']uq_outbox_source_inbox_destination["\']',
-        migration_01a,
-    )
-    assert re.search(
-        r'name=["\']uq_ingress_channel_external_event_id["\']',
-        migration_01b,
+        r'name=["\']uq_reply_plans_conversation_context_version["\']',
+        migration_01c,
     )

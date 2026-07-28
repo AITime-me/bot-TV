@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class SyntheticOutboundOutcome(str, Enum):
+    SUCCESS = "SUCCESS"
+    TRANSIENT_ERROR = "TRANSIENT_ERROR"
+    PERMANENT_ERROR = "PERMANENT_ERROR"
+
+
+@dataclass(frozen=True, repr=False)
+class SyntheticOutboundRequest:
+    outbound_id: str
+    conversation_id: str
+    reply_plan_id: str | None
+    context_version: int | None
+    correlation_id: str | None
+    # Payload is never included in repr/logs.
+    _payload_schema: str
+
+    def __repr__(self) -> str:
+        return (
+            f"SyntheticOutboundRequest(outbound_id={self.outbound_id!r}, "
+            f"conversation_id={self.conversation_id!r}, "
+            f"reply_plan_id={self.reply_plan_id!r}, "
+            f"context_version={self.context_version!r}, "
+            f"correlation_id={self.correlation_id!r}, payload=<redacted>)"
+        )
+
+
+@dataclass(frozen=True)
+class SyntheticOutboundResult:
+    outcome: SyntheticOutboundOutcome
+    error_code: str | None = None
+
+
+class SyntheticOutboundAdapter:
+    """In-process synthetic sink. No HTTP, channels, AI, or client sends."""
+
+    def __init__(
+        self,
+        *,
+        forced_outcome: SyntheticOutboundOutcome = SyntheticOutboundOutcome.SUCCESS,
+    ) -> None:
+        self._forced_outcome = forced_outcome
+        self.calls: list[SyntheticOutboundRequest] = []
+
+    def deliver(self, request: SyntheticOutboundRequest) -> SyntheticOutboundResult:
+        self.calls.append(request)
+        if self._forced_outcome is SyntheticOutboundOutcome.SUCCESS:
+            return SyntheticOutboundResult(outcome=SyntheticOutboundOutcome.SUCCESS)
+        if self._forced_outcome is SyntheticOutboundOutcome.TRANSIENT_ERROR:
+            return SyntheticOutboundResult(
+                outcome=SyntheticOutboundOutcome.TRANSIENT_ERROR,
+                error_code="SYNTHETIC_TRANSIENT",
+            )
+        return SyntheticOutboundResult(
+            outcome=SyntheticOutboundOutcome.PERMANENT_ERROR,
+            error_code="SYNTHETIC_PERMANENT",
+        )

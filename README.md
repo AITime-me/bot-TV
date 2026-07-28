@@ -63,8 +63,17 @@ Durable ingress (01B): событие сначала фиксируется в `
 после успешного commit синтетический адаптер подтверждает приём. Worker
 захватывает строку через lease (`FOR UPDATE SKIP LOCKED` + fencing token) и
 затем переиспользует foundation `InboundService` для conversation/inbox/outbox.
-Реальные channel adapters, AI, ReplyPlan и Outbound Arbiter в этот этап не
-входят (см. `docs/adr/002-durable-ingress.md`).
+
+ReplyPlan / Outbound Arbiter (01C): каждое новое inbox-сообщение атомарно
+увеличивает `context_version`, supersede'ит незавершённые планы и создаёт
+`ReplyPlan` с `bot_response_delay_ms=5000` и сохранённым `not_before`.
+Единственный источник времени для `not_before`, `lease_until` и допуска —
+часы PostgreSQL (`app/db/clock.py`): часы хоста приложения не участвуют в
+планировании, поэтому рассинхронизация машины и сервера не сдвигает задержку.
+Единственная точка допуска исходящего synthetic sink — `OutboundArbiter`.
+Реальные channel adapters, AI и боевая отправка сообщений в этот этап не
+входят (см. `docs/adr/002-durable-ingress.md` и
+`docs/adr/003-reply-outbound-arbiter.md`).
 
 Интеграция режимов с control plane `online-zapis-tv` запрещена до
 `CONTRACT-MODE-01` (см. `docs/adr/001-mode-contract-deferred.md`).

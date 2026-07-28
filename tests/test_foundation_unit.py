@@ -570,8 +570,15 @@ def test_handoff_and_closed_block_automatic_reply() -> None:
 
 def test_outbox_has_no_sent_status() -> None:
     assert not hasattr(DeliveryStatus, "SENT")
-    assert {item.value for item in DeliveryStatus} == {"PENDING", "CANCELLED"}
-    assert {item.value for item in DestinationType} == {"INTERNAL_DRAFT"}
+    assert "SENT" not in {item.value for item in DeliveryStatus}
+    assert DeliveryStatus.PENDING.value in {item.value for item in DeliveryStatus}
+    assert DeliveryStatus.CANCELLED.value in {item.value for item in DeliveryStatus}
+    assert DestinationType.INTERNAL_DRAFT.value in {
+        item.value for item in DestinationType
+    }
+    assert DestinationType.SYNTHETIC_OUTBOUND.value in {
+        item.value for item in DestinationType
+    }
 
 
 def test_inbound_service_has_no_client_sender() -> None:
@@ -634,6 +641,8 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
     expected_checks = {
         "ck_conversations_channel",
         "ck_conversations_status",
+        "ck_conversations_ownership",
+        "ck_conversations_context_version_nonnegative",
         "ck_inbox_channel",
         "ck_inbox_direction",
         "ck_inbox_message_type",
@@ -645,12 +654,17 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "ck_ingress_status",
         "ck_ingress_attempt_count_nonnegative",
         "ck_ingress_lease_version_nonnegative",
+        "ck_reply_plans_plan_type",
+        "ck_reply_plans_status",
     }
     expected_uniques = {
         "uq_conversations_channel_external_id",
         "uq_inbox_channel_external_message_id",
         "uq_outbox_source_inbox_destination",
+        "uq_outbox_idempotency_key",
+        "uq_outbox_reply_plan_destination",
         "uq_ingress_channel_external_event_id",
+        "uq_reply_plans_conversation_context_version",
     }
     for name in expected_checks | expected_uniques:
         assert name in rendered, f"missing constraint in metadata DDL: {name}"
@@ -665,6 +679,7 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
                 unique_names.add(constraint.name)
     assert expected_checks <= check_names
     assert expected_uniques <= unique_names
-    assert "delivery_status IN ('PENDING', 'CANCELLED')" in rendered
-    assert "destination_type IN ('INTERNAL_DRAFT')" in rendered
+    assert "delivery_status IN ('PENDING', 'PROCESSING', 'DELIVERED', 'FAILED', 'DEAD', 'CANCELLED')" in rendered
+    assert "destination_type IN ('INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND')" in rendered
+    assert "'SENT'" not in rendered
     assert "delivery_status IN ('PENDING', 'CANCELLED', 'SENT')" not in rendered

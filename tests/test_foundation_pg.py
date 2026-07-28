@@ -42,6 +42,7 @@ _FOUNDATION_TABLES = (
     "inbox_messages",
     "conversations",
     "ingress_events",
+    "reply_plans",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -53,6 +54,8 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "status",
         frozenset({"OPEN", "HANDOFF", "CLOSED"}),
     ),
+    "ck_conversations_ownership": ("ownership", frozenset({"BOT", "MANAGER"})),
+    "ck_conversations_context_version_nonnegative": ("context_version", frozenset()),
     "ck_inbox_channel": ("channel", frozenset({"synthetic"})),
     "ck_inbox_direction": ("direction", frozenset({"INBOUND"})),
     "ck_inbox_message_type": ("message_type", frozenset({"TEXT"})),
@@ -62,12 +65,24 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     ),
     "ck_outbox_destination_type": (
         "destination_type",
-        frozenset({"INTERNAL_DRAFT"}),
+        frozenset({"INTERNAL_DRAFT", "SYNTHETIC_OUTBOUND"}),
     ),
     "ck_outbox_delivery_status": (
         "delivery_status",
-        frozenset({"PENDING", "CANCELLED"}),
+        frozenset(
+            {
+                "PENDING",
+                "PROCESSING",
+                "DELIVERED",
+                "FAILED",
+                "DEAD",
+                "CANCELLED",
+            }
+        ),
     ),
+    "ck_outbox_attempt_count_nonnegative": ("attempt_count", frozenset()),
+    "ck_outbox_max_attempts_positive": ("max_attempts", frozenset()),
+    "ck_outbox_lease_version_nonnegative": ("lease_version", frozenset()),
     "ck_ingress_channel": ("channel", frozenset({"synthetic"})),
     "ck_ingress_event_type": ("event_type", frozenset({"SYNTHETIC_MESSAGE"})),
     "ck_ingress_status": (
@@ -76,6 +91,30 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     ),
     "ck_ingress_attempt_count_nonnegative": ("attempt_count", frozenset()),
     "ck_ingress_lease_version_nonnegative": ("lease_version", frozenset()),
+    "ck_reply_plans_plan_type": (
+        "plan_type",
+        frozenset({"CLIENT_REPLY", "SERVICE_SIGNAL"}),
+    ),
+    "ck_reply_plans_status": (
+        "status",
+        frozenset(
+            {
+                "PENDING",
+                "READY",
+                "PROCESSING",
+                "DISPATCHED",
+                "CANCELLED",
+                "SUPERSEDED",
+                "FAILED",
+                "DEAD",
+            }
+        ),
+    ),
+    "ck_reply_plans_delay_nonnegative": ("bot_response_delay_ms", frozenset()),
+    "ck_reply_plans_attempt_count_nonnegative": ("attempt_count", frozenset()),
+    "ck_reply_plans_max_attempts_positive": ("max_attempts", frozenset()),
+    "ck_reply_plans_lease_version_nonnegative": ("lease_version", frozenset()),
+    "ck_reply_plans_context_version_nonnegative": ("context_version", frozenset()),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
@@ -91,9 +130,18 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
         "source_inbox_id",
         "destination_type",
     ),
+    "uq_outbox_idempotency_key": ("idempotency_key",),
+    "uq_outbox_reply_plan_destination": (
+        "reply_plan_id",
+        "destination_type",
+    ),
     "uq_ingress_channel_external_event_id": (
         "channel",
         "external_event_id",
+    ),
+    "uq_reply_plans_conversation_context_version": (
+        "conversation_id",
+        "context_version",
     ),
 }
 
@@ -101,10 +149,16 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_inbox_messages_conversation_id": ("conversation_id",),
     "ix_outbox_messages_conversation_id": ("conversation_id",),
     "ix_outbox_messages_source_inbox_id": ("source_inbox_id",),
+    "ix_outbox_messages_reply_plan_id": ("reply_plan_id",),
+    "ix_outbox_messages_status_not_before": ("delivery_status", "not_before"),
+    "ix_outbox_messages_lease_until": ("lease_until",),
     "ix_ingress_events_status_created_at": ("status", "created_at"),
     "ix_ingress_events_next_attempt_at": ("next_attempt_at",),
     "ix_ingress_events_lease_until": ("lease_until",),
     "ix_ingress_events_correlation_id": ("correlation_id",),
+    "ix_reply_plans_status_not_before": ("status", "not_before"),
+    "ix_reply_plans_lease_until": ("lease_until",),
+    "ix_reply_plans_conversation_id": ("conversation_id",),
 }
 
 
@@ -141,6 +195,8 @@ def _assert_check_semantics(name: str, definition: str) -> None:
     )
     if name.endswith("_nonnegative"):
         assert ">=" in definition or ">" in definition
+    if name.endswith("_positive"):
+        assert ">" in definition
 
 
 async def _assert_foundation_schema(session: AsyncSession) -> None:
@@ -559,8 +615,13 @@ async def test_no_sent_status_persisted(db_session: AsyncSession) -> None:
     assert statuses
     assert set(statuses) <= {
         DeliveryStatus.PENDING.value,
+        DeliveryStatus.PROCESSING.value,
+        DeliveryStatus.DELIVERED.value,
+        DeliveryStatus.FAILED.value,
+        DeliveryStatus.DEAD.value,
         DeliveryStatus.CANCELLED.value,
     }
+    assert "SENT" not in set(statuses)
 
 
 @pytest.mark.asyncio
