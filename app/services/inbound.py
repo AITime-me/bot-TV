@@ -6,8 +6,11 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.clock import db_statement_now
 from app.models.conversation import (
     Conversation,
+    ConversationStatus,
+    HandoffState,
     conversation_allows_automatic_reply,
 )
 from app.models.inbox import InboxMessage
@@ -19,6 +22,7 @@ from app.models.reply_plan import (
 )
 from app.repositories import conversations as conversation_repo
 from app.repositories import messages as message_repo
+from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.schemas.inbound import SyntheticInboundEvent
 from app.services.amocrm_mirror import enqueue_client_message_received
@@ -46,8 +50,16 @@ class InboundService:
     artifact; CLIENT_REPLY ReplyPlan is the orchestration unit for 01C.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        handoff_pause_seconds: int = 15 * 60,
+    ) -> None:
+        if not 10 * 60 <= handoff_pause_seconds <= 15 * 60:
+            raise ValueError("handoff_pause_seconds must be between 600 and 900")
         self._session = session
+        self._handoff_pause_seconds = handoff_pause_seconds
 
     async def accept(self, event: SyntheticInboundEvent) -> InboundAcceptResult:
         """Find/create conversation, idempotently store inbox and INTERNAL_DRAFT.
@@ -81,14 +93,30 @@ class InboundService:
             conversation_id=conversation.id,
         )
 
-        inbox, created_inbox = await message_repo.insert_inbox_if_absent(
+        inbox = await message_repo.get_inbox_by_external(
             self._session,
-            conversation_id=conversation.id,
             channel=channel,
             external_message_id=event.external_message_id,
-            payload_json=payload,
-            received_at=received_at,
         )
+        created_inbox = inbox is None
+        if created_inbox:
+            conversation = await conversation_repo.allocate_next_event_seq(
+                self._session,
+                conversation=conversation,
+            )
+            inbox, created_inbox = await message_repo.insert_inbox_if_absent(
+                self._session,
+                conversation_id=conversation.id,
+                channel=channel,
+                external_message_id=event.external_message_id,
+                conversation_event_seq=conversation.current_event_seq,
+                payload_json=payload,
+                received_at=received_at,
+            )
+        if inbox is None:
+            raise RuntimeError("INBOX_LOOKUP_FAILED")
+        if inbox.conversation_id != conversation.id:
+            raise RuntimeError("INBOX_CONVERSATION_MISMATCH")
 
         reply_plan: ReplyPlan | None = None
         reply_plan_created = False
@@ -102,6 +130,10 @@ class InboundService:
                 self._session,
                 conversation_id=conversation.id,
             )
+            await outbound_repo.cancel_unadmitted_for_conversation(
+                self._session,
+                conversation_id=conversation.id,
+            )
             if conversation_allows_automatic_reply(conversation):
                 reply_plan = await reply_plan_repo.create_client_reply_plan(
                     self._session,
@@ -109,11 +141,53 @@ class InboundService:
                     context_version=conversation.context_version,
                     correlation_id=uuid.uuid4(),
                     delay_ms=BOT_RESPONSE_DELAY_MS,
+                    manager_epoch=conversation.manager_epoch,
+                    event_seq_hwm=conversation.current_event_seq,
                     payload_json={
                         "schema": "synthetic.reply_plan.v1",
                         "plan_type": ReplyPlanType.CLIENT_REPLY.value,
                         "synthetic_token": "SYNTHETIC_OK",
                         "inbox_id": str(inbox.id),
+                    },
+                )
+                conversation.active_reply_plan_id = reply_plan.id
+                await self._session.flush()
+                reply_plan_created = True
+            elif (
+                conversation.status == ConversationStatus.HANDOFF.value
+                and conversation.handoff_state
+                in {
+                    HandoffState.HUMAN_ACTIVE.value,
+                    HandoffState.HUMAN_PAUSE.value,
+                }
+            ):
+                moment = await db_statement_now(self._session)
+                conversation, _ = (
+                    await conversation_repo.enter_or_continue_human_pause(
+                        self._session,
+                        conversation=conversation,
+                        moment=moment,
+                        handoff_pause_seconds=self._handoff_pause_seconds,
+                    )
+                )
+                if conversation.handoff_deadline_at is None:
+                    raise RuntimeError("HUMAN_PAUSE_DEADLINE_MISSING")
+                reply_plan = await reply_plan_repo.create_client_reply_plan(
+                    self._session,
+                    conversation_id=conversation.id,
+                    context_version=conversation.context_version,
+                    correlation_id=uuid.uuid4(),
+                    delay_ms=0,
+                    not_before=conversation.handoff_deadline_at,
+                    now=moment,
+                    manager_epoch=conversation.manager_epoch,
+                    event_seq_hwm=conversation.current_event_seq,
+                    payload_json={
+                        "schema": "synthetic.reply_plan.v1",
+                        "plan_type": ReplyPlanType.CLIENT_REPLY.value,
+                        "synthetic_token": "SYNTHETIC_OK",
+                        "inbox_id": str(inbox.id),
+                        "deferred_for_handoff": True,
                     },
                 )
                 conversation.active_reply_plan_id = reply_plan.id

@@ -11,10 +11,13 @@ from app.db.base import Base
 from app.models import (
     AmoCrmMirrorJob,
     Conversation,
+    ConversationOpsEvent,
     InboxMessage,
     IngressEvent,
+    ManagerMessage,
     OutboxMessage,
     ReplyPlan,
+    WorkerHeartbeat,
 )
 
 
@@ -102,6 +105,51 @@ _EXPECTED_CHECKS_10 = {
     "ck_ingress_max_attempts_positive": "max_attempts > 0",
 }
 
+_EXPECTED_CHECKS_11 = {
+    "ck_conversations_handoff_state": (
+        "handoff_state IN ('BOT_ACTIVE', 'HUMAN_ACTIVE', 'HUMAN_PAUSE')"
+    ),
+    "ck_conversations_manager_epoch_nonnegative": "manager_epoch >= 0",
+    "ck_conversations_current_event_seq_nonnegative": "current_event_seq >= 0",
+    "ck_conversations_manager_sequence_hwm_nonnegative": (
+        "manager_sequence_hwm IS NULL OR manager_sequence_hwm >= 0"
+    ),
+    "ck_inbox_conversation_event_seq_positive": "conversation_event_seq > 0",
+    "ck_reply_plans_manager_epoch_nonnegative": "manager_epoch >= 0",
+    "ck_reply_plans_event_seq_hwm_nonnegative": "event_seq_hwm >= 0",
+    "ck_outbox_manager_epoch_nonnegative": "manager_epoch >= 0",
+    "ck_outbox_event_seq_hwm_nonnegative": "event_seq_hwm >= 0",
+    "ck_manager_messages_channel": "channel IN ('synthetic')",
+    "ck_manager_messages_status": (
+        "status IN ('APPLIED', 'STALE', 'QUARANTINED')"
+    ),
+    "ck_manager_messages_provider_sequence_nonnegative": (
+        "provider_sequence IS NULL OR provider_sequence >= 0"
+    ),
+    "ck_manager_messages_event_seq_positive": (
+        "conversation_event_seq IS NULL OR conversation_event_seq > 0"
+    ),
+    "ck_manager_messages_body_length": (
+        "char_length(body_text) BETWEEN 1 AND 4000"
+    ),
+}
+
+_EXPECTED_UNIQUES_11 = {
+    "uq_inbox_conversation_event_seq",
+    "uq_manager_messages_channel_external_message_id",
+    "uq_manager_messages_conversation_event_seq",
+}
+
+_EXPECTED_CHECKS_12 = {
+    "ck_worker_heartbeats_loop_name": (
+        "loop_name IN ('ingress', 'handoff_expiry', 'reply_plan', "
+        "'outbound', 'amocrm_mirror')"
+    ),
+    "ck_worker_heartbeats_consecutive_failures_nonnegative": (
+        "consecutive_failures >= 0"
+    ),
+}
+
 
 def test_alembic_metadata_imports() -> None:
     assert Conversation.__tablename__ == "conversations"
@@ -110,6 +158,9 @@ def test_alembic_metadata_imports() -> None:
     assert IngressEvent.__tablename__ == "ingress_events"
     assert ReplyPlan.__tablename__ == "reply_plans"
     assert AmoCrmMirrorJob.__tablename__ == "amocrm_mirror_jobs"
+    assert ManagerMessage.__tablename__ == "manager_messages"
+    assert WorkerHeartbeat.__tablename__ == "worker_heartbeats"
+    assert ConversationOpsEvent.__tablename__ == "conversation_ops_events"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -118,6 +169,9 @@ def test_alembic_metadata_imports() -> None:
         "ingress_events",
         "reply_plans",
         "amocrm_mirror_jobs",
+        "manager_messages",
+        "worker_heartbeats",
+        "conversation_ops_events",
     }
 
 
@@ -126,13 +180,15 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     config = Config(str(root / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     revisions = list(script.walk_revisions())
-    assert len(revisions) >= 5
+    assert len(revisions) >= 7
     by_id = {rev.revision: rev for rev in revisions}
     assert "20260727_01a_foundation" in by_id
     assert "20260727_01b_ingress" in by_id
     assert "20260727_01c_reply_outbound" in by_id
     assert "20260728_09_amocrm_mirror" in by_id
     assert "20260728_10_attempt_exhaustion" in by_id
+    assert "20260729_11_handoff_schema" in by_id
+    assert "20260729_12_worker_runtime" in by_id
     assert by_id["20260727_01b_ingress"].down_revision == "20260727_01a_foundation"
     assert by_id["20260727_01c_reply_outbound"].down_revision == "20260727_01b_ingress"
     assert (
@@ -143,6 +199,14 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260728_10_attempt_exhaustion"].down_revision
         == "20260728_09_amocrm_mirror"
     )
+    assert (
+        by_id["20260729_11_handoff_schema"].down_revision
+        == "20260728_10_attempt_exhaustion"
+    )
+    assert (
+        by_id["20260729_12_worker_runtime"].down_revision
+        == "20260729_11_handoff_schema"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -150,6 +214,8 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260727_01c_reply_outbound",
         "20260728_09_amocrm_mirror",
         "20260728_10_attempt_exhaustion",
+        "20260729_11_handoff_schema",
+        "20260729_12_worker_runtime",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -184,6 +250,24 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     ):
         assert absent not in mirror, f"out-of-scope object in migration: {absent}"
 
+    handoff = Path(by_id["20260729_11_handoff_schema"].path).read_text(
+        encoding="utf-8"
+    )
+    assert "manager_messages" in handoff
+    assert "'infinity'::timestamptz" in handoff
+    assert "HANDOFF_SCHEMA_MIGRATION" in handoff
+    assert "ADMITTED" in handoff
+    assert "pre-upgrade database" in handoff
+
+    runtime = Path(by_id["20260729_12_worker_runtime"].path).read_text(
+        encoding="utf-8"
+    )
+    assert "worker_heartbeats" in runtime
+    assert "generation_id" in runtime
+    assert 'op.drop_table("worker_heartbeats")' in runtime
+    for forbidden in ("body_text", "external_conversation_id", "DATABASE_URL"):
+        assert forbidden not in runtime
+
 
 def test_model_migration_check_and_unique_parity() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -201,6 +285,12 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_10 = (
         root / "alembic" / "versions" / "20260728_10_attempt_exhaustion.py"
+    ).read_text(encoding="utf-8")
+    migration_11 = (
+        root / "alembic" / "versions" / "20260729_11_handoff_schema.py"
+    ).read_text(encoding="utf-8")
+    migration_12 = (
+        root / "alembic" / "versions" / "20260729_12_worker_runtime.py"
     ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
@@ -221,6 +311,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert set(_EXPECTED_CHECKS_09) <= set(model_checks)
     assert _EXPECTED_UNIQUES_09 <= model_uniques
     assert set(_EXPECTED_CHECKS_10) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_11) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_11 <= model_uniques
+    assert set(_EXPECTED_CHECKS_12) <= set(model_checks)
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -253,7 +346,10 @@ def test_model_migration_check_and_unique_parity() -> None:
 
     for name, sql in _EXPECTED_CHECKS_01C.items():
         assert name in migration_01c
-        assert model_checks[name] == sql
+        if name == "ck_outbox_delivery_status":
+            assert "'ADMITTED'" in model_checks[name]
+        else:
+            assert model_checks[name] == sql
         # Migration may split long CHECK literals across adjacent strings.
         for token in re.findall(r"'[A-Z_]+'", sql):
             assert token in migration_01c, f"{name} missing {token}"
@@ -281,3 +377,27 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert name in migration_10
         assert model_checks[name] == sql
         assert sql in migration_10
+
+    for name, sql in _EXPECTED_CHECKS_11.items():
+        assert name in migration_11
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_11, f"{name} missing {token}"
+
+    for name in _EXPECTED_UNIQUES_11:
+        assert name in migration_11
+
+    for name, sql in _EXPECTED_CHECKS_12.items():
+        assert name in migration_12
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[a-z_]+'", sql):
+            assert token in migration_12, f"{name} missing {token}"
+
+    for complex_check in (
+        "ck_conversations_handoff_consistency",
+        "ck_manager_messages_classification",
+        "ck_outbox_admitted_destination",
+        "ck_outbox_admitted_state",
+    ):
+        assert complex_check in migration_11
+        assert complex_check in model_checks

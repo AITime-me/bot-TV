@@ -37,6 +37,7 @@ async def insert_inbox_if_absent(
     conversation_id: uuid.UUID,
     channel: Channel,
     external_message_id: str,
+    conversation_event_seq: int,
     payload_json: dict[str, Any],
     received_at: datetime,
 ) -> tuple[InboxMessage, bool]:
@@ -60,6 +61,7 @@ async def insert_inbox_if_absent(
             conversation_id=conversation_id,
             channel=channel.value,
             external_message_id=external_message_id,
+            conversation_event_seq=conversation_event_seq,
             direction=MessageDirection.INBOUND.value,
             message_type=MessageType.TEXT.value,
             payload_json=payload_json,

@@ -5,7 +5,15 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -51,6 +59,15 @@ class InboxMessage(Base):
             "processing_status IN ('RECEIVED', 'PROCESSING', 'PROCESSED', 'FAILED')",
             name="ck_inbox_processing_status",
         ),
+        CheckConstraint(
+            "conversation_event_seq > 0",
+            name="ck_inbox_conversation_event_seq_positive",
+        ),
+        UniqueConstraint(
+            "conversation_id",
+            "conversation_event_seq",
+            name="uq_inbox_conversation_event_seq",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -92,6 +109,10 @@ class InboxMessage(Base):
         default=ProcessingStatus.RECEIVED.value,
     )
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    conversation_event_seq: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
 
     conversation = relationship("Conversation", back_populates="inbox_messages")
     outbox_messages = relationship("OutboxMessage", back_populates="source_inbox")

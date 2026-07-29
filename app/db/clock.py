@@ -21,6 +21,21 @@ async def db_now(session: AsyncSession) -> datetime:
     return moment
 
 
+async def db_statement_now(session: AsyncSession) -> datetime:
+    """Return PostgreSQL ``statement_timestamp()`` for a state transition.
+
+    Unlike ``transaction_timestamp()``/``now()``, this instant is taken when
+    the SQL statement starts. Handoff deadlines therefore do not lose time if
+    an otherwise valid transaction waited on the Conversation row lock.
+    """
+    moment = await session.scalar(select(func.statement_timestamp()))
+    if moment is None:
+        raise RuntimeError("DB_CLOCK_UNAVAILABLE")
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
 async def resolve_moment(session: AsyncSession, now: datetime | None) -> datetime:
     """Use an explicitly injected instant, otherwise the PostgreSQL clock."""
     if now is not None:

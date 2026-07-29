@@ -97,6 +97,107 @@ business handler, outbound sink и amoCRM adapter повторно не вызы
 ReplyPlan recovery сохраняет dialog lock order и ставит терминальное
 `REPLY_PLAN_STATE_CHANGED(DEAD)` в mirror outbox.
 
+Resumable handoff (CURSOR-10): synthetic-сообщения менеджера хранятся
+канонически в `manager_messages` и применяются только по обязательному
+монотонному `provider_sequence`. Повторы, запоздалые события и сообщения без
+надёжного порядка не меняют FSM. Клиентские и применённые менеджерские реплики
+получают общий `conversation_event_seq`; контекст ограничен 40 сообщениями и
+12 000 символами и не копируется в ReplyPlan/outbox. Первый ответ клиента во
+время `HUMAN_ACTIVE` создаёт `HUMAN_PAUSE` и deferred ReplyPlan на
+настраиваемые 10–15 минут,
+следующие ответы заменяют план без продления deadline. Новый ответ менеджера
+возвращает `HUMAN_ACTIVE` и отменяет только недопущенную bot-работу. Worker
+истечения deadline атомарно возвращает `HUMAN_ACTIVE` без ответа, а
+`HUMAN_PAUSE` — с единственным актуальным deferred ReplyPlan. Due rows
+выбираются по часам PostgreSQL через `FOR UPDATE SKIP LOCKED`; падение до
+commit оставляет их следующему процессу
+(`docs/adr/005-resumable-manager-handoff.md`).
+
+Outbound admission фиксируется отдельным durable-состоянием `ADMITTED` под
+блокировкой Conversation. До commit этой транзакции manager/client event может
+отменить строку; после commit отмена запрещена. Synthetic sink вызывается только
+после закрытия транзакции, с `outbound_id` как idempotency key, а успешный
+результат фиксируется отдельным `ADMITTED → DELIVERED`. Падение между этими
+точками оставляет восстанавливаемую `ADMITTED`-строку. Три fence
+(`context_version`, `manager_epoch`, `event_seq_hwm`) проверяются и при dispatch,
+и непосредственно при admission.
+
+Настройки handoff:
+
+- `HANDOFF_PAUSE_SECONDS=900` — от 600 до 900 секунд;
+- `HANDOFF_EXPIRY_POLL_SECONDS=1` — от 1 до 60 секунд.
+
+## Worker runtime и health
+
+`python -m app.worker` запускает отдельный процесс с пятью независимыми
+циклами: durable ingress, expiry handoff, `ReplyPlan`, outbound и локальный
+amoCRM mirror. Каждый цикл:
+
+- обрабатывает ограниченный batch;
+- имеет timeout одного tick;
+- записывает собственный heartbeat в PostgreSQL;
+- после серии последовательных ошибок завершает весь worker с ненулевым кодом,
+  чтобы supervisor действительно выполнил restart.
+
+При старте worker атомарно регистрирует новый `generation_id` для всех циклов.
+Обновления предыдущего поколения после restart отклоняются fencing-проверкой.
+Heartbeat содержит только техническое состояние процесса — текста сообщений,
+контактов, токенов и provider payload в таблице нет.
+Отдельный PostgreSQL advisory lock допускает только один активный worker:
+случайно запущенная вторая копия завершается до перерегистрации heartbeat.
+
+Настройки worker:
+
+- `WORKER_POLL_SECONDS=1` — poll основных очередей, 1–60 секунд;
+- `WORKER_BATCH_SIZE=100` — максимум строк за tick, 1–1000;
+- `WORKER_TICK_TIMEOUT_SECONDS=20` — timeout tick, 5–300 секунд;
+- `WORKER_HEARTBEAT_INTERVAL_SECONDS=10` — период heartbeat, 1–60 секунд;
+- `WORKER_HEARTBEAT_STALE_SECONDS=45` — окно свежести, 10–600 секунд;
+- `WORKER_MAX_CONSECUTIVE_FAILURES=3` — порог завершения процесса, 1–20.
+
+Перед запуском worker проверяет, что stale-окно больше timeout и как минимум
+двух самых длинных poll/heartbeat-интервалов с запасом. `DATABASE_URL` для
+worker обязателен.
+
+Docker runtime состоит из одноразовой миграции, API и отдельного worker:
+
+```bash
+docker compose config --quiet
+docker compose build
+docker compose up -d
+```
+
+### Обязательный шлюз перед первым deploy
+
+До production/staging deploy `CURSOR-10` необходимо выполнить в среде с
+настоящим Docker/Podman и disposable PostgreSQL:
+
+- `docker compose config --quiet` с безопасными `BOT_MODE=OFF` и
+  `EMERGENCY_LOCK=true`;
+- фактический `docker compose build` (статические тесты Dockerfile/YAML его не
+  заменяют);
+- `docker compose up -d` на disposable БД и успешное завершение миграции;
+- состояние `healthy` у API и worker, включая все пять PostgreSQL-heartbeat;
+- smoke-проверку `/health`, `/health/live` и `/health/ready`;
+- полный PostgreSQL test suite без пропусков;
+- проверку, что build context и итоговый образ не содержат `.env`, токены,
+  credentials или Git-метаданные.
+
+Если хотя бы один пункт не выполнен, deploy заблокирован. После проверки
+контейнеры также остаются в `BOT_MODE=OFF`; включение реальных адаптеров и
+автоматической отправки не входит в `CURSOR-10`.
+
+`docker-compose.yml` сохраняет безопасные defaults `BOT_MODE=OFF` и
+`EMERGENCY_LOCK=true`, не принимает `DATABASE_URL` по умолчанию, запускает
+контейнеры без root/capabilities с read-only filesystem и применяет
+`restart: unless-stopped`. `.dockerignore` исключает `.env`, Git-метаданные,
+локальные окружения, тесты и документацию из build context и по default-deny
+правилу разрешает только runtime source, lock-файл и Alembic assets.
+
+Docker health worker читает все пять heartbeat из PostgreSQL. Сам worker
+дополнительно контролирует зависший tick через timeout: один только статус
+`unhealthy` не выдаётся за supervisor.
+
 Интеграция режимов с control plane `online-zapis-tv` запрещена до
 `CONTRACT-MODE-01` (см. `docs/adr/001-mode-contract-deferred.md`).
 
@@ -104,7 +205,10 @@ Health endpoints:
 
 - `GET /health` — совместимый базовый ответ;
 - `GET /health/live` — процесс жив;
-- `GET /health/ready` — конфигурация успешно загружена.
+- `GET /health/ready` — при настроенной БД проверяет все пять heartbeat и
+  возвращает HTTP 503 для отсутствующего, stale, failed или stuck цикла.
+  Без `DATABASE_URL` сохраняется прежний безопасный standalone health-контракт
+  для `BOT_MODE=OFF`; Docker runtime всегда требует БД.
 
 ## Тесты
 

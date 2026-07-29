@@ -22,6 +22,7 @@ from app.db.session import _DEFAULT_ISOLATION_LEVEL, create_engine, session_scop
 from app.models.conversation import (
     Conversation,
     ConversationStatus,
+    HandoffState,
     conversation_allows_automatic_reply,
 )
 from app.models.outbox import DeliveryStatus, DestinationType
@@ -306,7 +307,9 @@ def test_settings_repr_redacts_password_but_keeps_safe_parts() -> None:
         assert "***" in rendered
         assert "127.0.0.1:5432" in rendered
         assert "bot_tv_foundation_test" in rendered
-    assert repr(Settings.from_env({})).endswith("database_url=None)")
+    safe_default = repr(Settings.from_env({}))
+    assert "database_url=None" in safe_default
+    assert safe_default.endswith("handoff_expiry_poll_seconds=1)")
     # The raw value stays reachable for the engine, only rendering is redacted.
     assert settings.database_url == _FAKE_URL
 
@@ -549,18 +552,21 @@ def test_handoff_and_closed_block_automatic_reply() -> None:
         channel="synthetic",
         external_conversation_id="conv-handoff",
         status=ConversationStatus.HANDOFF.value,
+        handoff_state=HandoffState.HUMAN_ACTIVE.value,
         manager_takeover_at=None,
     )
     closed = Conversation(
         channel="synthetic",
         external_conversation_id="conv-closed",
         status=ConversationStatus.CLOSED.value,
+        handoff_state=HandoffState.BOT_ACTIVE.value,
         manager_takeover_at=None,
     )
     open_dialog = Conversation(
         channel="synthetic",
         external_conversation_id="conv-open",
         status=ConversationStatus.OPEN.value,
+        handoff_state=HandoffState.BOT_ACTIVE.value,
         manager_takeover_at=None,
     )
     assert conversation_allows_automatic_reply(handoff) is False
@@ -661,6 +667,9 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "ck_amocrm_mirror_subject_kind",
         "ck_amocrm_mirror_status",
         "ck_amocrm_mirror_context_version_nonnegative",
+        "ck_worker_heartbeats_loop_name",
+        "ck_worker_heartbeats_consecutive_failures_nonnegative",
+        "ck_worker_heartbeats_failure_consistency",
     }
     expected_uniques = {
         "uq_conversations_channel_external_id",
@@ -685,7 +694,10 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
                 unique_names.add(constraint.name)
     assert expected_checks <= check_names
     assert expected_uniques <= unique_names
-    assert "delivery_status IN ('PENDING', 'PROCESSING', 'DELIVERED', 'FAILED', 'DEAD', 'CANCELLED')" in rendered
+    assert (
+        "delivery_status IN ('PENDING', 'PROCESSING', 'ADMITTED', "
+        "'DELIVERED', 'FAILED', 'DEAD', 'CANCELLED')"
+    ) in rendered
     assert "destination_type IN ('INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND')" in rendered
     assert "'SENT'" not in rendered
     assert "delivery_status IN ('PENDING', 'CANCELLED', 'SENT')" not in rendered

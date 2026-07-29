@@ -17,12 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.db.base import Base
 from app.db.session import session_scope
-from app.models.conversation import Conversation, ConversationStatus
+from app.models.conversation import Conversation
 from app.models.inbox import InboxMessage
 from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.repositories import messages as message_repo
 from app.schemas.inbound import SyntheticInboundEvent
 from app.services.inbound import InboundService
+from app.services.takeover import apply_manager_takeover_in_session
 from tests.foundation_test_db import (
     SecretDatabaseUrl,
     assert_safe_test_database_url,
@@ -44,6 +45,9 @@ _FOUNDATION_TABLES = (
     "ingress_events",
     "reply_plans",
     "amocrm_mirror_jobs",
+    "manager_messages",
+    "worker_heartbeats",
+    "conversation_ops_events",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -57,12 +61,111 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     ),
     "ck_conversations_ownership": ("ownership", frozenset({"BOT", "MANAGER"})),
     "ck_conversations_context_version_nonnegative": ("context_version", frozenset()),
+    "ck_conversations_handoff_state": (
+        "handoff_state",
+        frozenset({"BOT_ACTIVE", "HUMAN_ACTIVE", "HUMAN_PAUSE"}),
+    ),
+    "ck_conversations_manager_epoch_nonnegative": ("manager_epoch", frozenset()),
+    "ck_conversations_current_event_seq_nonnegative": (
+        "current_event_seq",
+        frozenset(),
+    ),
+    "ck_conversations_manager_sequence_hwm_nonnegative": (
+        "manager_sequence_hwm",
+        frozenset(),
+    ),
+    "ck_conversations_handoff_consistency": (
+        "handoff_state",
+        frozenset(
+            {
+                "CLOSED",
+                "BOT",
+                "BOT_ACTIVE",
+                "OPEN",
+                "HANDOFF",
+                "MANAGER",
+                "HUMAN_ACTIVE",
+                "HUMAN_PAUSE",
+            }
+        ),
+    ),
+    "ck_conversations_handoff_quarantine_consistency": (
+        "handoff_quarantined_at",
+        frozenset(),
+    ),
+    "ck_conversations_handoff_quarantine_reason": (
+        "handoff_quarantine_reason",
+        frozenset(
+            {
+                "HANDOFF_DEFERRED_PLAN_MISSING",
+                "HANDOFF_DEFERRED_PLAN_TYPE",
+                "HANDOFF_DEFERRED_PLAN_NOT_OPEN",
+                "HANDOFF_DEFERRED_PLAN_CONTEXT",
+                "HANDOFF_DEFERRED_PLAN_MANAGER_EPOCH",
+                "HANDOFF_DEFERRED_PLAN_EVENT_SEQ",
+                "HANDOFF_DEFERRED_PLAN_DEADLINE",
+                "HANDOFF_DEFERRED_PLAN_MARKER",
+                "HANDOFF_EXPIRY_UNSUPPORTED_STATE",
+            }
+        ),
+    ),
+    "ck_conversations_handoff_quarantine_clear_path": (
+        "handoff_quarantine_clear_path",
+        frozenset({"MANAGER_MESSAGE_APPLIED"}),
+    ),
+    "ck_conversation_ops_events_event_type": (
+        "event_type",
+        frozenset(
+            {
+                "HANDOFF_EXPIRY_QUARANTINED",
+                "HANDOFF_QUARANTINE_CLEARED",
+            }
+        ),
+    ),
+    "ck_conversation_ops_events_reason_code": (
+        "reason_code",
+        frozenset(
+            {
+                "HANDOFF_DEFERRED_PLAN_MISSING",
+                "HANDOFF_DEFERRED_PLAN_TYPE",
+                "HANDOFF_DEFERRED_PLAN_NOT_OPEN",
+                "HANDOFF_DEFERRED_PLAN_CONTEXT",
+                "HANDOFF_DEFERRED_PLAN_MANAGER_EPOCH",
+                "HANDOFF_DEFERRED_PLAN_EVENT_SEQ",
+                "HANDOFF_DEFERRED_PLAN_DEADLINE",
+                "HANDOFF_DEFERRED_PLAN_MARKER",
+                "HANDOFF_EXPIRY_UNSUPPORTED_STATE",
+            }
+        ),
+    ),
+    "ck_conversation_ops_events_clear_path": (
+        "clear_path",
+        frozenset(
+            {
+                "HANDOFF_EXPIRY_QUARANTINED",
+                "HANDOFF_QUARANTINE_CLEARED",
+                "MANAGER_MESSAGE_APPLIED",
+            }
+        ),
+    ),
+    "ck_conversation_ops_events_manager_epoch_nonnegative": (
+        "manager_epoch",
+        frozenset(),
+    ),
+    "ck_conversation_ops_events_context_version_nonnegative": (
+        "context_version",
+        frozenset(),
+    ),
     "ck_inbox_channel": ("channel", frozenset({"synthetic"})),
     "ck_inbox_direction": ("direction", frozenset({"INBOUND"})),
     "ck_inbox_message_type": ("message_type", frozenset({"TEXT"})),
     "ck_inbox_processing_status": (
         "processing_status",
         frozenset({"RECEIVED", "PROCESSING", "PROCESSED", "FAILED"}),
+    ),
+    "ck_inbox_conversation_event_seq_positive": (
+        "conversation_event_seq",
+        frozenset(),
     ),
     "ck_outbox_destination_type": (
         "destination_type",
@@ -74,6 +177,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
             {
                 "PENDING",
                 "PROCESSING",
+                "ADMITTED",
                 "DELIVERED",
                 "FAILED",
                 "DEAD",
@@ -84,6 +188,36 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     "ck_outbox_attempt_count_nonnegative": ("attempt_count", frozenset()),
     "ck_outbox_max_attempts_positive": ("max_attempts", frozenset()),
     "ck_outbox_lease_version_nonnegative": ("lease_version", frozenset()),
+    "ck_outbox_manager_epoch_nonnegative": ("manager_epoch", frozenset()),
+    "ck_outbox_event_seq_hwm_nonnegative": ("event_seq_hwm", frozenset()),
+    "ck_outbox_admitted_destination": (
+        "admitted_at",
+        frozenset(
+            {
+                "SYNTHETIC_OUTBOUND",
+                "ADMITTED",
+                "DELIVERED",
+                "DEAD",
+            }
+        ),
+    ),
+    "ck_outbox_admitted_state": (
+        "delivery_status",
+        frozenset({"ADMITTED", "SYNTHETIC_OUTBOUND"}),
+    ),
+    "ck_outbox_delivered_after_admission": (
+        "admitted_at",
+        frozenset({"SYNTHETIC_OUTBOUND", "DELIVERED"}),
+    ),
+    "ck_outbox_lease_complete": ("lease_token", frozenset()),
+    "ck_outbox_unleased_states": (
+        "lease_token",
+        frozenset({"PENDING", "FAILED", "DELIVERED", "DEAD", "CANCELLED"}),
+    ),
+    "ck_outbox_processing_lease": (
+        "lease_token",
+        frozenset({"PROCESSING"}),
+    ),
     "ck_ingress_channel": ("channel", frozenset({"synthetic"})),
     "ck_ingress_event_type": ("event_type", frozenset({"SYNTHETIC_MESSAGE"})),
     "ck_ingress_status": (
@@ -117,6 +251,8 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     "ck_reply_plans_max_attempts_positive": ("max_attempts", frozenset()),
     "ck_reply_plans_lease_version_nonnegative": ("lease_version", frozenset()),
     "ck_reply_plans_context_version_nonnegative": ("context_version", frozenset()),
+    "ck_reply_plans_manager_epoch_nonnegative": ("manager_epoch", frozenset()),
+    "ck_reply_plans_event_seq_hwm_nonnegative": ("event_seq_hwm", frozenset()),
     "ck_amocrm_mirror_job_type": (
         "job_type",
         frozenset(
@@ -156,6 +292,44 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     "ck_amocrm_mirror_max_attempts_positive": ("max_attempts", frozenset()),
     "ck_amocrm_mirror_lease_version_nonnegative": ("lease_version", frozenset()),
     "ck_amocrm_mirror_context_version_nonnegative": ("context_version", frozenset()),
+    "ck_manager_messages_channel": ("channel", frozenset({"synthetic"})),
+    "ck_manager_messages_status": (
+        "status",
+        frozenset({"APPLIED", "STALE", "QUARANTINED"}),
+    ),
+    "ck_manager_messages_provider_sequence_nonnegative": (
+        "provider_sequence",
+        frozenset(),
+    ),
+    "ck_manager_messages_event_seq_positive": (
+        "conversation_event_seq",
+        frozenset(),
+    ),
+    "ck_manager_messages_body_length": ("body_text", frozenset()),
+    "ck_manager_messages_classification": (
+        "status",
+        frozenset({"APPLIED", "STALE", "QUARANTINED"}),
+    ),
+    "ck_worker_heartbeats_loop_name": (
+        "loop_name",
+        frozenset(
+            {
+                "ingress",
+                "handoff_expiry",
+                "reply_plan",
+                "outbound",
+                "amocrm_mirror",
+            }
+        ),
+    ),
+    "ck_worker_heartbeats_consecutive_failures_nonnegative": (
+        "consecutive_failures",
+        frozenset(),
+    ),
+    "ck_worker_heartbeats_failure_consistency": (
+        "consecutive_failures",
+        frozenset(),
+    ),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
@@ -185,6 +359,18 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
         "context_version",
     ),
     "uq_amocrm_mirror_key": ("mirror_key",),
+    "uq_inbox_conversation_event_seq": (
+        "conversation_id",
+        "conversation_event_seq",
+    ),
+    "uq_manager_messages_channel_external_message_id": (
+        "channel",
+        "external_message_id",
+    ),
+    "uq_manager_messages_conversation_event_seq": (
+        "conversation_id",
+        "conversation_event_seq",
+    ),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -204,6 +390,19 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_amocrm_mirror_jobs_status_next_attempt_at": ("status", "next_attempt_at"),
     "ix_amocrm_mirror_jobs_lease_until": ("lease_until",),
     "ix_amocrm_mirror_jobs_conversation_id": ("conversation_id",),
+    "ix_manager_messages_conversation_provider_sequence": (
+        "conversation_id",
+        "provider_sequence",
+    ),
+    "ix_manager_messages_conversation_event_seq": (
+        "conversation_id",
+        "conversation_event_seq",
+    ),
+    "ix_worker_heartbeats_last_succeeded_at": ("last_succeeded_at",),
+    "ix_conversation_ops_events_conversation_created": (
+        "conversation_id",
+        "created_at",
+    ),
 }
 
 
@@ -313,7 +512,7 @@ async def _assert_foundation_schema(session: AsyncSession) -> None:
     fk_rows = (
         await session.execute(
             text(
-                "SELECT c.conname, pg_get_constraintdef(c.oid) "
+                "SELECT t.relname, c.conname, pg_get_constraintdef(c.oid) "
                 "FROM pg_catalog.pg_constraint c "
                 "JOIN pg_catalog.pg_class t ON t.oid = c.conrelid "
                 "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
@@ -321,9 +520,17 @@ async def _assert_foundation_schema(session: AsyncSession) -> None:
             )
         )
     ).all()
-    fk_defs = " | ".join(row[1].upper() for row in fk_rows)
+    fk_defs = " | ".join(row[2].upper() for row in fk_rows)
     assert "ON DELETE CASCADE" in fk_defs
     assert "ON DELETE SET NULL" in fk_defs
+    ops_fk_defs = [
+        row[2].upper()
+        for row in fk_rows
+        if row[0] == "conversation_ops_events"
+    ]
+    assert ops_fk_defs, "missing conversation_ops_events foreign key"
+    assert all("ON DELETE RESTRICT" in definition for definition in ops_fk_defs)
+    assert all("ON DELETE CASCADE" not in definition for definition in ops_fk_defs)
 
     # No applied CHECK may admit a SENT delivery status.
     for name, definition in checks.items():
@@ -632,9 +839,11 @@ async def test_takeover_blocks_auto_reply_flag(db_session: AsyncSession) -> None
             text="before takeover",
         )
     )
-    first.conversation.manager_takeover_at = datetime.now(timezone.utc)
-    first.conversation.status = ConversationStatus.HANDOFF.value
-    await db_session.flush()
+    await apply_manager_takeover_in_session(
+        db_session,
+        conversation_id=first.conversation.id,
+        now=datetime.now(timezone.utc),
+    )
 
     second = await service.accept(
         SyntheticInboundEvent(
