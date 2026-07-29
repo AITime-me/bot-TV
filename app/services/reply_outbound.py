@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.clock import resolve_moment
 from app.db.session import session_scope
-from app.models.conversation import ConversationOwnership
+from app.models.conversation import ConversationOwnership, HandoffState
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.repositories import conversations as conversation_repo
 from app.repositories import outbound as outbound_repo
@@ -109,8 +109,14 @@ class ReplyPlanWorker:
                     raise StaleReplyPlanLeaseError("REPLY_PLAN_STALE_CONTEXT")
                 if conversation.ownership != ConversationOwnership.BOT.value:
                     raise StaleReplyPlanLeaseError("REPLY_PLAN_MANAGER_OWNED")
+                if conversation.handoff_state != HandoffState.BOT_ACTIVE.value:
+                    raise StaleReplyPlanLeaseError("REPLY_PLAN_HANDOFF_NOT_BOT_ACTIVE")
                 if conversation.manager_takeover_at is not None:
                     raise StaleReplyPlanLeaseError("REPLY_PLAN_MANAGER_TAKEOVER")
+                if conversation.manager_epoch != claim.manager_epoch:
+                    raise StaleReplyPlanLeaseError("REPLY_PLAN_STALE_MANAGER_EPOCH")
+                if conversation.current_event_seq != claim.event_seq_hwm:
+                    raise StaleReplyPlanLeaseError("REPLY_PLAN_STALE_EVENT_SEQUENCE")
 
                 plan_row = await reply_plan_repo.get_by_id(
                     session,
@@ -121,6 +127,8 @@ class ReplyPlanWorker:
                     or plan_row.status != ReplyPlanStatus.PROCESSING.value
                     or plan_row.lease_token != claim.lease_token
                     or plan_row.lease_version != claim.lease_version
+                    or plan_row.manager_epoch != claim.manager_epoch
+                    or plan_row.event_seq_hwm != claim.event_seq_hwm
                 ):
                     raise StaleReplyPlanLeaseError("REPLY_PLAN_STALE_LEASE")
 
@@ -130,6 +138,8 @@ class ReplyPlanWorker:
                         conversation_id=claim.conversation_id,
                         reply_plan_id=claim.plan_id,
                         context_version=claim.context_version,
+                        manager_epoch=claim.manager_epoch,
+                        event_seq_hwm=claim.event_seq_hwm,
                         payload_json=_outbound_payload_from_plan(claim.payload_json),
                         correlation_id=claim.correlation_id,
                         not_before=claim.not_before,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -16,7 +17,7 @@ from app.core.outbound_policy import OutboundAction, is_automatic_outbound_allow
 from app.db.clock import db_now
 from app.db.session import session_scope
 from app.models.amocrm_mirror import AmoCrmMirrorJob, AmoCrmMirrorJobType
-from app.models.conversation import Conversation, ConversationOwnership
+from app.models.conversation import Conversation, ConversationOwnership, HandoffState
 from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import (
     BOT_RESPONSE_DELAY_MS,
@@ -29,7 +30,9 @@ from app.repositories import reply_plans as reply_plan_repo
 from app.repositories.outbound import StaleOutboundLeaseError
 from app.repositories.reply_plans import StaleReplyPlanLeaseError
 from app.schemas.inbound import SyntheticInboundEvent
+from app.schemas.manager_message import SyntheticManagerMessageEvent
 from app.services.inbound import InboundService
+from app.services.manager_messages import SyntheticManagerMessageService
 from app.services.outbound_arbiter import OutboundArbiter, OutboundArbiterDenied
 from app.services.reply_outbound import OutboundWorker, ReplyPlanWorker
 from app.services.synthetic_outbound import (
@@ -419,7 +422,7 @@ async def test_expired_final_reply_plan_lease_recovers_to_dead_without_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_manager_takeover_cancels_and_blocks_new_plans(
+async def test_manager_takeover_cancels_old_plan_and_defers_new_client_reply(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
@@ -445,8 +448,48 @@ async def test_manager_takeover_cancels_and_blocks_new_plans(
 
     async with session_scope(session_factory) as session:
         second = await InboundService(session).accept(_inbound("msg-after-takeover"))
-        assert second.reply_plan_created is False
+        assert second.reply_plan_created is True
+        assert second.reply_plan is not None
+        assert second.reply_plan.not_before == second.conversation.handoff_deadline_at
+        assert second.conversation.handoff_state == HandoffState.HUMAN_PAUSE.value
         assert second.automatic_reply_allowed is False
+
+
+@pytest.mark.asyncio
+async def test_manager_message_after_plan_claim_fences_dispatch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("manager-after-plan-claim")
+        )
+        assert inbound.reply_plan is not None
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-manager-fence")
+    stale_claim = await plan_worker.claim_one(now=due)
+    assert stale_claim is not None
+    manager = await SyntheticManagerMessageService(session_factory).apply(
+        SyntheticManagerMessageEvent(
+            external_conversation_id="reply-conv",
+            external_message_id="manager-fences-claimed-plan",
+            provider_sequence=1,
+            text="Менеджер ответил до dispatch",
+        )
+    )
+    assert manager.cancelled_plans == 1
+    with pytest.raises(StaleReplyPlanLeaseError):
+        await plan_worker.dispatch_claimed(stale_claim)
+    async with session_scope(session_factory) as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(OutboxMessage)
+            .where(
+                OutboxMessage.destination_type
+                == DestinationType.SYNTHETIC_OUTBOUND.value
+            )
+        )
+        assert count == 0
 
 
 @pytest.mark.asyncio
@@ -492,11 +535,263 @@ async def test_one_reply_plan_one_outbound_and_arbiter_success(
     assert admit.admitted is True
     assert admit.delivery_status == DeliveryStatus.DELIVERED.value
     assert len(sink.calls) == 1
+    async with session_scope(session_factory) as session:
+        delivered = await session.get(OutboxMessage, out_claim.outbound_id)
+        assert delivered is not None
+        assert delivered.admitted_at is not None
     assert is_automatic_outbound_allowed(Settings(), OutboundAction.SEND_MESSAGE) is False
 
 
 @pytest.mark.asyncio
-async def test_arbiter_rejects_stale_context_and_manager_takeover(
+async def test_manager_before_admission_cancels_without_sink(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("admission-manager-first")
+        )
+        assert inbound.reply_plan is not None
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-manager-first")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter()
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-manager-first",
+        arbiter=OutboundArbiter(session_factory, sink=sink),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
+
+    manager = await SyntheticManagerMessageService(session_factory).apply(
+        SyntheticManagerMessageEvent(
+            external_conversation_id="reply-conv",
+            external_message_id="manager-wins-before-admission",
+            provider_sequence=1,
+            text="Подключаюсь к диалогу",
+        )
+    )
+    assert manager.cancelled_outbound == 1
+    with pytest.raises(
+        (OutboundArbiterDenied, StaleOutboundLeaseError),
+    ):
+        await outbound_worker.process_claimed(outbound_claim, now=due)
+    assert sink.calls == []
+    async with session_scope(session_factory) as session:
+        row = await session.get(OutboxMessage, outbound_claim.outbound_id)
+        assert row is not None
+        assert row.delivery_status == DeliveryStatus.CANCELLED.value
+        assert row.admitted_at is None
+
+
+@pytest.mark.asyncio
+async def test_admission_before_manager_is_irreversible(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("admission-bot-first")
+        )
+        assert inbound.reply_plan is not None
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-bot-first")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter()
+    arbiter = OutboundArbiter(session_factory, sink=sink)
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-bot-first",
+        arbiter=arbiter,
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
+    async with session_scope(session_factory) as session:
+        request = await arbiter._admit_in_session(session, outbound_claim, now=due)
+
+    manager = await SyntheticManagerMessageService(session_factory).apply(
+        SyntheticManagerMessageEvent(
+            external_conversation_id="reply-conv",
+            external_message_id="manager-after-admission",
+            provider_sequence=1,
+            text="Подключаюсь после допуска",
+        )
+    )
+    assert manager.cancelled_outbound == 0
+    async with session_scope(session_factory) as session:
+        admitted = await session.get(OutboxMessage, outbound_claim.outbound_id)
+        assert admitted is not None
+        assert admitted.delivery_status == DeliveryStatus.ADMITTED.value
+        assert admitted.admitted_at is not None
+
+    admitted_claim = replace(
+        outbound_claim,
+        delivery_status=DeliveryStatus.ADMITTED.value,
+    )
+    assert sink.deliver(request).outcome is SyntheticOutboundOutcome.SUCCESS
+    result = await outbound_worker.process_claimed(admitted_claim, now=due)
+    assert result.delivery_status == DeliveryStatus.DELIVERED.value
+    # Recovery uses outbound_id as an idempotency key; the repeated call is not
+    # a second synthetic delivery.
+    assert len(sink.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_admitted_row_recovers_after_crash_even_at_claim_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("admitted-crash-recovery")
+        )
+        assert inbound.reply_plan is not None
+        inbound.reply_plan.max_attempts = 1
+        await session.flush()
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-crash-admitted")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter()
+    arbiter = OutboundArbiter(session_factory, sink=sink)
+    crashed_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-crash-admitted",
+        arbiter=arbiter,
+    )
+    stale_claim = await crashed_worker.claim_one(now=due)
+    assert stale_claim is not None
+    assert stale_claim.attempt_count == stale_claim.max_attempts == 1
+    async with session_scope(session_factory) as session:
+        request = await arbiter._admit_in_session(session, stale_claim, now=due)
+
+    # The sink accepted the idempotency key, then the worker crashed before its
+    # DELIVERED transaction.
+    assert sink.deliver(request).outcome is SyntheticOutboundOutcome.SUCCESS
+    async with session_scope(session_factory) as session:
+        await session.execute(
+            update(OutboxMessage)
+            .where(OutboxMessage.id == dispatched.outbound_id)
+            .values(lease_until=due - timedelta(seconds=1))
+        )
+
+    recovery_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-recover-admitted",
+        arbiter=arbiter,
+    )
+    recovered_claim = await recovery_worker.claim_one(now=due)
+    assert recovered_claim is not None
+    assert recovered_claim.delivery_status == DeliveryStatus.ADMITTED.value
+    assert recovered_claim.attempt_count == 2
+    result = await recovery_worker.process_claimed(recovered_claim, now=due)
+    assert result.delivery_status == DeliveryStatus.DELIVERED.value
+    assert len(sink.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_client_message_cancels_unadmitted_dispatched_outbound(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        first = await InboundService(session).accept(_inbound("client-before-admit-1"))
+        assert first.reply_plan is not None
+        due = first.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-client-fence")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-client-fence",
+        arbiter=OutboundArbiter(session_factory),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
+
+    async with session_scope(session_factory) as session:
+        second = await InboundService(session).accept(
+            _inbound("client-before-admit-2")
+        )
+        assert second.reply_plan is not None
+        assert second.reply_plan.id != plan_claim.plan_id
+
+    async with session_scope(session_factory) as session:
+        old = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert old is not None
+        assert old.delivery_status == DeliveryStatus.CANCELLED.value
+        assert old.admitted_at is None
+    with pytest.raises(StaleOutboundLeaseError):
+        await outbound_worker.process_claimed(outbound_claim, now=due)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_manager_and_admission_have_one_linearized_winner(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("concurrent-manager-admission")
+        )
+        assert inbound.reply_plan is not None
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-linearized")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter()
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-linearized",
+        arbiter=OutboundArbiter(session_factory, sink=sink),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
+    manager_service = SyntheticManagerMessageService(session_factory)
+
+    delivery_result, manager_result = await asyncio.gather(
+        outbound_worker.process_claimed(outbound_claim, now=due),
+        manager_service.apply(
+            SyntheticManagerMessageEvent(
+                external_conversation_id="reply-conv",
+                external_message_id="manager-linearized",
+                provider_sequence=1,
+                text="Гонка с допуском",
+            )
+        ),
+        return_exceptions=True,
+    )
+    assert not isinstance(manager_result, BaseException)
+    async with session_scope(session_factory) as session:
+        row = await session.get(OutboxMessage, outbound_claim.outbound_id)
+        assert row is not None
+        if row.delivery_status == DeliveryStatus.DELIVERED.value:
+            assert not isinstance(delivery_result, BaseException)
+            assert manager_result.cancelled_outbound == 0
+            assert row.admitted_at is not None
+            assert len(sink.calls) == 1
+        else:
+            assert row.delivery_status == DeliveryStatus.CANCELLED.value
+            assert isinstance(delivery_result, BaseException)
+            assert manager_result.cancelled_outbound == 1
+            assert row.admitted_at is None
+            assert sink.calls == []
+
+
+@pytest.mark.asyncio
+async def test_new_context_cancels_old_outbound_before_arbiter_claim(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
@@ -514,13 +809,18 @@ async def test_arbiter_rejects_stale_context_and_manager_takeover(
     async with session_scope(session_factory) as session:
         await InboundService(session).accept(_inbound("msg-arb-2"))
 
-    arbiter = OutboundArbiter(session_factory)
-    out_worker = OutboundWorker(session_factory, worker_id="out-arb", arbiter=arbiter)
+    out_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-arb",
+        arbiter=OutboundArbiter(session_factory),
+    )
     out_claim = await out_worker.claim_one(now=now)
-    assert out_claim is not None
-    assert out_claim.outbound_id == dispatched.outbound_id
-    with pytest.raises(OutboundArbiterDenied, match="STALE_CONTEXT"):
-        await out_worker.process_claimed(out_claim, now=now)
+    assert out_claim is None
+    async with session_scope(session_factory) as session:
+        stale = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert stale is not None
+        assert stale.delivery_status == DeliveryStatus.CANCELLED.value
+        assert stale.admitted_at is None
 
 
 @pytest.mark.asyncio
@@ -549,10 +849,10 @@ async def test_arbiter_process_claimed_denies_manager_owned(
 
 
 @pytest.mark.asyncio
-async def test_arbiter_process_claimed_denies_manager_takeover_timestamp(
+async def test_arbiter_process_claimed_consistent_takeover_is_manager_owned(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """ownership stays BOT while manager_takeover_at is set — hits MANAGER_TAKEOVER."""
+    """A consistent takeover reports the primary manager-ownership fence."""
     async with session_scope(session_factory) as session:
         result = await InboundService(session).accept(_inbound("msg-mgr-ts"))
         assert result.reply_plan is not None
@@ -564,22 +864,13 @@ async def test_arbiter_process_claimed_denies_manager_takeover_timestamp(
     assert claim is not None
     await plan_worker.dispatch_claimed(claim)
 
-    async with session_factory() as session:
-        async with session.begin():
-            await session.execute(
-                update(Conversation)
-                .where(Conversation.id == conversation_id)
-                .values(
-                    manager_takeover_at=due,
-                    ownership=ConversationOwnership.BOT.value,
-                )
-            )
+    await ManagerTakeoverService(session_factory).apply(conversation_id, now=due)
 
     arbiter = OutboundArbiter(session_factory)
     out_worker = OutboundWorker(session_factory, worker_id="out-mgr-ts", arbiter=arbiter)
     out_claim = await out_worker.claim_one(now=due)
     assert out_claim is not None
-    with pytest.raises(OutboundArbiterDenied, match="^MANAGER_TAKEOVER$"):
+    with pytest.raises(OutboundArbiterDenied, match="^MANAGER_OWNED$"):
         await out_worker.process_claimed(out_claim, now=due)
 
 
@@ -784,7 +1075,8 @@ async def test_outbound_persisted_custom_max_attempts_controls_claim_and_failure
     async with session_scope(session_factory) as session:
         row = await session.get(OutboxMessage, first.outbound_id)
         assert row is not None
-        assert row.delivery_status == DeliveryStatus.FAILED.value
+        assert row.delivery_status == DeliveryStatus.ADMITTED.value
+        assert row.admitted_at is not None
         assert row.attempt_count == 1
         assert row.max_attempts == 2
         assert row.not_before is not None
@@ -792,6 +1084,7 @@ async def test_outbound_persisted_custom_max_attempts_controls_claim_and_failure
 
     second = await worker.claim_one(now=retry_at)
     assert second is not None
+    assert second.delivery_status == DeliveryStatus.ADMITTED.value
     assert second.attempt_count == second.max_attempts == 2
     with pytest.raises(OutboundArbiterDenied, match="SYNTHETIC_TRANSIENT"):
         await worker.process_claimed(second, now=retry_at)
@@ -845,6 +1138,67 @@ async def test_db_rejects_sent_and_duplicate_idempotency(
                     )
                 )
                 await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_db_enforces_admission_and_lease_state_combinations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("db-admission-constraints")
+        )
+        assert inbound.reply_plan is not None
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-db-admission")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+
+    for invalid_sql in (
+        "UPDATE outbox_messages SET delivery_status = 'ADMITTED' "
+        "WHERE id = CAST(:id AS uuid)",
+        "UPDATE outbox_messages SET delivery_status = 'DELIVERED' "
+        "WHERE id = CAST(:id AS uuid)",
+        "UPDATE outbox_messages SET delivery_status = 'PROCESSING', "
+        "lease_owner = NULL, lease_token = NULL, lease_until = NULL "
+        "WHERE id = CAST(:id AS uuid)",
+    ):
+        async with session_factory() as session:
+            with pytest.raises(IntegrityError):
+                async with session.begin():
+                    await session.execute(
+                        text(invalid_sql),
+                        {"id": str(dispatched.outbound_id)},
+                    )
+
+    arbiter = OutboundArbiter(session_factory)
+    worker = OutboundWorker(
+        session_factory,
+        worker_id="out-db-admission",
+        arbiter=arbiter,
+    )
+    claim = await worker.claim_one(now=due)
+    assert claim is not None
+    async with session_scope(session_factory) as session:
+        await arbiter._admit_in_session(session, claim, now=due)
+
+    for forbidden_status in ("CANCELLED", "FAILED"):
+        async with session_factory() as session:
+            with pytest.raises(IntegrityError):
+                async with session.begin():
+                    await session.execute(
+                        text(
+                            "UPDATE outbox_messages SET delivery_status = :status, "
+                            "lease_owner = NULL, lease_token = NULL, lease_until = NULL "
+                            "WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {
+                            "status": forbidden_status,
+                            "id": str(dispatched.outbound_id),
+                        },
+                    )
 
 
 @pytest.mark.asyncio
@@ -1003,3 +1357,8 @@ async def test_dispatch_locks_conversation_before_outbox_no_deadlock_with_inboun
             assert len(outbound_rows) == 1
             assert outbound_rows[0].reply_plan_id == old_plan_id
             assert outbound_rows[0].id == dispatched.outbound_id
+            assert (
+                outbound_rows[0].delivery_status
+                == DeliveryStatus.CANCELLED.value
+            )
+            assert outbound_rows[0].admitted_at is None

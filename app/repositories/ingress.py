@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.clock import resolve_moment
 from app.models.conversation import Channel
 from app.models.ingress import (
     IngressEvent,
@@ -57,10 +58,6 @@ class IngressClaim:
             f"lease_version={self.lease_version!r}, "
             f"correlation_id={self.correlation_id!r}, envelope=<redacted>)"
         )
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _row_to_claim(row: IngressEvent) -> IngressClaim:
@@ -175,7 +172,7 @@ async def recover_exhausted_leases(
     now: datetime | None = None,
 ) -> int:
     """Terminalize expired final attempts without running business processing."""
-    moment = now or _utcnow()
+    moment = await resolve_moment(session, now)
     stmt = (
         update(IngressEvent)
         .where(
@@ -214,7 +211,7 @@ async def claim_next(
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
 
-    moment = now or _utcnow()
+    moment = await resolve_moment(session, now)
     await recover_exhausted_leases(session, now=moment)
     lease_until = moment + timedelta(seconds=lease_seconds)
     lease_token = uuid.uuid4()
@@ -281,6 +278,7 @@ async def complete_with_lease(
     lease_version: int,
 ) -> IngressEvent:
     """Mark PROCESSING→PROCESSED only when fencing token/version match."""
+    moment = await resolve_moment(session, None)
     if not ingress_transition_allowed(
         IngressStatus.PROCESSING,
         IngressStatus.PROCESSED,
@@ -302,7 +300,7 @@ async def complete_with_lease(
             lease_until=None,
             next_attempt_at=None,
             error_code=None,
-            updated_at=_utcnow(),
+            updated_at=moment,
         )
         .returning(IngressEvent.id)
     )
@@ -326,7 +324,7 @@ async def fail_with_lease(
     now: datetime | None = None,
 ) -> IngressEvent:
     """Mark PROCESSING→FAILED or PROCESSING→DEAD under fencing control."""
-    moment = now or _utcnow()
+    moment = await resolve_moment(session, now)
     event = await get_by_id(session, event_id=event_id)
     if event is None:
         raise RuntimeError("INGRESS_LOOKUP_FAILED")

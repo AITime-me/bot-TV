@@ -45,11 +45,17 @@ class SyntheticOutboundAdapter:
         forced_outcome: SyntheticOutboundOutcome = SyntheticOutboundOutcome.SUCCESS,
     ) -> None:
         self._forced_outcome = forced_outcome
+        self._delivered_ids: set[str] = set()
         self.calls: list[SyntheticOutboundRequest] = []
 
     def deliver(self, request: SyntheticOutboundRequest) -> SyntheticOutboundResult:
+        # ``outbound_id`` is the transport idempotency key. A future live
+        # adapter must provide the same guarantee before it can be registered.
+        if request.outbound_id in self._delivered_ids:
+            return SyntheticOutboundResult(outcome=SyntheticOutboundOutcome.SUCCESS)
         self.calls.append(request)
         if self._forced_outcome is SyntheticOutboundOutcome.SUCCESS:
+            self._delivered_ids.add(request.outbound_id)
             return SyntheticOutboundResult(outcome=SyntheticOutboundOutcome.SUCCESS)
         if self._forced_outcome is SyntheticOutboundOutcome.TRANSIENT_ERROR:
             return SyntheticOutboundResult(

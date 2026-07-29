@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
@@ -30,6 +31,8 @@ class DestinationType(str, enum.Enum):
 class DeliveryStatus(str, enum.Enum):
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
+    # ADMITTED is the durable point after which manager events cannot cancel.
+    ADMITTED = "ADMITTED"
     # DELIVERED means accepted by the synthetic sink only — never a real channel send.
     DELIVERED = "DELIVERED"
     FAILED = "FAILED"
@@ -47,10 +50,16 @@ OUTBOUND_TRANSITIONS: dict[DeliveryStatus, frozenset[DeliveryStatus]] = {
     ),
     DeliveryStatus.PROCESSING: frozenset(
         {
-            DeliveryStatus.DELIVERED,
+            DeliveryStatus.ADMITTED,
             DeliveryStatus.FAILED,
             DeliveryStatus.DEAD,
             DeliveryStatus.CANCELLED,
+        }
+    ),
+    DeliveryStatus.ADMITTED: frozenset(
+        {
+            DeliveryStatus.DELIVERED,
+            DeliveryStatus.DEAD,
         }
     ),
     DeliveryStatus.FAILED: frozenset(
@@ -101,7 +110,7 @@ class OutboxMessage(Base):
             name="ck_outbox_destination_type",
         ),
         CheckConstraint(
-            "delivery_status IN ('PENDING', 'PROCESSING', 'DELIVERED', "
+            "delivery_status IN ('PENDING', 'PROCESSING', 'ADMITTED', 'DELIVERED', "
             "'FAILED', 'DEAD', 'CANCELLED')",
             name="ck_outbox_delivery_status",
         ),
@@ -116,6 +125,56 @@ class OutboxMessage(Base):
         CheckConstraint(
             "lease_version >= 0",
             name="ck_outbox_lease_version_nonnegative",
+        ),
+        CheckConstraint(
+            "manager_epoch >= 0",
+            name="ck_outbox_manager_epoch_nonnegative",
+        ),
+        CheckConstraint(
+            "event_seq_hwm >= 0",
+            name="ck_outbox_event_seq_hwm_nonnegative",
+        ),
+        CheckConstraint(
+            "admitted_at IS NULL OR ("
+            "destination_type = 'SYNTHETIC_OUTBOUND' "
+            "AND delivery_status IN ('ADMITTED', 'DELIVERED', 'DEAD')"
+            ")",
+            name="ck_outbox_admitted_destination",
+        ),
+        CheckConstraint(
+            "delivery_status <> 'ADMITTED' OR ("
+            "destination_type = 'SYNTHETIC_OUTBOUND' AND admitted_at IS NOT NULL"
+            ")",
+            name="ck_outbox_admitted_state",
+        ),
+        CheckConstraint(
+            "destination_type <> 'SYNTHETIC_OUTBOUND' "
+            "OR delivery_status <> 'DELIVERED' "
+            "OR admitted_at IS NOT NULL",
+            name="ck_outbox_delivered_after_admission",
+        ),
+        CheckConstraint(
+            "("
+            "lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL"
+            ") OR ("
+            "lease_owner IS NOT NULL AND lease_token IS NOT NULL "
+            "AND lease_until IS NOT NULL"
+            ")",
+            name="ck_outbox_lease_complete",
+        ),
+        CheckConstraint(
+            "delivery_status NOT IN ('PENDING', 'FAILED', 'DELIVERED', "
+            "'DEAD', 'CANCELLED') OR ("
+            "lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL"
+            ")",
+            name="ck_outbox_unleased_states",
+        ),
+        CheckConstraint(
+            "delivery_status <> 'PROCESSING' OR ("
+            "lease_owner IS NOT NULL AND lease_token IS NOT NULL "
+            "AND lease_until IS NOT NULL"
+            ")",
+            name="ck_outbox_processing_lease",
         ),
         Index("ix_outbox_messages_status_not_before", "delivery_status", "not_before"),
         Index("ix_outbox_messages_lease_until", "lease_until"),
@@ -146,6 +205,18 @@ class OutboxMessage(Base):
     )
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     context_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    manager_epoch: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    event_seq_hwm: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
     destination_type: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -185,6 +256,10 @@ class OutboxMessage(Base):
         server_default=text("0"),
     )
     lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    admitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )

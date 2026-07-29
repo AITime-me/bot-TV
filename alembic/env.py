@@ -15,8 +15,10 @@ from app.models import (  # noqa: F401 — register metadata
     Conversation,
     InboxMessage,
     IngressEvent,
+    ManagerMessage,
     OutboxMessage,
     ReplyPlan,
+    WorkerHeartbeat,
 )
 
 config = context.config

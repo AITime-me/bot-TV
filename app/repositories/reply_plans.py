@@ -36,6 +36,8 @@ class ReplyPlanClaim:
     plan_id: uuid.UUID
     conversation_id: uuid.UUID
     context_version: int
+    manager_epoch: int
+    event_seq_hwm: int
     plan_type: str
     status: str
     not_before: datetime
@@ -71,6 +73,8 @@ def _row_to_claim(row: ReplyPlan) -> ReplyPlanClaim:
         plan_id=row.id,
         conversation_id=row.conversation_id,
         context_version=row.context_version,
+        manager_epoch=row.manager_epoch,
+        event_seq_hwm=row.event_seq_hwm,
         plan_type=row.plan_type,
         status=row.status,
         not_before=row.not_before,
@@ -104,6 +108,9 @@ async def create_client_reply_plan(
     delay_ms: int = BOT_RESPONSE_DELAY_MS,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     now: datetime | None = None,
+    not_before: datetime | None = None,
+    manager_epoch: int = 0,
+    event_seq_hwm: int = 0,
 ) -> ReplyPlan:
     """Create PENDING CLIENT_REPLY plan with persisted not_before.
 
@@ -113,14 +120,23 @@ async def create_client_reply_plan(
     """
     if delay_ms < 0:
         raise ValueError("delay_ms must be nonnegative")
+    if manager_epoch < 0 or event_seq_hwm < 0:
+        raise ValueError("reply fencing values must be nonnegative")
     moment = await resolve_moment(session, now)
+    scheduled_for = (
+        not_before
+        if not_before is not None
+        else moment + timedelta(milliseconds=delay_ms)
+    )
     plan = ReplyPlan(
         id=uuid.uuid4(),
         conversation_id=conversation_id,
         context_version=context_version,
+        manager_epoch=manager_epoch,
+        event_seq_hwm=event_seq_hwm,
         plan_type=ReplyPlanType.CLIENT_REPLY.value,
         status=ReplyPlanStatus.PENDING.value,
-        not_before=moment + timedelta(milliseconds=delay_ms),
+        not_before=scheduled_for,
         bot_response_delay_ms=delay_ms,
         payload_json=payload_json,
         cancel_reason=None,
@@ -291,20 +307,31 @@ async def claim_next(
     stmt = text(
         """
         WITH candidate AS (
-            SELECT id
-            FROM reply_plans
-            WHERE attempt_count < max_attempts
-              AND not_before <= :now
-              AND (
-                    status = 'READY'
-                 OR (status = 'FAILED'
-                     AND (lease_until IS NULL OR lease_until < :now))
-                 OR (status = 'PROCESSING'
-                     AND lease_until IS NOT NULL
-                     AND lease_until < :now)
+            SELECT p.id
+            FROM reply_plans AS p
+            WHERE p.attempt_count < p.max_attempts
+              AND p.not_before <= :now
+              AND EXISTS (
+                    SELECT 1
+                    FROM conversations AS c
+                    WHERE c.id = p.conversation_id
+                      AND c.status = 'OPEN'
+                      AND c.ownership = 'BOT'
+                      AND c.handoff_state = 'BOT_ACTIVE'
+                      AND c.context_version = p.context_version
+                      AND c.manager_epoch = p.manager_epoch
+                      AND c.current_event_seq = p.event_seq_hwm
               )
-            ORDER BY not_before ASC, created_at ASC
-            FOR UPDATE SKIP LOCKED
+              AND (
+                    p.status = 'READY'
+                 OR (p.status = 'FAILED'
+                     AND (p.lease_until IS NULL OR p.lease_until < :now))
+                 OR (p.status = 'PROCESSING'
+                     AND p.lease_until IS NOT NULL
+                     AND p.lease_until < :now)
+            )
+            ORDER BY p.not_before ASC, p.created_at ASC
+            FOR UPDATE OF p SKIP LOCKED
             LIMIT 1
         )
         UPDATE reply_plans AS p

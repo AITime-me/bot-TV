@@ -24,6 +24,7 @@ from app.models.conversation import (
     Conversation,
     ConversationOwnership,
     ConversationStatus,
+    HandoffState,
     conversation_allows_automatic_reply,
 )
 from app.models.inbox import (
@@ -38,6 +39,11 @@ from app.models.ingress import (
     IngressEventType,
     IngressStatus,
     ingress_transition_allowed,
+)
+from app.models.manager_message import (
+    MANAGER_MESSAGE_TEXT_MAX_LENGTH,
+    ManagerMessage,
+    ManagerMessageStatus,
 )
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
@@ -55,13 +61,24 @@ from app.models.reply_plan import (
     ReplyPlanType,
     reply_plan_transition_allowed,
 )
+from app.models.worker_heartbeat import (
+    AMOCRM_MIRROR_LOOP,
+    HANDOFF_EXPIRY_LOOP,
+    INGRESS_LOOP,
+    OUTBOUND_LOOP,
+    REPLY_PLAN_LOOP,
+    REQUIRED_WORKER_LOOPS,
+    WorkerHeartbeat,
+)
 
 __all__ = [
     "ALLOWED_MIRROR_PAYLOAD_KEYS",
     "AMOCRM_MIRROR_TRANSITIONS",
+    "AMOCRM_MIRROR_LOOP",
     "BOT_RESPONSE_DELAY_MS",
     "FORBIDDEN_MIRROR_PAYLOAD_KEYS",
     "INGRESS_TRANSITIONS",
+    "MANAGER_MESSAGE_TEXT_MAX_LENGTH",
     "MIRROR_KEY_MAX_LENGTH",
     "MIRROR_PAYLOAD_SCHEMA",
     "OUTBOUND_TRANSITIONS",
@@ -77,6 +94,9 @@ __all__ = [
     "Conversation",
     "ConversationOwnership",
     "ConversationStatus",
+    "HandoffState",
+    "HANDOFF_EXPIRY_LOOP",
+    "INGRESS_LOOP",
     "DeliveryStatus",
     "DestinationType",
     "InboxMessage",
@@ -85,12 +105,18 @@ __all__ = [
     "IngressStatus",
     "MessageDirection",
     "MessageType",
+    "ManagerMessage",
+    "ManagerMessageStatus",
     "MirrorPayloadViolation",
     "OutboxMessage",
+    "OUTBOUND_LOOP",
     "ProcessingStatus",
     "ReplyPlan",
     "ReplyPlanStatus",
     "ReplyPlanType",
+    "REPLY_PLAN_LOOP",
+    "REQUIRED_WORKER_LOOPS",
+    "WorkerHeartbeat",
     "amocrm_mirror_transition_allowed",
     "assert_mirror_payload_is_safe",
     "client_message_mirror_key",

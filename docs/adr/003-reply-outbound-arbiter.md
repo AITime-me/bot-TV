@@ -66,33 +66,44 @@ Statuses: `PENDING → READY → PROCESSING → DISPATCHED`, with
 ### OutboundMessage
 - `SYNTHETIC_OUTBOUND` is distinct from `INTERNAL_DRAFT`.
 - Idempotency key `synthetic-outbound:reply-plan:{plan_id}` is unique.
-- Delivery statuses include `DELIVERED` (synthetic sink only). `SENT` remains
-  forbidden.
+- `ADMITTED` is the durable cancellation boundary; `DELIVERED` means acceptance
+  by the synthetic sink only. `SENT` remains forbidden.
 
 ### Outbound Arbiter
-The only admission path to mark `SYNTHETIC_OUTBOUND` as `DELIVERED`.
+The only path to move `SYNTHETIC_OUTBOUND` through
+`PROCESSING → ADMITTED → DELIVERED`.
 Checks under per-conversation `FOR UPDATE` locks:
-bot ownership, no takeover, matching context_version, plan not
+bot ownership, `BOT_ACTIVE`, no takeover, matching `context_version`,
+`manager_epoch` and `event_seq_hwm`, plan not
 cancelled/superseded, `not_before` elapsed, lease fencing, not already
 delivered, and fail-closed mode (automatic real outbound always false).
+
+The `ADMITTED` commit is the linearization point against manager/client ingress.
+The sink runs after that transaction closes and must treat `outbound_id` as an
+idempotency key. Success is finalized in a second transaction. A crash after
+admission leaves an `ADMITTED` row that another worker can lease and retry;
+manager ingress cannot move it back to a cancellable state.
 
 ### Lease / fencing
 ReplyPlan and OutboundMessage use `FOR UPDATE SKIP LOCKED`, lease TTL,
 `lease_token` + `lease_version`, retries, and `DEAD` after max attempts.
-`max_attempts` persisted on each row is the only limit used by claim, explicit
-failure, and exhausted-lease recovery. Before a normal claim, an expired
+`max_attempts` persisted on each row limits pre-admission claims and confirmed
+sink failures. Before a normal pre-admission claim, an expired
 `PROCESSING` row whose final attempt was already issued is moved to `DEAD`
 without dispatching a ReplyPlan or invoking the outbound sink. ReplyPlan
 recovery locks Conversation first and transactionally enqueues the same
 `REPLY_PLAN_STATE_CHANGED(DEAD)` mirror fact as explicit final failure.
+An expired `ADMITTED` lease is always recoverable even if the claim counter has
+reached the configured limit: a crash is not evidence of a provider rejection.
+The next confirmed transient/permanent sink result applies the terminal limit.
 
 ### Out of scope
-Real VK/MAX/Telegram/site adapters, amoCRM, n8n, AI, public webhooks, real
-sends, full handoff workflows, and online-zapis-tv integration.
+Real VK/MAX/Telegram/site adapters, n8n, AI, public webhooks, real sends, and
+online-zapis-tv integration.
 
 ## Consequences
 
-Workers can recover after crash using leased rows. A crash during the final
-allowed attempt is terminalized on the next claim cycle, so an expired row
-cannot remain permanently `PROCESSING`. Stale workers cannot complete
-superseded plans or admit outdated outbound messages.
+Workers can recover after crash using leased rows. An expired pre-admission
+`PROCESSING` final attempt is terminalized; an `ADMITTED` row is retried with
+the same transport idempotency key. Stale workers cannot complete superseded
+plans, admit outdated outbound messages, or finalize a reclaimed admission.

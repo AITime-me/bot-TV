@@ -9,7 +9,11 @@ import pytest
 
 from app.config import Settings
 from app.core.outbound_policy import OutboundAction, is_automatic_outbound_allowed
-from app.models.conversation import ConversationOwnership
+from app.models.conversation import (
+    ConversationOwnership,
+    ConversationStatus,
+    HandoffState,
+)
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
     DeliveryStatus,
@@ -65,6 +69,10 @@ def test_outbound_transitions_forbid_sent() -> None:
     assert set(OUTBOUND_TRANSITIONS) == set(DeliveryStatus)
     assert outbound_transition_allowed(
         DeliveryStatus.PROCESSING,
+        DeliveryStatus.ADMITTED,
+    )
+    assert not outbound_transition_allowed(
+        DeliveryStatus.PROCESSING,
         DeliveryStatus.DELIVERED,
     )
     assert not outbound_transition_allowed(
@@ -94,6 +102,7 @@ def test_synthetic_outbound_adapter_has_no_network_side_effects() -> None:
     assert secret not in repr(request)
     result = adapter.deliver(request)
     assert result.outcome is SyntheticOutboundOutcome.SUCCESS
+    assert adapter.deliver(request).outcome is SyntheticOutboundOutcome.SUCCESS
     assert len(adapter.calls) == 1
 
     failing = SyntheticOutboundAdapter(
@@ -116,6 +125,8 @@ def _arbiter_claim(
         conversation_id=conversation_id,
         reply_plan_id=reply_plan_id,
         context_version=context_version,
+        manager_epoch=0,
+        event_seq_hwm=0,
         idempotency_key=f"synthetic-outbound:reply-plan:{reply_plan_id}",
         destination_type=DestinationType.SYNTHETIC_OUTBOUND.value,
         delivery_status=DeliveryStatus.PROCESSING.value,
@@ -170,9 +181,13 @@ async def test_arbiter_admits_dispatched_and_rejects_other_plan_statuses(
     )
 
     conversation = MagicMock()
+    conversation.status = ConversationStatus.OPEN.value
     conversation.ownership = ConversationOwnership.BOT.value
+    conversation.handoff_state = HandoffState.BOT_ACTIVE.value
     conversation.manager_takeover_at = None
     conversation.context_version = 1
+    conversation.manager_epoch = 0
+    conversation.current_event_seq = 0
 
     outbound = MagicMock()
     outbound.id = outbound_id
@@ -184,12 +199,18 @@ async def test_arbiter_admits_dispatched_and_rejects_other_plan_statuses(
     outbound.destination_type = DestinationType.SYNTHETIC_OUTBOUND.value
     outbound.not_before = _FIXED_NOW - timedelta(seconds=1)
     outbound.context_version = 1
+    outbound.manager_epoch = 0
+    outbound.event_seq_hwm = 0
     outbound.correlation_id = claim.correlation_id
     outbound.payload_json = {"schema": "synthetic.outbound.v1"}
 
-    delivered = MagicMock()
-    delivered.id = outbound_id
-    delivered.delivery_status = DeliveryStatus.DELIVERED.value
+    admitted = MagicMock()
+    admitted.id = outbound_id
+    admitted.conversation_id = conversation_id
+    admitted.reply_plan_id = reply_plan_id
+    admitted.context_version = 1
+    admitted.correlation_id = claim.correlation_id
+    admitted.payload_json = {"schema": "synthetic.outbound.v1"}
 
     monkeypatch.setattr(
         "app.services.outbound_arbiter.resolve_moment",
@@ -200,8 +221,8 @@ async def test_arbiter_admits_dispatched_and_rejects_other_plan_statuses(
         AsyncMock(return_value=conversation),
     )
     monkeypatch.setattr(
-        "app.services.outbound_arbiter.outbound_repo.mark_delivered_with_lease",
-        AsyncMock(return_value=delivered),
+        "app.services.outbound_arbiter.outbound_repo.mark_admitted_with_lease",
+        AsyncMock(return_value=admitted),
     )
 
     sink = SyntheticOutboundAdapter()
@@ -211,15 +232,16 @@ async def test_arbiter_admits_dispatched_and_rejects_other_plan_statuses(
         plan = MagicMock()
         plan.status = status.value
         plan.context_version = 1
+        plan.manager_epoch = 0
+        plan.event_seq_hwm = 0
         session = _build_admit_session(
             conversation=conversation,
             outbound=outbound,
             plan=plan,
         )
         if status is ReplyPlanStatus.DISPATCHED:
-            result = await arbiter._admit_in_session(session, claim, now=_FIXED_NOW)
-            assert result.admitted is True
-            assert result.delivery_status == DeliveryStatus.DELIVERED.value
+            request = await arbiter._admit_in_session(session, claim, now=_FIXED_NOW)
+            assert request.outbound_id == str(outbound_id)
             continue
         with pytest.raises(
             OutboundArbiterDenied,
@@ -243,7 +265,9 @@ async def test_arbiter_denies_manager_owned_conversation(
         lease_token=lease_token,
     )
     conversation = MagicMock()
+    conversation.status = ConversationStatus.HANDOFF.value
     conversation.ownership = ConversationOwnership.MANAGER.value
+    conversation.handoff_state = HandoffState.HUMAN_ACTIVE.value
     conversation.manager_takeover_at = None
     conversation.context_version = 1
 
@@ -278,7 +302,9 @@ async def test_arbiter_denies_manager_takeover_timestamp(
         lease_token=lease_token,
     )
     conversation = MagicMock()
+    conversation.status = ConversationStatus.OPEN.value
     conversation.ownership = ConversationOwnership.BOT.value
+    conversation.handoff_state = HandoffState.BOT_ACTIVE.value
     conversation.manager_takeover_at = _FIXED_NOW
     conversation.context_version = 1
 

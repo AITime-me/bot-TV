@@ -36,6 +36,8 @@ class OutboundClaim:
     conversation_id: uuid.UUID
     reply_plan_id: uuid.UUID | None
     context_version: int | None
+    manager_epoch: int
+    event_seq_hwm: int
     idempotency_key: str | None
     destination_type: str
     delivery_status: str
@@ -68,6 +70,8 @@ def _row_to_claim(row: OutboxMessage) -> OutboundClaim:
         conversation_id=row.conversation_id,
         reply_plan_id=row.reply_plan_id,
         context_version=row.context_version,
+        manager_epoch=row.manager_epoch,
+        event_seq_hwm=row.event_seq_hwm,
         idempotency_key=row.idempotency_key,
         destination_type=row.destination_type,
         delivery_status=row.delivery_status,
@@ -114,6 +118,8 @@ async def insert_synthetic_outbound_if_absent(
     correlation_id: uuid.UUID,
     not_before: datetime,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    manager_epoch: int = 0,
+    event_seq_hwm: int = 0,
 ) -> tuple[OutboxMessage, bool]:
     """Idempotently create SYNTHETIC_OUTBOUND for a ReplyPlan. Does not commit."""
     key = synthetic_outbound_idempotency_key(reply_plan_id)
@@ -131,6 +137,8 @@ async def insert_synthetic_outbound_if_absent(
             reply_plan_id=reply_plan_id,
             idempotency_key=key,
             context_version=context_version,
+            manager_epoch=manager_epoch,
+            event_seq_hwm=event_seq_hwm,
             destination_type=DestinationType.SYNTHETIC_OUTBOUND.value,
             payload_json=payload_json,
             delivery_status=DeliveryStatus.PENDING.value,
@@ -151,6 +159,50 @@ async def insert_synthetic_outbound_if_absent(
     if row is None:
         raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
     return row, inserted is not None
+
+
+async def cancel_unadmitted_for_manager_message(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+) -> int:
+    """Cancel synthetic outbound that has not crossed durable admission."""
+    return await cancel_unadmitted_for_conversation(
+        session,
+        conversation_id=conversation_id,
+    )
+
+
+async def cancel_unadmitted_for_conversation(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+) -> int:
+    """Cancel every synthetic row still on the reversible side of admission."""
+    stmt = (
+        update(OutboxMessage)
+        .where(
+            OutboxMessage.conversation_id == conversation_id,
+            OutboxMessage.destination_type
+            == DestinationType.SYNTHETIC_OUTBOUND.value,
+            OutboxMessage.delivery_status.in_(
+                (
+                    DeliveryStatus.PENDING.value,
+                    DeliveryStatus.PROCESSING.value,
+                    DeliveryStatus.FAILED.value,
+                )
+            ),
+        )
+        .values(
+            delivery_status=DeliveryStatus.CANCELLED.value,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            updated_at=func.now(),
+        )
+    )
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
 
 
 async def recover_exhausted_leases(
@@ -201,7 +253,10 @@ async def claim_next(
             SELECT id
             FROM outbox_messages
             WHERE destination_type = 'SYNTHETIC_OUTBOUND'
-              AND attempt_count < max_attempts
+              AND (
+                    delivery_status = 'ADMITTED'
+                 OR attempt_count < max_attempts
+              )
               AND (not_before IS NULL OR not_before <= :now)
               AND (
                     delivery_status = 'PENDING'
@@ -210,6 +265,8 @@ async def claim_next(
                  OR (delivery_status = 'PROCESSING'
                      AND lease_until IS NOT NULL
                      AND lease_until < :now)
+                 OR (delivery_status = 'ADMITTED'
+                     AND (lease_until IS NULL OR lease_until < :now))
               )
             ORDER BY created_at ASC
             FOR UPDATE SKIP LOCKED
@@ -217,7 +274,10 @@ async def claim_next(
         )
         UPDATE outbox_messages AS o
         SET
-            delivery_status = 'PROCESSING',
+            delivery_status = CASE
+                WHEN o.delivery_status = 'ADMITTED' THEN 'ADMITTED'
+                ELSE 'PROCESSING'
+            END,
             lease_owner = :worker_id,
             lease_token = CAST(:lease_token AS uuid),
             lease_version = o.lease_version + 1,
@@ -246,16 +306,19 @@ async def claim_next(
     return _row_to_claim(row)
 
 
-async def mark_delivered_with_lease(
+async def mark_admitted_with_lease(
     session: AsyncSession,
     *,
     outbound_id: uuid.UUID,
     lease_token: uuid.UUID,
     lease_version: int,
+    now: datetime | None = None,
 ) -> OutboxMessage:
+    """Commit the irreversible admission point while retaining the lease."""
+    moment = await resolve_moment(session, now)
     if not outbound_transition_allowed(
         DeliveryStatus.PROCESSING,
-        DeliveryStatus.DELIVERED,
+        DeliveryStatus.ADMITTED,
     ):
         raise OutboundStateError("OUTBOUND_TRANSITION_DENIED")
     stmt = (
@@ -267,11 +330,9 @@ async def mark_delivered_with_lease(
             OutboxMessage.lease_version == lease_version,
         )
         .values(
-            delivery_status=DeliveryStatus.DELIVERED.value,
-            lease_owner=None,
-            lease_token=None,
-            lease_until=None,
-            updated_at=func.now(),
+            delivery_status=DeliveryStatus.ADMITTED.value,
+            admitted_at=moment,
+            updated_at=moment,
         )
         .returning(OutboxMessage.id)
     )
@@ -282,6 +343,109 @@ async def mark_delivered_with_lease(
     if row is None:
         raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
     return row
+
+
+async def mark_delivered_with_lease(
+    session: AsyncSession,
+    *,
+    outbound_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_version: int,
+    now: datetime | None = None,
+) -> OutboxMessage:
+    """Finalize a previously admitted outbound after the sink returns success."""
+    moment = await resolve_moment(session, now)
+    if not outbound_transition_allowed(
+        DeliveryStatus.ADMITTED,
+        DeliveryStatus.DELIVERED,
+    ):
+        raise OutboundStateError("OUTBOUND_TRANSITION_DENIED")
+    stmt = (
+        update(OutboxMessage)
+        .where(
+            OutboxMessage.id == outbound_id,
+            OutboxMessage.delivery_status == DeliveryStatus.ADMITTED.value,
+            OutboxMessage.admitted_at.is_not(None),
+            OutboxMessage.lease_token == lease_token,
+            OutboxMessage.lease_version == lease_version,
+        )
+        .values(
+            delivery_status=DeliveryStatus.DELIVERED.value,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            updated_at=moment,
+        )
+        .returning(OutboxMessage.id)
+    )
+    updated = await session.scalar(stmt)
+    if updated is None:
+        raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
+    row = await get_by_id(session, outbound_id=outbound_id)
+    if row is None:
+        raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
+    return row
+
+
+async def fail_admitted_delivery_with_lease(
+    session: AsyncSession,
+    *,
+    outbound_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_version: int,
+    permanent: bool,
+    retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
+    now: datetime | None = None,
+) -> OutboxMessage:
+    """Retry or terminalize sink delivery without crossing back before ADMITTED."""
+    moment = await resolve_moment(session, now)
+    row = await get_by_id(session, outbound_id=outbound_id)
+    if row is None:
+        raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
+    if (
+        row.delivery_status != DeliveryStatus.ADMITTED.value
+        or row.admitted_at is None
+        or row.lease_token != lease_token
+        or row.lease_version != lease_version
+    ):
+        raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
+
+    terminal = permanent or row.attempt_count >= row.max_attempts
+    target = DeliveryStatus.DEAD if terminal else DeliveryStatus.ADMITTED
+    if target is DeliveryStatus.DEAD and not outbound_transition_allowed(
+        DeliveryStatus.ADMITTED,
+        target,
+    ):
+        raise OutboundStateError("OUTBOUND_TRANSITION_DENIED")
+    retry_at = row.not_before if terminal else moment + timedelta(
+        seconds=retry_delay_seconds
+    )
+    stmt = (
+        update(OutboxMessage)
+        .where(
+            OutboxMessage.id == outbound_id,
+            OutboxMessage.delivery_status == DeliveryStatus.ADMITTED.value,
+            OutboxMessage.admitted_at.is_not(None),
+            OutboxMessage.lease_token == lease_token,
+            OutboxMessage.lease_version == lease_version,
+        )
+        .values(
+            delivery_status=target.value,
+            not_before=retry_at,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            updated_at=moment,
+        )
+        .returning(OutboxMessage.id)
+    )
+    updated = await session.scalar(stmt)
+    if updated is None:
+        raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
+    refreshed = await get_by_id(session, outbound_id=outbound_id)
+    if refreshed is None:
+        raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
+    return refreshed
 
 
 async def fail_with_lease(

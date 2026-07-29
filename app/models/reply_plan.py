@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
@@ -146,6 +147,14 @@ class ReplyPlan(Base):
             "context_version >= 0",
             name="ck_reply_plans_context_version_nonnegative",
         ),
+        CheckConstraint(
+            "manager_epoch >= 0",
+            name="ck_reply_plans_manager_epoch_nonnegative",
+        ),
+        CheckConstraint(
+            "event_seq_hwm >= 0",
+            name="ck_reply_plans_event_seq_hwm_nonnegative",
+        ),
         Index("ix_reply_plans_status_not_before", "status", "not_before"),
         Index("ix_reply_plans_lease_until", "lease_until"),
         Index("ix_reply_plans_conversation_id", "conversation_id"),
@@ -162,6 +171,18 @@ class ReplyPlan(Base):
         nullable=False,
     )
     context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    manager_epoch: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    event_seq_hwm: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
     plan_type: Mapped[str] = mapped_column(
         String(32),
         nullable=False,

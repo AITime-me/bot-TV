@@ -1,0 +1,37 @@
+.git
+.gitattributes
+.gitignore
+.env
+.env.*
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+tests
+docs
+*.md
+dist
+build
+*.egg-info
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Default-deny build context: only runtime source and migration assets below
+# may leave the workstation, even if an unexpected secret file is added later.
+**
+!requirements-lock.txt
+!alembic.ini
+!alembic/
+!alembic/**
+!app/
+!app/**
+**/__pycache__/
+**/*.py[cod]
