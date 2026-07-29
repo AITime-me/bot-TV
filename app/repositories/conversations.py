@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +13,15 @@ from app.models.conversation import (
     Conversation,
     ConversationOwnership,
     ConversationStatus,
+    HANDOFF_QUARANTINE_CLEAR_PATH_MANAGER_MESSAGE,
+    HANDOFF_QUARANTINE_CLEAR_PATHS,
+    HANDOFF_QUARANTINE_REASONS,
     HandoffState,
+    handoff_expiry_quarantine_is_active,
+)
+from app.models.conversation_ops_event import (
+    ConversationOpsEvent,
+    ConversationOpsEventType,
 )
 
 # Lock order for every transaction that touches a dialog subtree:
@@ -94,6 +102,10 @@ async def claim_next_due_handoff(
             ),
             Conversation.handoff_deadline_at.is_not(None),
             Conversation.handoff_deadline_at <= func.statement_timestamp(),
+            or_(
+                Conversation.handoff_quarantined_at.is_(None),
+                Conversation.handoff_quarantine_cleared_at.is_not(None),
+            ),
         )
         .order_by(Conversation.handoff_deadline_at, Conversation.created_at)
         .with_for_update(skip_locked=True)
@@ -261,6 +273,11 @@ async def apply_chronologically_new_manager_message(
     """Apply one ordered manager event under the Conversation row lock."""
     if not 10 * 60 <= handoff_pause_seconds <= 15 * 60:
         raise ValueError("handoff_pause_seconds must be between 600 and 900")
+    await clear_active_handoff_quarantine_for_manager_message(
+        session,
+        conversation=conversation,
+        moment=moment,
+    )
     entered_from_bot = conversation.handoff_state == HandoffState.BOT_ACTIVE.value
     stmt = (
         update(Conversation)
@@ -287,6 +304,119 @@ async def apply_chronologically_new_manager_message(
     await session.execute(stmt)
     await session.refresh(conversation)
     return conversation, entered_from_bot
+
+
+async def append_conversation_ops_event(
+    session: AsyncSession,
+    *,
+    conversation: Conversation,
+    event_type: ConversationOpsEventType,
+    reason_code: str,
+    clear_path: str | None = None,
+) -> ConversationOpsEvent:
+    """Insert one append-only operational event. No update/delete API exists."""
+    if reason_code not in HANDOFF_QUARANTINE_REASONS:
+        raise ValueError("HANDOFF_QUARANTINE_REASON_INVALID")
+    if event_type is ConversationOpsEventType.HANDOFF_EXPIRY_QUARANTINED:
+        if clear_path is not None:
+            raise ValueError("HANDOFF_QUARANTINE_CLEAR_PATH_UNEXPECTED")
+    elif event_type is ConversationOpsEventType.HANDOFF_QUARANTINE_CLEARED:
+        if clear_path not in HANDOFF_QUARANTINE_CLEAR_PATHS:
+            raise ValueError("HANDOFF_QUARANTINE_CLEAR_PATH_INVALID")
+    else:
+        raise ValueError("CONVERSATION_OPS_EVENT_TYPE_INVALID")
+
+    event = ConversationOpsEvent(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        event_type=event_type.value,
+        reason_code=reason_code,
+        clear_path=clear_path,
+        manager_epoch=conversation.manager_epoch,
+        context_version=conversation.context_version,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def quarantine_due_handoff_expiry(
+    session: AsyncSession,
+    *,
+    conversation: Conversation,
+    reason_code: str,
+    moment: datetime,
+) -> Conversation:
+    """Mark a locked due handoff as actively quarantined. Never BOT_ACTIVE."""
+    if reason_code not in HANDOFF_QUARANTINE_REASONS:
+        raise ValueError("HANDOFF_QUARANTINE_REASON_INVALID")
+
+    await append_conversation_ops_event(
+        session,
+        conversation=conversation,
+        event_type=ConversationOpsEventType.HANDOFF_EXPIRY_QUARANTINED,
+        reason_code=reason_code,
+    )
+    stmt = (
+        update(Conversation)
+        .where(Conversation.id == conversation.id)
+        .values(
+            handoff_quarantined_at=moment,
+            handoff_quarantine_reason=reason_code,
+            handoff_quarantine_cleared_at=None,
+            handoff_quarantine_clear_path=None,
+            updated_at=moment,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(stmt)
+    await session.refresh(conversation)
+    return conversation
+
+
+async def clear_active_handoff_quarantine_for_manager_message(
+    session: AsyncSession,
+    *,
+    conversation: Conversation,
+    moment: datetime,
+) -> bool:
+    """Clear active quarantine gate only; never NULL quarantined_at/reason."""
+    if not handoff_expiry_quarantine_is_active(conversation):
+        return False
+    reason_code = conversation.handoff_quarantine_reason
+    if reason_code is None or reason_code not in HANDOFF_QUARANTINE_REASONS:
+        raise RuntimeError("HANDOFF_QUARANTINE_REASON_MISSING")
+
+    await append_conversation_ops_event(
+        session,
+        conversation=conversation,
+        event_type=ConversationOpsEventType.HANDOFF_QUARANTINE_CLEARED,
+        reason_code=reason_code,
+        clear_path=HANDOFF_QUARANTINE_CLEAR_PATH_MANAGER_MESSAGE,
+    )
+    stmt = (
+        update(Conversation)
+        .where(
+            Conversation.id == conversation.id,
+            Conversation.handoff_quarantined_at.is_not(None),
+            Conversation.handoff_quarantine_cleared_at.is_(None),
+            # Preserve original quarantined_at / reason — do not SET NULL.
+            Conversation.handoff_quarantine_reason == reason_code,
+        )
+        .values(
+            handoff_quarantine_cleared_at=moment,
+            handoff_quarantine_clear_path=(
+                HANDOFF_QUARANTINE_CLEAR_PATH_MANAGER_MESSAGE
+            ),
+            updated_at=moment,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    updated = await session.execute(stmt)
+    if updated.rowcount != 1:
+        raise RuntimeError("HANDOFF_QUARANTINE_CLEAR_STALE")
+    await session.refresh(conversation)
+    return True
 
 
 async def enter_or_continue_human_pause(

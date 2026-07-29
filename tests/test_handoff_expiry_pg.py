@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.clock import db_statement_now
@@ -16,12 +16,12 @@ from app.models.conversation import (
     ConversationStatus,
     HandoffState,
 )
+from app.models.conversation_ops_event import ConversationOpsEvent
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.repositories import conversations as conversation_repo
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.manager_message import SyntheticManagerMessageEvent
 from app.services.handoff_expiry import (
-    HandoffExpiryInvariantError,
     HandoffExpiryTransition,
     HandoffExpiryWorker,
 )
@@ -312,7 +312,7 @@ async def test_restart_after_expiry_commit_does_not_duplicate_deferred_plan(
         )
 
 
-async def test_invalid_paused_dialog_fails_closed_and_remains_recoverable(
+async def test_invalid_paused_dialog_is_quarantined_without_bot_return(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     conversation_id, _ = await _make_due(
@@ -327,12 +327,268 @@ async def test_invalid_paused_dialog_fails_closed_and_remains_recoverable(
                 .values(active_reply_plan_id=None)
             )
 
-    with pytest.raises(
-        HandoffExpiryInvariantError,
-        match="HANDOFF_DEFERRED_PLAN_MISSING",
-    ):
-        await HandoffExpiryWorker(session_factory).expire_one()
+    result = await HandoffExpiryWorker(session_factory).expire_one()
 
+    assert result is not None
+    assert result.transition is HandoffExpiryTransition.QUARANTINED
+    assert result.quarantine_reason == "HANDOFF_DEFERRED_PLAN_MISSING"
     conversation = await _load_conversation(session_factory, conversation_id)
     assert conversation.handoff_state == HandoffState.HUMAN_PAUSE.value
     assert conversation.ownership == ConversationOwnership.MANAGER.value
+    assert conversation.status == ConversationStatus.HANDOFF.value
+    assert conversation.handoff_quarantined_at is not None
+    assert (
+        conversation.handoff_quarantine_reason == "HANDOFF_DEFERRED_PLAN_MISSING"
+    )
+    assert conversation.handoff_quarantine_cleared_at is None
+    assert conversation.handoff_quarantine_clear_path is None
+
+    assert await HandoffExpiryWorker(session_factory).expire_one() is None
+    restarted = HandoffExpiryWorker(session_factory)
+    assert await restarted.expire_one() is None
+
+
+async def test_quarantined_row_does_not_block_other_due_handoffs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    poisoned_id, _ = await _make_due(
+        session_factory,
+        with_client_pause=True,
+    )
+    healthy = await SyntheticManagerMessageService(session_factory).apply(
+        SyntheticManagerMessageEvent(
+            external_conversation_id="expiry-healthy",
+            external_message_id="manager-healthy-1",
+            provider_sequence=1,
+            text="Ответ менеджера",
+        )
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == poisoned_id)
+                .values(active_reply_plan_id=None)
+            )
+            due = await db_statement_now(session) - timedelta(seconds=1)
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == healthy.conversation_id)
+                .values(handoff_deadline_at=due)
+            )
+
+    worker = HandoffExpiryWorker(session_factory)
+    first = await worker.expire_one()
+    second = await worker.expire_one()
+    third = await worker.expire_one()
+
+    assert {first.transition, second.transition} == {
+        HandoffExpiryTransition.QUARANTINED,
+        HandoffExpiryTransition.HUMAN_ACTIVE_TO_BOT,
+    }
+    assert third is None
+    poisoned = await _load_conversation(session_factory, poisoned_id)
+    healthy_row = await _load_conversation(
+        session_factory,
+        healthy.conversation_id,
+    )
+    assert poisoned.handoff_quarantined_at is not None
+    assert poisoned.handoff_state == HandoffState.HUMAN_PAUSE.value
+    assert healthy_row.handoff_state == HandoffState.BOT_ACTIVE.value
+
+
+async def test_manager_message_clears_quarantine_preserving_history(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation_id, _ = await _make_due(
+        session_factory,
+        with_client_pause=True,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(active_reply_plan_id=None)
+            )
+
+    quarantined = await HandoffExpiryWorker(session_factory).expire_one()
+    assert quarantined is not None
+    assert quarantined.transition is HandoffExpiryTransition.QUARANTINED
+    before = await _load_conversation(session_factory, conversation_id)
+    quarantined_at = before.handoff_quarantined_at
+    reason = before.handoff_quarantine_reason
+    assert quarantined_at is not None
+    assert reason == "HANDOFF_DEFERRED_PLAN_MISSING"
+
+    await SyntheticManagerMessageService(session_factory).apply(
+        _manager(message_id="manager-recovery", provider_sequence=2)
+    )
+    after = await _load_conversation(session_factory, conversation_id)
+    assert after.handoff_quarantined_at == quarantined_at
+    assert after.handoff_quarantine_reason == reason
+    assert after.handoff_quarantine_cleared_at is not None
+    assert after.handoff_quarantine_clear_path == "MANAGER_MESSAGE_APPLIED"
+    assert after.handoff_state == HandoffState.HUMAN_ACTIVE.value
+
+    async with session_factory() as session:
+        events = (
+            await session.scalars(
+                select(ConversationOpsEvent)
+                .where(ConversationOpsEvent.conversation_id == conversation_id)
+                .order_by(
+                    ConversationOpsEvent.created_at,
+                    ConversationOpsEvent.id,
+                )
+            )
+        ).all()
+    assert [event.event_type for event in events] == [
+        "HANDOFF_EXPIRY_QUARANTINED",
+        "HANDOFF_QUARANTINE_CLEARED",
+    ]
+    assert events[0].reason_code == "HANDOFF_DEFERRED_PLAN_MISSING"
+    assert events[0].clear_path is None
+    assert events[1].clear_path == "MANAGER_MESSAGE_APPLIED"
+    assert events[1].reason_code == "HANDOFF_DEFERRED_PLAN_MISSING"
+
+    async with session_factory() as session:
+        async with session.begin():
+            due = await db_statement_now(session) - timedelta(seconds=1)
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(handoff_deadline_at=due)
+            )
+
+    claimed = await HandoffExpiryWorker(session_factory).expire_one()
+    assert claimed is not None
+    assert claimed.transition is HandoffExpiryTransition.HUMAN_ACTIVE_TO_BOT
+
+
+async def test_requarantine_creates_second_event_and_closes_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation_id, plan_id = await _make_due(
+        session_factory,
+        with_client_pause=True,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(active_reply_plan_id=None)
+            )
+
+    first = await HandoffExpiryWorker(session_factory).expire_one()
+    assert first is not None
+    assert first.transition is HandoffExpiryTransition.QUARANTINED
+
+    await SyntheticManagerMessageService(session_factory).apply(
+        _manager(message_id="manager-recovery-2", provider_sequence=2)
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            conversation = await session.get(Conversation, conversation_id)
+            assert conversation is not None
+            due = await db_statement_now(session) - timedelta(seconds=1)
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(
+                    handoff_state=HandoffState.HUMAN_PAUSE.value,
+                    human_pause_anchor_at=due,
+                    handoff_deadline_at=due,
+                    active_reply_plan_id=None,
+                )
+            )
+
+    second = await HandoffExpiryWorker(session_factory).expire_one()
+    assert second is not None
+    assert second.transition is HandoffExpiryTransition.QUARANTINED
+    after = await _load_conversation(session_factory, conversation_id)
+    assert after.handoff_quarantine_cleared_at is None
+    assert after.handoff_quarantine_clear_path is None
+    assert after.handoff_quarantine_reason == "HANDOFF_DEFERRED_PLAN_MISSING"
+    assert await HandoffExpiryWorker(session_factory).expire_one() is None
+
+    async with session_factory() as session:
+        events = (
+            await session.scalars(
+                select(ConversationOpsEvent)
+                .where(ConversationOpsEvent.conversation_id == conversation_id)
+                .order_by(
+                    ConversationOpsEvent.created_at,
+                    ConversationOpsEvent.id,
+                )
+            )
+        ).all()
+    assert [event.event_type for event in events] == [
+        "HANDOFF_EXPIRY_QUARANTINED",
+        "HANDOFF_QUARANTINE_CLEARED",
+        "HANDOFF_EXPIRY_QUARANTINED",
+    ]
+    assert plan_id is not None
+
+
+async def test_handoff_quarantine_field_combinations_are_checked(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation_id, _ = await _make_due(
+        session_factory,
+        with_client_pause=False,
+    )
+    async with session_factory() as session:
+        with pytest.raises(Exception):
+            async with session.begin():
+                await session.execute(
+                    update(Conversation)
+                    .where(Conversation.id == conversation_id)
+                    .values(
+                        handoff_quarantined_at=func.now(),
+                        handoff_quarantine_reason=None,
+                        handoff_quarantine_cleared_at=None,
+                        handoff_quarantine_clear_path=None,
+                    )
+                )
+                await session.flush()
+
+
+async def test_ops_event_fk_restricts_conversation_delete(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation_id, _ = await _make_due(
+        session_factory,
+        with_client_pause=True,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(active_reply_plan_id=None)
+            )
+
+    result = await HandoffExpiryWorker(session_factory).expire_one()
+    assert result is not None
+    assert result.transition is HandoffExpiryTransition.QUARANTINED
+
+    async with session_factory() as session:
+        with pytest.raises(Exception):
+            async with session.begin():
+                await session.execute(
+                    text("DELETE FROM conversations WHERE id = :id"),
+                    {"id": conversation_id},
+                )
+                await session.flush()
+
+    async with session_factory() as session:
+        assert await session.get(Conversation, conversation_id) is not None
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ConversationOpsEvent)
+                .where(ConversationOpsEvent.conversation_id == conversation_id)
+            )
+            == 1
+        )

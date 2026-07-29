@@ -49,10 +49,27 @@ def test_handoff_due_claim_uses_only_postgresql_clock() -> None:
     )
 
     assert "statement_timestamp" in claim_source
+    assert "handoff_quarantined_at" in claim_source
+    assert "handoff_quarantine_cleared_at" in claim_source
     assert ":now" not in claim_source
     for source in (repository_source, expiry_source):
         assert "datetime.now(" not in source
         assert "utcnow(" not in source
+
+
+def test_handoff_expiry_quarantines_invariant_without_raising_to_runtime() -> None:
+    expiry_source = (
+        _REPO_ROOT / "app" / "services" / "handoff_expiry.py"
+    ).read_text(encoding="utf-8")
+    runtime_source = (
+        _REPO_ROOT / "app" / "services" / "worker_runtime.py"
+    ).read_text(encoding="utf-8")
+
+    assert "except HandoffExpiryInvariantError" in expiry_source
+    assert "quarantine_due_handoff_expiry" in expiry_source
+    assert "HandoffExpiryTransition.QUARANTINED" in expiry_source
+    assert "except Exception" not in expiry_source
+    assert "HandoffExpiryInvariantError" not in runtime_source
 
 
 @pytest.mark.asyncio

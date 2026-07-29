@@ -43,6 +43,35 @@ class HandoffState(str, enum.Enum):
     HUMAN_PAUSE = "HUMAN_PAUSE"
 
 
+# Stable technical codes only — never free text or PII.
+HANDOFF_QUARANTINE_REASONS: frozenset[str] = frozenset(
+    {
+        "HANDOFF_DEFERRED_PLAN_MISSING",
+        "HANDOFF_DEFERRED_PLAN_TYPE",
+        "HANDOFF_DEFERRED_PLAN_NOT_OPEN",
+        "HANDOFF_DEFERRED_PLAN_CONTEXT",
+        "HANDOFF_DEFERRED_PLAN_MANAGER_EPOCH",
+        "HANDOFF_DEFERRED_PLAN_EVENT_SEQ",
+        "HANDOFF_DEFERRED_PLAN_DEADLINE",
+        "HANDOFF_DEFERRED_PLAN_MARKER",
+        "HANDOFF_EXPIRY_UNSUPPORTED_STATE",
+    }
+)
+HANDOFF_QUARANTINE_CLEAR_PATHS: frozenset[str] = frozenset(
+    {
+        "MANAGER_MESSAGE_APPLIED",
+    }
+)
+HANDOFF_QUARANTINE_CLEAR_PATH_MANAGER_MESSAGE = "MANAGER_MESSAGE_APPLIED"
+
+_HANDOFF_QUARANTINE_REASON_SQL = ", ".join(
+    f"'{code}'" for code in sorted(HANDOFF_QUARANTINE_REASONS)
+)
+_HANDOFF_QUARANTINE_CLEAR_PATH_SQL = ", ".join(
+    f"'{code}'" for code in sorted(HANDOFF_QUARANTINE_CLEAR_PATHS)
+)
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
@@ -56,7 +85,11 @@ class Conversation(Base):
             "handoff_deadline_at",
             postgresql_where=text(
                 "status = 'HANDOFF' AND ownership = 'MANAGER' "
-                "AND handoff_state IN ('HUMAN_ACTIVE', 'HUMAN_PAUSE')"
+                "AND handoff_state IN ('HUMAN_ACTIVE', 'HUMAN_PAUSE') "
+                "AND ("
+                "handoff_quarantined_at IS NULL "
+                "OR handoff_quarantine_cleared_at IS NOT NULL"
+                ")"
             ),
         ),
         CheckConstraint(
@@ -118,6 +151,36 @@ class Conversation(Base):
             "AND manager_takeover_at IS NOT NULL"
             ")",
             name="ck_conversations_handoff_consistency",
+        ),
+        CheckConstraint(
+            "("
+            "handoff_quarantined_at IS NULL "
+            "AND handoff_quarantine_reason IS NULL "
+            "AND handoff_quarantine_cleared_at IS NULL "
+            "AND handoff_quarantine_clear_path IS NULL"
+            ") OR ("
+            "handoff_quarantined_at IS NOT NULL "
+            "AND handoff_quarantine_reason IS NOT NULL "
+            "AND handoff_quarantine_cleared_at IS NULL "
+            "AND handoff_quarantine_clear_path IS NULL"
+            ") OR ("
+            "handoff_quarantined_at IS NOT NULL "
+            "AND handoff_quarantine_reason IS NOT NULL "
+            "AND handoff_quarantine_cleared_at IS NOT NULL "
+            "AND handoff_quarantine_clear_path IS NOT NULL"
+            ")",
+            name="ck_conversations_handoff_quarantine_consistency",
+        ),
+        CheckConstraint(
+            "handoff_quarantine_reason IS NULL OR "
+            f"handoff_quarantine_reason IN ({_HANDOFF_QUARANTINE_REASON_SQL})",
+            name="ck_conversations_handoff_quarantine_reason",
+        ),
+        CheckConstraint(
+            "handoff_quarantine_clear_path IS NULL OR "
+            "handoff_quarantine_clear_path IN "
+            f"({_HANDOFF_QUARANTINE_CLEAR_PATH_SQL})",
+            name="ck_conversations_handoff_quarantine_clear_path",
         ),
     )
 
@@ -193,6 +256,22 @@ class Conversation(Base):
         ),
         nullable=True,
     )
+    handoff_quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    handoff_quarantine_reason: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    handoff_quarantine_cleared_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    handoff_quarantine_clear_path: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -232,3 +311,11 @@ def conversation_allows_automatic_reply(conversation: Conversation) -> bool:
     if conversation.status == ConversationStatus.CLOSED.value:
         return False
     return True
+
+
+def handoff_expiry_quarantine_is_active(conversation: Conversation) -> bool:
+    """True when expiry processing must skip this dialog until recovery."""
+    return (
+        conversation.handoff_quarantined_at is not None
+        and conversation.handoff_quarantine_cleared_at is None
+    )

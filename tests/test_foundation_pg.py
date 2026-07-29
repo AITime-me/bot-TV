@@ -47,6 +47,7 @@ _FOUNDATION_TABLES = (
     "amocrm_mirror_jobs",
     "manager_messages",
     "worker_heartbeats",
+    "conversation_ops_events",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -87,6 +88,73 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "HUMAN_PAUSE",
             }
         ),
+    ),
+    "ck_conversations_handoff_quarantine_consistency": (
+        "handoff_quarantined_at",
+        frozenset(),
+    ),
+    "ck_conversations_handoff_quarantine_reason": (
+        "handoff_quarantine_reason",
+        frozenset(
+            {
+                "HANDOFF_DEFERRED_PLAN_MISSING",
+                "HANDOFF_DEFERRED_PLAN_TYPE",
+                "HANDOFF_DEFERRED_PLAN_NOT_OPEN",
+                "HANDOFF_DEFERRED_PLAN_CONTEXT",
+                "HANDOFF_DEFERRED_PLAN_MANAGER_EPOCH",
+                "HANDOFF_DEFERRED_PLAN_EVENT_SEQ",
+                "HANDOFF_DEFERRED_PLAN_DEADLINE",
+                "HANDOFF_DEFERRED_PLAN_MARKER",
+                "HANDOFF_EXPIRY_UNSUPPORTED_STATE",
+            }
+        ),
+    ),
+    "ck_conversations_handoff_quarantine_clear_path": (
+        "handoff_quarantine_clear_path",
+        frozenset({"MANAGER_MESSAGE_APPLIED"}),
+    ),
+    "ck_conversation_ops_events_event_type": (
+        "event_type",
+        frozenset(
+            {
+                "HANDOFF_EXPIRY_QUARANTINED",
+                "HANDOFF_QUARANTINE_CLEARED",
+            }
+        ),
+    ),
+    "ck_conversation_ops_events_reason_code": (
+        "reason_code",
+        frozenset(
+            {
+                "HANDOFF_DEFERRED_PLAN_MISSING",
+                "HANDOFF_DEFERRED_PLAN_TYPE",
+                "HANDOFF_DEFERRED_PLAN_NOT_OPEN",
+                "HANDOFF_DEFERRED_PLAN_CONTEXT",
+                "HANDOFF_DEFERRED_PLAN_MANAGER_EPOCH",
+                "HANDOFF_DEFERRED_PLAN_EVENT_SEQ",
+                "HANDOFF_DEFERRED_PLAN_DEADLINE",
+                "HANDOFF_DEFERRED_PLAN_MARKER",
+                "HANDOFF_EXPIRY_UNSUPPORTED_STATE",
+            }
+        ),
+    ),
+    "ck_conversation_ops_events_clear_path": (
+        "clear_path",
+        frozenset(
+            {
+                "HANDOFF_EXPIRY_QUARANTINED",
+                "HANDOFF_QUARANTINE_CLEARED",
+                "MANAGER_MESSAGE_APPLIED",
+            }
+        ),
+    ),
+    "ck_conversation_ops_events_manager_epoch_nonnegative": (
+        "manager_epoch",
+        frozenset(),
+    ),
+    "ck_conversation_ops_events_context_version_nonnegative": (
+        "context_version",
+        frozenset(),
     ),
     "ck_inbox_channel": ("channel", frozenset({"synthetic"})),
     "ck_inbox_direction": ("direction", frozenset({"INBOUND"})),
@@ -331,6 +399,10 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
         "conversation_event_seq",
     ),
     "ix_worker_heartbeats_last_succeeded_at": ("last_succeeded_at",),
+    "ix_conversation_ops_events_conversation_created": (
+        "conversation_id",
+        "created_at",
+    ),
 }
 
 
@@ -440,7 +512,7 @@ async def _assert_foundation_schema(session: AsyncSession) -> None:
     fk_rows = (
         await session.execute(
             text(
-                "SELECT c.conname, pg_get_constraintdef(c.oid) "
+                "SELECT t.relname, c.conname, pg_get_constraintdef(c.oid) "
                 "FROM pg_catalog.pg_constraint c "
                 "JOIN pg_catalog.pg_class t ON t.oid = c.conrelid "
                 "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
@@ -448,9 +520,17 @@ async def _assert_foundation_schema(session: AsyncSession) -> None:
             )
         )
     ).all()
-    fk_defs = " | ".join(row[1].upper() for row in fk_rows)
+    fk_defs = " | ".join(row[2].upper() for row in fk_rows)
     assert "ON DELETE CASCADE" in fk_defs
     assert "ON DELETE SET NULL" in fk_defs
+    ops_fk_defs = [
+        row[2].upper()
+        for row in fk_rows
+        if row[0] == "conversation_ops_events"
+    ]
+    assert ops_fk_defs, "missing conversation_ops_events foreign key"
+    assert all("ON DELETE RESTRICT" in definition for definition in ops_fk_defs)
+    assert all("ON DELETE CASCADE" not in definition for definition in ops_fk_defs)
 
     # No applied CHECK may admit a SENT delivery status.
     for name, definition in checks.items():

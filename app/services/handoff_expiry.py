@@ -18,6 +18,7 @@ from app.repositories import reply_plans as reply_plan_repo
 class HandoffExpiryTransition(str, enum.Enum):
     HUMAN_ACTIVE_TO_BOT = "HUMAN_ACTIVE_TO_BOT"
     HUMAN_PAUSE_TO_BOT = "HUMAN_PAUSE_TO_BOT"
+    QUARANTINED = "QUARANTINED"
 
 
 class HandoffExpiryInvariantError(RuntimeError):
@@ -31,6 +32,7 @@ class HandoffExpiryResult:
     active_reply_plan_id: uuid.UUID | None
     cancelled_plans: int
     cancelled_outbound: int
+    quarantine_reason: str | None = None
 
 
 class HandoffExpiryWorker:
@@ -39,6 +41,10 @@ class HandoffExpiryWorker:
     The due Conversation row is locked with ``FOR UPDATE SKIP LOCKED``. The
     worker has no in-memory lease or deadline: PostgreSQL is the clock and the
     durable row is the recovery checkpoint across process restarts.
+
+    Poisoned HUMAN_PAUSE/unsupported rows are quarantined in the same
+    transaction and never auto-returned to BOT_ACTIVE. Expected invariant
+    failures are not raised to WorkerRuntime.
     """
 
     def __init__(
@@ -54,51 +60,68 @@ class HandoffExpiryWorker:
                 return None
 
             moment = await db_statement_now(session)
-            if conversation.handoff_state == HandoffState.HUMAN_ACTIVE.value:
-                cancelled_plans = (
-                    await reply_plan_repo.cancel_open_plans_for_takeover(
-                        session,
-                        conversation_id=conversation.id,
-                        reason="HANDOFF_EXPIRED_NO_CLIENT",
+            try:
+                if conversation.handoff_state == HandoffState.HUMAN_ACTIVE.value:
+                    cancelled_plans = (
+                        await reply_plan_repo.cancel_open_plans_for_takeover(
+                            session,
+                            conversation_id=conversation.id,
+                            reason="HANDOFF_EXPIRED_NO_CLIENT",
+                        )
                     )
-                )
-                cancelled_outbound = (
-                    await outbound_repo.cancel_unadmitted_for_manager_message(
-                        session,
-                        conversation_id=conversation.id,
+                    cancelled_outbound = (
+                        await outbound_repo.cancel_unadmitted_for_manager_message(
+                            session,
+                            conversation_id=conversation.id,
+                        )
                     )
-                )
-                conversation = await conversation_repo.return_due_handoff_to_bot(
-                    session,
-                    conversation=conversation,
-                    moment=moment,
-                    active_reply_plan_id=None,
-                )
-                return HandoffExpiryResult(
-                    conversation_id=conversation.id,
-                    transition=HandoffExpiryTransition.HUMAN_ACTIVE_TO_BOT,
-                    active_reply_plan_id=None,
-                    cancelled_plans=cancelled_plans,
-                    cancelled_outbound=cancelled_outbound,
-                )
+                    conversation = await conversation_repo.return_due_handoff_to_bot(
+                        session,
+                        conversation=conversation,
+                        moment=moment,
+                        active_reply_plan_id=None,
+                    )
+                    return HandoffExpiryResult(
+                        conversation_id=conversation.id,
+                        transition=HandoffExpiryTransition.HUMAN_ACTIVE_TO_BOT,
+                        active_reply_plan_id=None,
+                        cancelled_plans=cancelled_plans,
+                        cancelled_outbound=cancelled_outbound,
+                    )
 
-            if conversation.handoff_state == HandoffState.HUMAN_PAUSE.value:
-                plan = await _lock_current_deferred_plan(session, conversation)
-                conversation = await conversation_repo.return_due_handoff_to_bot(
+                if conversation.handoff_state == HandoffState.HUMAN_PAUSE.value:
+                    plan = await _lock_current_deferred_plan(session, conversation)
+                    conversation = await conversation_repo.return_due_handoff_to_bot(
+                        session,
+                        conversation=conversation,
+                        moment=moment,
+                        active_reply_plan_id=plan.id,
+                    )
+                    return HandoffExpiryResult(
+                        conversation_id=conversation.id,
+                        transition=HandoffExpiryTransition.HUMAN_PAUSE_TO_BOT,
+                        active_reply_plan_id=plan.id,
+                        cancelled_plans=0,
+                        cancelled_outbound=0,
+                    )
+
+                raise HandoffExpiryInvariantError("HANDOFF_EXPIRY_UNSUPPORTED_STATE")
+            except HandoffExpiryInvariantError as exc:
+                reason_code = str(exc)
+                conversation = await conversation_repo.quarantine_due_handoff_expiry(
                     session,
                     conversation=conversation,
+                    reason_code=reason_code,
                     moment=moment,
-                    active_reply_plan_id=plan.id,
                 )
                 return HandoffExpiryResult(
                     conversation_id=conversation.id,
-                    transition=HandoffExpiryTransition.HUMAN_PAUSE_TO_BOT,
-                    active_reply_plan_id=plan.id,
+                    transition=HandoffExpiryTransition.QUARANTINED,
+                    active_reply_plan_id=None,
                     cancelled_plans=0,
                     cancelled_outbound=0,
+                    quarantine_reason=reason_code,
                 )
-
-            raise HandoffExpiryInvariantError("HANDOFF_EXPIRY_UNSUPPORTED_STATE")
 
     async def tick(self, *, max_items: int = 100) -> list[HandoffExpiryResult]:
         """Drain at most ``max_items`` due rows, one transaction per dialog."""
