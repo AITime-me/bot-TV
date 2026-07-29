@@ -162,7 +162,7 @@ worker обязателен.
 Docker runtime состоит из одноразовой миграции, API и отдельного worker:
 
 ```bash
-docker compose config
+docker compose config --quiet
 docker compose build
 docker compose up -d
 ```
@@ -172,7 +172,7 @@ docker compose up -d
 До production/staging deploy `CURSOR-10` необходимо выполнить в среде с
 настоящим Docker/Podman и disposable PostgreSQL:
 
-- `docker compose config` с безопасными `BOT_MODE=OFF` и
+- `docker compose config --quiet` с безопасными `BOT_MODE=OFF` и
   `EMERGENCY_LOCK=true`;
 - фактический `docker compose build` (статические тесты Dockerfile/YAML его не
   заменяют);
