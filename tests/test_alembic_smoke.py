@@ -11,6 +11,7 @@ from app.db.base import Base
 from app.models import (
     AmoCrmMirrorJob,
     Conversation,
+    ConversationOpsEvent,
     InboxMessage,
     IngressEvent,
     ManagerMessage,
@@ -159,6 +160,7 @@ def test_alembic_metadata_imports() -> None:
     assert AmoCrmMirrorJob.__tablename__ == "amocrm_mirror_jobs"
     assert ManagerMessage.__tablename__ == "manager_messages"
     assert WorkerHeartbeat.__tablename__ == "worker_heartbeats"
+    assert ConversationOpsEvent.__tablename__ == "conversation_ops_events"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -169,6 +171,7 @@ def test_alembic_metadata_imports() -> None:
         "amocrm_mirror_jobs",
         "manager_messages",
         "worker_heartbeats",
+        "conversation_ops_events",
     }
 
 
