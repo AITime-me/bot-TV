@@ -20,6 +20,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.pii_gateway import (
+    orm_local_column,
+    repr_orm_fingerprint,
+    repr_orm_literal,
+)
 from app.db.base import Base
 
 
@@ -285,9 +290,12 @@ class OutboxMessage(Base):
 
     def __repr__(self) -> str:
         return (
-            f"OutboxMessage(id={self.id!r}, conversation_id={self.conversation_id!r}, "
-            f"destination_type={self.destination_type!r}, "
-            f"delivery_status={self.delivery_status!r}, "
-            f"context_version={self.context_version!r}, "
-            f"idempotency_key={self.idempotency_key!r}, payload=<redacted>)"
+            "OutboxMessage("
+            f"id={repr_orm_fingerprint(orm_local_column(self, 'id'), purpose='outbox_message_id')}, "
+            f"conversation_id={repr_orm_fingerprint(orm_local_column(self, 'conversation_id'), purpose='conversation_id')}, "
+            f"destination_type={repr_orm_literal(orm_local_column(self, 'destination_type'))}, "
+            f"delivery_status={repr_orm_literal(orm_local_column(self, 'delivery_status'))}, "
+            f"context_version={repr_orm_literal(orm_local_column(self, 'context_version'))}, "
+            f"idempotency_key={repr_orm_fingerprint(orm_local_column(self, 'idempotency_key'), purpose='idempotency_key')}, "
+            "payload=<redacted>)"
         )

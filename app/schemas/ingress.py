@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 from app.models.ingress import IngressEventType
 
@@ -23,7 +24,7 @@ class SyntheticIngressEvent(BaseModel):
     external_event_id: str = Field(min_length=1, max_length=128)
     external_conversation_id: str = Field(min_length=1, max_length=128)
     event_type: Literal["SYNTHETIC_MESSAGE"] = IngressEventType.SYNTHETIC_MESSAGE.value
-    text: str = Field(min_length=1, max_length=2000)
+    text: str = Field(min_length=1, max_length=2000, repr=False)
     correlation_id: uuid.UUID | None = None
 
     @field_validator("external_event_id", "external_conversation_id")
@@ -47,11 +48,9 @@ class SyntheticIngressEvent(BaseModel):
         return self.correlation_id if self.correlation_id is not None else uuid.uuid4()
 
     def safe_envelope(self) -> dict[str, Any]:
-        """Minimal envelope stored in PostgreSQL for later worker processing.
+        """Storage-only envelope with plaintext text for PostgreSQL persistence.
 
-        Justified fields: schema marker, normalized type, and synthetic fixture
-        text required to call InboundService. No tokens, signatures, phones,
-        emails, or raw provider headers.
+        Never use for logs, repr, diagnostics, or exception messages.
         """
         return {
             "schema": "synthetic.ingress.v1",
@@ -63,14 +62,25 @@ class SyntheticIngressEvent(BaseModel):
         """Safe projection for logs, repr, and assertion diagnostics."""
         return {
             "channel": self.channel,
-            "external_event_id": self.external_event_id,
-            "external_conversation_id": self.external_conversation_id,
+            "external_event_id": safe_fingerprint(
+                self.external_event_id,
+                purpose="external_event_id",
+            ),
+            "external_conversation_id": safe_fingerprint(
+                self.external_conversation_id,
+                purpose="external_conversation_id",
+            ),
             "event_type": self.event_type,
             "correlation_id": (
-                str(self.correlation_id) if self.correlation_id is not None else None
+                safe_fingerprint(str(self.correlation_id), purpose="correlation_id")
+                if self.correlation_id is not None
+                else None
             ),
             "text": "<redacted>",
         }
 
     def __repr__(self) -> str:
         return f"SyntheticIngressEvent({self.redacted_view()!r})"
+
+    def __str__(self) -> str:
+        return self.__repr__()

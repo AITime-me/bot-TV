@@ -18,6 +18,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.pii_gateway import (
+    orm_local_column,
+    repr_orm_fingerprint,
+    repr_orm_literal,
+)
 from app.db.base import Base
 
 MANAGER_MESSAGE_TEXT_MAX_LENGTH = 4000
@@ -138,11 +143,12 @@ class ManagerMessage(Base):
 
     def __repr__(self) -> str:
         return (
-            f"ManagerMessage(id={self.id!r}, "
-            f"conversation_id={self.conversation_id!r}, "
-            f"external_message_id={self.external_message_id!r}, "
-            f"provider_sequence={self.provider_sequence!r}, "
-            f"status={self.status!r}, "
-            f"conversation_event_seq={self.conversation_event_seq!r}, "
+            "ManagerMessage("
+            f"id={repr_orm_fingerprint(orm_local_column(self, 'id'), purpose='manager_message_id')}, "
+            f"conversation_id={repr_orm_fingerprint(orm_local_column(self, 'conversation_id'), purpose='conversation_id')}, "
+            f"external_message_id={repr_orm_fingerprint(orm_local_column(self, 'external_message_id'), purpose='external_message_id')}, "
+            f"provider_sequence={repr_orm_literal(orm_local_column(self, 'provider_sequence'))}, "
+            f"status={repr_orm_literal(orm_local_column(self, 'status'))}, "
+            f"conversation_event_seq={repr_orm_literal(orm_local_column(self, 'conversation_event_seq'))}, "
             "body_text=<redacted>)"
         )

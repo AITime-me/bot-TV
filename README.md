@@ -113,6 +113,10 @@ Resumable handoff (CURSOR-10): synthetic-сообщения менеджера �
 commit оставляет их следующему процессу
 (`docs/adr/005-resumable-manager-handoff.md`).
 
+Централизованная защита PII на небезопасных границах (логи, repr, будущий
+AI-контекст) описана в `docs/adr/007-pii-gateway.md`. Plaintext в PostgreSQL
+для бизнес-функций сохраняется; gateway не маскирует durable storage.
+
 Outbound admission фиксируется отдельным durable-состоянием `ADMITTED` под
 блокировкой Conversation. До commit этой транзакции manager/client event может
 отменить строку; после commit отмена запрещена. Synthetic sink вызывается только

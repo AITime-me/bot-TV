@@ -20,6 +20,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.pii_gateway import (
+    orm_local_column,
+    repr_orm_fingerprint,
+    repr_orm_literal,
+)
 from app.db.base import Base
 
 BOT_RESPONSE_DELAY_MS = 5000
@@ -256,8 +261,12 @@ class ReplyPlan(Base):
 
     def __repr__(self) -> str:
         return (
-            f"ReplyPlan(id={self.id!r}, conversation_id={self.conversation_id!r}, "
-            f"context_version={self.context_version!r}, status={self.status!r}, "
-            f"plan_type={self.plan_type!r}, lease_version={self.lease_version!r}, "
-            f"payload=<redacted>)"
+            "ReplyPlan("
+            f"id={repr_orm_fingerprint(orm_local_column(self, 'id'), purpose='reply_plan_id')}, "
+            f"conversation_id={repr_orm_fingerprint(orm_local_column(self, 'conversation_id'), purpose='conversation_id')}, "
+            f"context_version={repr_orm_literal(orm_local_column(self, 'context_version'))}, "
+            f"status={repr_orm_literal(orm_local_column(self, 'status'))}, "
+            f"plan_type={repr_orm_literal(orm_local_column(self, 'plan_type'))}, "
+            f"lease_version={repr_orm_literal(orm_local_column(self, 'lease_version'))}, "
+            "payload=<redacted>)"
         )

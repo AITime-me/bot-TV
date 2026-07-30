@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 
 
@@ -27,7 +28,7 @@ class SyntheticManagerMessageEvent(BaseModel):
         le=9_223_372_036_854_775_807,
     )
     provider_occurred_at: datetime | None = None
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(min_length=1, max_length=4000, repr=False)
 
     @field_validator("external_conversation_id", "external_message_id")
     @classmethod
@@ -57,8 +58,14 @@ class SyntheticManagerMessageEvent(BaseModel):
     def redacted_view(self) -> dict[str, object]:
         return {
             "channel": self.channel,
-            "external_conversation_id": self.external_conversation_id,
-            "external_message_id": self.external_message_id,
+            "external_conversation_id": safe_fingerprint(
+                self.external_conversation_id,
+                purpose="external_conversation_id",
+            ),
+            "external_message_id": safe_fingerprint(
+                self.external_message_id,
+                purpose="external_message_id",
+            ),
             "provider_sequence": self.provider_sequence,
             "provider_occurred_at": self.provider_occurred_at_utc(),
             "text": "<redacted>",
@@ -66,3 +73,6 @@ class SyntheticManagerMessageEvent(BaseModel):
 
     def __repr__(self) -> str:
         return f"SyntheticManagerMessageEvent({self.redacted_view()!r})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
