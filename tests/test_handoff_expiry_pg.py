@@ -17,6 +17,7 @@ from app.models.conversation import (
     HandoffState,
 )
 from app.models.conversation_ops_event import ConversationOpsEvent
+from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.repositories import conversations as conversation_repo
 from app.schemas.inbound import SyntheticInboundEvent
@@ -151,6 +152,57 @@ async def test_due_human_pause_returns_to_bot_and_preserves_exactly_one_plan(
     assert claim is not None
     assert claim.plan_id == plan_id
     assert await reply_worker.claim_one() is None
+
+
+async def test_deferred_plan_not_claimable_during_human_pause(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    manager = await SyntheticManagerMessageService(session_factory).apply(_manager())
+    async with session_factory() as session:
+        async with session.begin():
+            paused = await InboundService(session).accept(_client())
+            assert paused.reply_plan is not None
+            plan_id = paused.reply_plan.id
+            assert paused.conversation.handoff_state == HandoffState.HUMAN_PAUSE.value
+
+    async with session_factory() as session:
+        async with session.begin():
+            past = await db_statement_now(session) - timedelta(seconds=1)
+            future = await db_statement_now(session) + timedelta(minutes=10)
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == manager.conversation_id)
+                .values(handoff_deadline_at=future)
+            )
+            await session.execute(
+                update(ReplyPlan)
+                .where(ReplyPlan.id == plan_id)
+                .values(not_before=past)
+            )
+
+    reply_worker = ReplyPlanWorker(session_factory, worker_id="pause-not-claimable")
+    assert await reply_worker.claim_one() is None
+
+    async with session_factory() as session:
+        plan = await session.get(ReplyPlan, plan_id)
+        assert plan is not None
+        assert plan.status == ReplyPlanStatus.READY.value
+        assert plan.payload_json.get("deferred_for_handoff") is True
+        assert plan.lease_owner is None
+        assert plan.lease_token is None
+        assert plan.lease_until is None
+        conversation = await session.get(Conversation, manager.conversation_id)
+        assert conversation is not None
+        assert conversation.handoff_state == HandoffState.HUMAN_PAUSE.value
+        outbound_count = await session.scalar(
+            select(func.count())
+            .select_from(OutboxMessage)
+            .where(
+                OutboxMessage.destination_type
+                == DestinationType.SYNTHETIC_OUTBOUND.value
+            )
+        )
+        assert outbound_count == 0
 
 
 async def test_not_due_handoff_is_not_returned_early(

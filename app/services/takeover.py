@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.session import session_scope
 from app.models.conversation import Conversation
 from app.repositories import conversations as conversation_repo
+from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.services.amocrm_mirror import enqueue_manager_takeover
 
@@ -67,8 +68,12 @@ async def apply_manager_takeover_in_session(
         conversation_id=conversation_id,
     )
     if changed:
+        await outbound_repo.cancel_unadmitted_for_conversation(
+            session,
+            conversation_id=conversation.id,
+        )
         # Last table in the lock order, after the dialog row lock taken by
-        # apply_manager_takeover and after the plan cancellations.
+        # apply_manager_takeover and after the plan/outbound cancellations.
         await enqueue_manager_takeover(
             session,
             conversation_id=conversation.id,

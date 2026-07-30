@@ -1,23 +1,34 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.clock import db_statement_now
 from app.models.amocrm_mirror import AmoCrmMirrorJob, AmoCrmMirrorJobType
-from app.models.conversation import Conversation, HandoffState
+from app.models.conversation import (
+    Conversation,
+    ConversationStatus,
+    HandoffState,
+)
 from app.models.manager_message import ManagerMessage, ManagerMessageStatus
+from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.manager_message import SyntheticManagerMessageEvent
 from app.services.dialog_context import DialogContextService
+from app.services.handoff_expiry import HandoffExpiryWorker
 from app.services.inbound import InboundService
 from app.services.manager_messages import (
     SyntheticManagerMessageService,
     apply_manager_message_in_session,
 )
+from app.services.reply_outbound import ReplyPlanWorker
+from app.services.synthetic_outbound import SyntheticOutboundRequest
 from tests.pg_harness import truncate_foundation_tables
 
 
@@ -285,3 +296,211 @@ async def test_new_manager_message_ends_pause_and_cancels_deferred_plan(
             deferred = await session.get(ReplyPlan, deferred_id)
             assert deferred is not None
             assert deferred.status == ReplyPlanStatus.CANCELLED.value
+
+
+async def test_second_applied_manager_in_human_active_extends_deadline(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = SyntheticManagerMessageService(session_factory)
+    first = await service.apply(_manager("manager-seq-1", 1, "Первый ответ"))
+    assert first.status == ManagerMessageStatus.APPLIED.value
+    assert first.fsm_changed is True
+
+    async with session_factory() as session:
+        after_first = await _conversation(session, first.conversation_id)
+        assert after_first.handoff_state == HandoffState.HUMAN_ACTIVE.value
+        first_deadline = after_first.handoff_deadline_at
+        first_epoch = after_first.manager_epoch
+        first_context = after_first.context_version
+        first_hwm = after_first.manager_sequence_hwm
+        assert first_deadline is not None
+        assert first_hwm == 1
+
+    second = await service.apply(_manager("manager-seq-2", 2, "Второй ответ"))
+    assert second.status == ManagerMessageStatus.APPLIED.value
+    assert second.fsm_changed is True
+    assert second.manager_epoch == first_epoch + 1
+    assert second.context_version == first_context + 1
+    assert second.manager_sequence_hwm == 2
+    assert second.entered_from_bot is False
+    assert second.cancelled_plans == 0
+    assert second.cancelled_outbound == 0
+
+    async with session_factory() as session:
+        after_second = await _conversation(session, second.conversation_id)
+        assert after_second.handoff_state == HandoffState.HUMAN_ACTIVE.value
+        assert after_second.manager_epoch == first_epoch + 1
+        assert after_second.context_version == first_context + 1
+        assert after_second.manager_sequence_hwm == 2
+        assert after_second.handoff_deadline_at is not None
+        assert after_second.handoff_deadline_at >= first_deadline
+        moment = await db_statement_now(session)
+        assert (
+            after_second.handoff_deadline_at - moment
+            <= timedelta(seconds=15 * 60)
+        )
+        assert (
+            after_second.handoff_deadline_at - moment
+            >= timedelta(seconds=10 * 60 - 1)
+        )
+
+
+async def test_closed_conversation_manager_event_is_audit_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        async with session.begin():
+            inbound = await InboundService(session).accept(
+                _client("client-before-close", "Сообщение до закрытия")
+            )
+            conversation_id = inbound.conversation.id
+            closed_state = (
+                inbound.conversation.handoff_state,
+                inbound.conversation.context_version,
+                inbound.conversation.manager_epoch,
+                inbound.conversation.handoff_deadline_at,
+                inbound.conversation.current_event_seq,
+            )
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(
+                    status=ConversationStatus.CLOSED.value,
+                    ownership="BOT",
+                    handoff_state=HandoffState.BOT_ACTIVE.value,
+                    handoff_deadline_at=None,
+                    human_pause_anchor_at=None,
+                    manager_takeover_at=None,
+                    active_reply_plan_id=None,
+                )
+            )
+
+    service = SyntheticManagerMessageService(session_factory)
+    closed_event = await service.apply(
+        _manager("manager-after-close", 1, "После закрытия")
+    )
+    assert closed_event.duplicate is False
+    assert closed_event.fsm_changed is False
+    assert closed_event.status == ManagerMessageStatus.QUARANTINED.value
+    assert closed_event.context_version == closed_state[1]
+    assert closed_event.manager_epoch == closed_state[2]
+    assert closed_event.cancelled_plans == 0
+    assert closed_event.cancelled_outbound == 0
+
+    async with session_factory() as session:
+        async with session.begin():
+            conversation = await _conversation(session, closed_event.conversation_id)
+            assert conversation.status == ConversationStatus.CLOSED.value
+            assert (
+                conversation.handoff_state,
+                conversation.context_version,
+                conversation.manager_epoch,
+                conversation.handoff_deadline_at,
+                conversation.current_event_seq,
+            ) == closed_state
+            message = await session.get(
+                ManagerMessage,
+                closed_event.manager_message_id,
+            )
+            assert message is not None
+            assert message.status == ManagerMessageStatus.QUARANTINED.value
+            assert message.classification_reason == "CONVERSATION_CLOSED"
+            assert message.conversation_event_seq is None
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(OutboxMessage)
+                    .where(
+                        OutboxMessage.destination_type
+                        == DestinationType.SYNTHETIC_OUTBOUND.value
+                    )
+                )
+                == 0
+            )
+
+
+_MANAGER_CONTEXT_SECRET = "ManagerContextSecretToken42"
+
+
+def _assert_no_manager_text_in_value(value: object, secret: str) -> None:
+    if isinstance(value, str):
+        assert secret not in value
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            _assert_no_manager_text_in_value(nested, secret)
+        return
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            _assert_no_manager_text_in_value(nested, secret)
+
+
+async def test_handoff_resume_keeps_dialog_context_out_of_transport_payload(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    manager_service = SyntheticManagerMessageService(session_factory)
+    manager = await manager_service.apply(
+        _manager("manager-context", 1, _MANAGER_CONTEXT_SECRET)
+    )
+    conversation_id = manager.conversation_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            paused = await InboundService(session).accept(
+                _client("client-context", "Клиентский вопрос")
+            )
+            assert paused.reply_plan is not None
+            plan_id = paused.reply_plan.id
+
+    async with session_factory() as session:
+        async with session.begin():
+            due = await db_statement_now(session) - timedelta(seconds=1)
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(handoff_deadline_at=due)
+            )
+            await session.execute(
+                update(ReplyPlan)
+                .where(ReplyPlan.id == plan_id)
+                .values(not_before=due)
+            )
+
+    assert await HandoffExpiryWorker(session_factory).expire_one() is not None
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="context-after-expiry")
+    claim = await plan_worker.claim_one()
+    assert claim is not None
+    dispatched = await plan_worker.dispatch_claimed(claim)
+
+    async with session_factory() as session:
+        context = await DialogContextService(session).load(
+            conversation_id=conversation_id
+        )
+        assert any(
+            message.author == "manager" and message.text == _MANAGER_CONTEXT_SECRET
+            for message in context.messages
+        )
+        plan = await session.get(ReplyPlan, plan_id)
+        assert plan is not None
+        outbound = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert outbound is not None
+        plan_payload = dict(plan.payload_json)
+        outbound_payload = dict(outbound.payload_json)
+        outbound_payload_json = json.dumps(outbound.payload_json)
+
+    _assert_no_manager_text_in_value(plan_payload, _MANAGER_CONTEXT_SECRET)
+    _assert_no_manager_text_in_value(outbound_payload, _MANAGER_CONTEXT_SECRET)
+    _assert_no_manager_text_in_value(
+        outbound_payload_json,
+        _MANAGER_CONTEXT_SECRET,
+    )
+    request = SyntheticOutboundRequest(
+        outbound_id=str(dispatched.outbound_id),
+        conversation_id=str(conversation_id),
+        reply_plan_id=str(plan_id),
+        context_version=outbound_payload.get("context_version"),
+        correlation_id=None,
+        _payload_schema=str(outbound_payload.get("schema", "unknown")),
+    )
+    assert _MANAGER_CONTEXT_SECRET not in repr(request)
