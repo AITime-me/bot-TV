@@ -369,6 +369,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/core/",
         "!app/core/__init__.py",
         "!app/core/outbound_policy.py",
+        "!app/core/pii_gateway.py",
         "!app/db/",
         "!app/db/__init__.py",
         "!app/db/base.py",

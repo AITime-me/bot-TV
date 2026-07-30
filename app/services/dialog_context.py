@@ -6,10 +6,22 @@ from dataclasses import dataclass
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.pii_gateway import PiiGatewayError, safe_fingerprint, sanitize_for_ai
 from app.models.conversation import Conversation
 
 MAX_DIALOG_CONTEXT_MESSAGES = 40
 MAX_DIALOG_CONTEXT_CHARS = 12_000
+_ALLOWED_AI_AUTHORS = frozenset({"client", "manager"})
+_REDACTED_AUTHOR = "<redacted>"
+
+
+def _safe_author_for_repr(author: object) -> str:
+    if type(author) is str:
+        if author == "client":
+            return "client"
+        if author == "manager":
+            return "manager"
+    return _REDACTED_AUTHOR
 
 
 @dataclass(frozen=True, repr=False)
@@ -21,8 +33,8 @@ class DialogMessage:
     def __repr__(self) -> str:
         return (
             "DialogMessage("
-            f"conversation_event_seq={self.conversation_event_seq!r}, "
-            f"author={self.author!r}, text=<redacted>)"
+            f"author={_safe_author_for_repr(self.author)!r}, "
+            "text=<redacted>)"
         )
 
 
@@ -36,8 +48,7 @@ class DialogContext:
     def __repr__(self) -> str:
         return (
             "DialogContext("
-            f"conversation_id={self.conversation_id!r}, "
-            f"event_seq_hwm={self.event_seq_hwm!r}, "
+            f"conversation_id={safe_fingerprint(self.conversation_id, purpose='conversation_id')!r}, "
             f"message_count={len(self.messages)!r}, "
             f"total_chars={self.total_chars!r})"
         )
@@ -143,3 +154,23 @@ def trim_dialog_messages(
         total_chars += message_chars
     selected_newest_first.reverse()
     return tuple(selected_newest_first)
+
+
+def to_ai_safe_messages(
+    context: DialogContext,
+    *,
+    known_pii: tuple[str, ...] = (),
+) -> tuple[dict[str, str], ...]:
+    """Return per-message AI-safe projections without IDs or sequences."""
+    safe_messages: list[dict[str, str]] = []
+    for message in context.messages:
+        author = message.author
+        if type(author) is not str or author not in _ALLOWED_AI_AUTHORS:
+            raise PiiGatewayError("AI_AUTHOR_INVALID") from None
+        safe_messages.append(
+            {
+                "author": author,
+                "text": sanitize_for_ai(message.text, known_pii=known_pii),
+            }
+        )
+    return tuple(safe_messages)

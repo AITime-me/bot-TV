@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 
 
@@ -21,7 +22,7 @@ class SyntheticInboundEvent(BaseModel):
     channel: Literal["synthetic"] = "synthetic"
     external_conversation_id: str = Field(min_length=1, max_length=128)
     external_message_id: str = Field(min_length=1, max_length=128)
-    text: str = Field(min_length=1, max_length=2000)
+    text: str = Field(min_length=1, max_length=2000, repr=False)
     received_at: datetime | None = None
 
     @field_validator("external_conversation_id", "external_message_id")
@@ -49,7 +50,32 @@ class SyntheticInboundEvent(BaseModel):
         return self.received_at.astimezone(timezone.utc)
 
     def safe_payload(self) -> dict[str, Any]:
+        """Storage-only payload with plaintext text for PostgreSQL persistence.
+
+        Never use for logs, repr, diagnostics, or exception messages.
+        """
         return {
             "schema": "synthetic.inbound.v1",
             "text": self.text,
         }
+
+    def redacted_view(self) -> dict[str, Any]:
+        """Safe projection for logs, repr, and assertion diagnostics."""
+        return {
+            "channel": self.channel,
+            "external_message_id": safe_fingerprint(
+                self.external_message_id,
+                purpose="external_message_id",
+            ),
+            "external_conversation_id": safe_fingerprint(
+                self.external_conversation_id,
+                purpose="external_conversation_id",
+            ),
+            "text": "<redacted>",
+        }
+
+    def __repr__(self) -> str:
+        return f"SyntheticInboundEvent({self.redacted_view()!r})"
+
+    def __str__(self) -> str:
+        return self.__repr__()

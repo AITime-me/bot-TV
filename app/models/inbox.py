@@ -17,6 +17,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.pii_gateway import (
+    orm_local_column,
+    repr_orm_fingerprint,
+    repr_orm_literal,
+)
 from app.db.base import Base
 
 
@@ -116,3 +121,17 @@ class InboxMessage(Base):
 
     conversation = relationship("Conversation", back_populates="inbox_messages")
     outbox_messages = relationship("OutboxMessage", back_populates="source_inbox")
+
+    def __repr__(self) -> str:
+        return (
+            "InboxMessage("
+            f"id={repr_orm_fingerprint(orm_local_column(self, 'id'), purpose='inbox_message_id')}, "
+            f"conversation_id={repr_orm_fingerprint(orm_local_column(self, 'conversation_id'), purpose='conversation_id')}, "
+            f"channel={repr_orm_literal(orm_local_column(self, 'channel'))}, "
+            f"external_message_id={repr_orm_fingerprint(orm_local_column(self, 'external_message_id'), purpose='external_message_id')}, "
+            f"direction={repr_orm_literal(orm_local_column(self, 'direction'))}, "
+            f"message_type={repr_orm_literal(orm_local_column(self, 'message_type'))}, "
+            f"processing_status={repr_orm_literal(orm_local_column(self, 'processing_status'))}, "
+            f"conversation_event_seq={repr_orm_literal(orm_local_column(self, 'conversation_event_seq'))}, "
+            "payload=<redacted>)"
+        )
