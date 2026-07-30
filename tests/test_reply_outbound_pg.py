@@ -456,6 +456,93 @@ async def test_manager_takeover_cancels_old_plan_and_defers_new_client_reply(
 
 
 @pytest.mark.asyncio
+async def test_legacy_takeover_cancels_unadmitted_outbound_preserves_admitted(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Legacy takeover must mirror manager-message cancel semantics for outbound."""
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("legacy-takeover-unadmitted")
+        )
+        assert inbound.reply_plan is not None
+        conversation_id = inbound.conversation.id
+        plan_id = inbound.reply_plan.id
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-legacy-takeover")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-legacy-takeover",
+        arbiter=OutboundArbiter(session_factory, sink=SyntheticOutboundAdapter()),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
+
+    takeover = await ManagerTakeoverService(session_factory).apply(conversation_id)
+    assert takeover.changed is True
+
+    async with session_scope(session_factory) as session:
+        plan = await session.get(ReplyPlan, plan_id)
+        assert plan is not None
+        assert plan.status == ReplyPlanStatus.DISPATCHED.value
+        outbound = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert outbound is not None
+        assert outbound.delivery_status == DeliveryStatus.CANCELLED.value
+        assert outbound.admitted_at is None
+
+    async with session_scope(session_factory) as session:
+        admitted_inbound = await InboundService(session).accept(
+            _inbound("legacy-takeover-admitted", conv="legacy-admitted-conv")
+        )
+        assert admitted_inbound.reply_plan is not None
+        admitted_conv_id = admitted_inbound.conversation.id
+        admitted_due = admitted_inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    admitted_plan_worker = ReplyPlanWorker(
+        session_factory,
+        worker_id="plan-legacy-admitted",
+    )
+    admitted_plan_claim = await admitted_plan_worker.claim_one(now=admitted_due)
+    assert admitted_plan_claim is not None
+    admitted_dispatched = await admitted_plan_worker.dispatch_claimed(
+        admitted_plan_claim
+    )
+    admitted_arbiter = OutboundArbiter(session_factory, sink=SyntheticOutboundAdapter())
+    admitted_outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-legacy-admitted",
+        arbiter=admitted_arbiter,
+    )
+    admitted_outbound_claim = await admitted_outbound_worker.claim_one(
+        now=admitted_due
+    )
+    assert admitted_outbound_claim is not None
+    async with session_scope(session_factory) as session:
+        await admitted_arbiter._admit_in_session(
+            session,
+            admitted_outbound_claim,
+            now=admitted_due,
+        )
+
+    admitted_takeover = await ManagerTakeoverService(session_factory).apply(
+        admitted_conv_id
+    )
+    assert admitted_takeover.changed is True
+
+    async with session_scope(session_factory) as session:
+        admitted_outbound = await session.get(
+            OutboxMessage,
+            admitted_dispatched.outbound_id,
+        )
+        assert admitted_outbound is not None
+        assert admitted_outbound.delivery_status == DeliveryStatus.ADMITTED.value
+        assert admitted_outbound.admitted_at is not None
+
+
+@pytest.mark.asyncio
 async def test_manager_message_after_plan_claim_fences_dispatch(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -824,9 +911,10 @@ async def test_new_context_cancels_old_outbound_before_arbiter_claim(
 
 
 @pytest.mark.asyncio
-async def test_arbiter_process_claimed_denies_manager_owned(
+async def test_legacy_takeover_cancels_unadmitted_outbound_and_blocks_reclaim(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Legacy takeover cancels claimed unadmitted outbound; reclaim is empty."""
     async with session_scope(session_factory) as session:
         result = await InboundService(session).accept(_inbound("msg-mgr-owned"))
         assert result.reply_plan is not None
@@ -836,23 +924,33 @@ async def test_arbiter_process_claimed_denies_manager_owned(
     plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-mgr")
     claim = await plan_worker.claim_one(now=due)
     assert claim is not None
-    await plan_worker.dispatch_claimed(claim)
+    dispatched = await plan_worker.dispatch_claimed(claim)
+
+    sink = SyntheticOutboundAdapter()
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-mgr",
+        arbiter=OutboundArbiter(session_factory, sink=sink),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
 
     await ManagerTakeoverService(session_factory).apply(conversation_id)
 
-    arbiter = OutboundArbiter(session_factory)
-    out_worker = OutboundWorker(session_factory, worker_id="out-mgr", arbiter=arbiter)
-    out_claim = await out_worker.claim_one(now=due)
-    assert out_claim is not None
-    with pytest.raises(OutboundArbiterDenied, match="^MANAGER_OWNED$"):
-        await out_worker.process_claimed(out_claim, now=due)
+    assert await outbound_worker.claim_one(now=due) is None
+    assert sink.calls == []
+    async with session_scope(session_factory) as session:
+        outbound = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert outbound is not None
+        assert outbound.delivery_status == DeliveryStatus.CANCELLED.value
+        assert outbound.admitted_at is None
 
 
 @pytest.mark.asyncio
-async def test_arbiter_process_claimed_consistent_takeover_is_manager_owned(
+async def test_legacy_takeover_with_explicit_now_cancels_unadmitted_without_sink(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A consistent takeover reports the primary manager-ownership fence."""
+    """Legacy takeover with explicit now cancels unadmitted outbound; no sink."""
     async with session_scope(session_factory) as session:
         result = await InboundService(session).accept(_inbound("msg-mgr-ts"))
         assert result.reply_plan is not None
@@ -862,16 +960,117 @@ async def test_arbiter_process_claimed_consistent_takeover_is_manager_owned(
     plan_worker = ReplyPlanWorker(session_factory, worker_id="plan-mgr-ts")
     claim = await plan_worker.claim_one(now=due)
     assert claim is not None
-    await plan_worker.dispatch_claimed(claim)
+    dispatched = await plan_worker.dispatch_claimed(claim)
+
+    sink = SyntheticOutboundAdapter()
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-mgr-ts",
+        arbiter=OutboundArbiter(session_factory, sink=sink),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
 
     await ManagerTakeoverService(session_factory).apply(conversation_id, now=due)
 
-    arbiter = OutboundArbiter(session_factory)
-    out_worker = OutboundWorker(session_factory, worker_id="out-mgr-ts", arbiter=arbiter)
-    out_claim = await out_worker.claim_one(now=due)
-    assert out_claim is not None
-    with pytest.raises(OutboundArbiterDenied, match="^MANAGER_OWNED$"):
-        await out_worker.process_claimed(out_claim, now=due)
+    assert await outbound_worker.claim_one(now=due) is None
+    assert sink.calls == []
+    async with session_scope(session_factory) as session:
+        outbound = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert outbound is not None
+        assert outbound.delivery_status == DeliveryStatus.CANCELLED.value
+        assert outbound.admitted_at is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_takeover_stale_processing_claim_cannot_admit_or_deliver(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Stale PROCESSING claim after legacy cancel must not reach the sink.
+
+    Mirrors test_manager_before_admission_cancels_without_sink: cancel clears
+    the lease, then process_claimed follows the existing
+    OutboundArbiterDenied / StaleOutboundLeaseError contract.
+    """
+    async with session_scope(session_factory) as session:
+        inbound = await InboundService(session).accept(
+            _inbound("legacy-stale-processing")
+        )
+        assert inbound.reply_plan is not None
+        conversation_id = inbound.conversation.id
+        due = inbound.reply_plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(
+        session_factory,
+        worker_id="plan-legacy-stale",
+    )
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    dispatched = await plan_worker.dispatch_claimed(plan_claim)
+
+    sink = SyntheticOutboundAdapter()
+    outbound_worker = OutboundWorker(
+        session_factory,
+        worker_id="out-legacy-stale",
+        arbiter=OutboundArbiter(session_factory, sink=sink),
+    )
+    outbound_claim = await outbound_worker.claim_one(now=due)
+    assert outbound_claim is not None
+    assert outbound_claim.outbound_id == dispatched.outbound_id
+    assert outbound_claim.delivery_status == DeliveryStatus.PROCESSING.value
+
+    takeover = await ManagerTakeoverService(session_factory).apply(conversation_id)
+    assert takeover.changed is True
+
+    async with session_scope(session_factory) as session:
+        cancelled = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert cancelled is not None
+        assert cancelled.delivery_status == DeliveryStatus.CANCELLED.value
+        assert cancelled.admitted_at is None
+        assert cancelled.lease_owner is None
+        assert cancelled.lease_token is None
+        assert cancelled.lease_until is None
+        assert cancelled.lease_version == outbound_claim.lease_version
+
+    with pytest.raises((OutboundArbiterDenied, StaleOutboundLeaseError)):
+        await outbound_worker.process_claimed(outbound_claim, now=due)
+
+    assert sink.calls == []
+    assert await outbound_worker.claim_one(now=due) is None
+
+    async with session_scope(session_factory) as session:
+        outbound = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert outbound is not None
+        assert outbound.delivery_status == DeliveryStatus.CANCELLED.value
+        assert outbound.admitted_at is None
+        assert outbound.lease_owner is None
+        assert outbound.lease_token is None
+        assert outbound.lease_until is None
+        assert outbound.lease_version == outbound_claim.lease_version
+
+    with pytest.raises(StaleOutboundLeaseError):
+        async with session_scope(session_factory) as session:
+            await outbound_repo.mark_admitted_with_lease(
+                session,
+                outbound_id=outbound_claim.outbound_id,
+                lease_token=outbound_claim.lease_token,
+                lease_version=outbound_claim.lease_version,
+            )
+    with pytest.raises(StaleOutboundLeaseError):
+        async with session_scope(session_factory) as session:
+            await outbound_repo.mark_delivered_with_lease(
+                session,
+                outbound_id=outbound_claim.outbound_id,
+                lease_token=outbound_claim.lease_token,
+                lease_version=outbound_claim.lease_version,
+            )
+
+    assert sink.calls == []
+    async with session_scope(session_factory) as session:
+        final = await session.get(OutboxMessage, dispatched.outbound_id)
+        assert final is not None
+        assert final.delivery_status == DeliveryStatus.CANCELLED.value
+        assert final.admitted_at is None
 
 
 @pytest.mark.asyncio

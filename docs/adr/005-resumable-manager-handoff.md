@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for CURSOR-10 stages 2–3.
+Accepted for CURSOR-10. Runtime handoff, expiry/resume, and worker integration
+are implemented; later stages add hardening and live adapters only where
+explicitly scoped.
 
 ## Context
 
@@ -59,9 +61,8 @@ error fields.
   ingress.
 
 The ReplyPlan worker claim query joins Conversation and can claim only an
-`OPEN/BOT/BOT_ACTIVE` dialog. The stage-3 expiry worker locks one due
-Conversation through `FOR UPDATE SKIP LOCKED` and performs one atomic
-transition:
+`OPEN/BOT/BOT_ACTIVE` dialog. `HandoffExpiryWorker` locks one due Conversation
+through `FOR UPDATE SKIP LOCKED` and performs one atomic transition:
 
 - expired `HUMAN_ACTIVE` → `BOT_ACTIVE`, without a reply;
 - expired `HUMAN_PAUSE` → `BOT_ACTIVE`, preserving exactly the fenced current
@@ -81,9 +82,9 @@ legacy "first takeover fact" semantics.
 Deadline creation uses PostgreSQL `statement_timestamp()`, obtained after the
 Conversation lock. This avoids losing part of the configured interval while a
 transaction waits for that lock. Provider time, receipt time and application
-host time never schedule handoff. Stage-3 due selection compares the persisted
-deadline directly with PostgreSQL `statement_timestamp()`; no application
-`now` parameter exists.
+host time never schedule handoff. Due selection compares the persisted deadline
+directly with PostgreSQL `statement_timestamp()`; no application `now`
+parameter exists.
 
 ### Restart and concurrency
 
@@ -95,9 +96,9 @@ worker. Several expiry instances are compatible: `SKIP LOCKED` prevents them
 from processing the same dialog concurrently, while the eligibility predicate
 makes the committed transition one-shot.
 
-`HandoffExpiryWorker.tick()` is a bounded application service, not process
-registration. Supervisor, continuous loops and process health are stage 5; this
-stage does not claim that the worker starts or restarts automatically.
+`HandoffExpiryWorker.tick()` is a bounded application service invoked by the
+worker runtime loop (`python -m app.worker`). Process health and supervisor
+restart policy are documented in ADR-006.
 
 ### Durable outbound admission
 
@@ -130,6 +131,6 @@ generator or client sender is added.
 
 Manager and client turns now form one deterministic bounded context, delayed
 delivery cannot rewind manager state, and a client response during human work
-has exactly one current deferred plan. Automatic transition logic is durable
-and restart-safe, but it will not run continuously until the stage-5 supervisor
-registers the runtime process.
+has exactly one current deferred plan. Automatic transition logic is durable,
+restart-safe, and driven by the worker runtime when `DATABASE_URL` is
+configured.
