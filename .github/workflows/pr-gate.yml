@@ -1,0 +1,295 @@
+name: PR Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  BOT_MODE: "OFF"
+  EMERGENCY_LOCK: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  pytest-postgres:
+    name: Pytest + PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bot_tv
+          POSTGRES_PASSWORD: bot_tv_ci
+          POSTGRES_DB: bot_tv_ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bot_tv -d bot_tv_ci_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      BOT_TV_TEST_DATABASE_URL: postgresql+asyncpg://bot_tv:bot_tv_ci@localhost:5432/bot_tv_ci_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev-lock.txt
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Wait for PostgreSQL
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U bot_tv -d bot_tv_ci_test; then
+              echo "PostgreSQL is ready (attempt ${attempt}/30)"
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL... (${attempt}/30)"
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time"
+          exit 1
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev-lock.txt
+
+      - name: Assert single Alembic head
+        run: |
+          python - <<'PY'
+          import os
+
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+
+          heads = ScriptDirectory.from_config(Config("alembic.ini")).get_heads()
+          if len(heads) != 1:
+              raise SystemExit(f"expected exactly one Alembic head, got {heads!r}")
+          head = heads[0]
+          print(f"alembic_head={head}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"ALEMBIC_HEAD={head}\n")
+          PY
+
+      - name: Apply Alembic migrations and verify current revision
+        env:
+          DATABASE_URL: ${{ env.BOT_TV_TEST_DATABASE_URL }}
+          BOT_TV_TEST_DATABASE_URL: ${{ env.BOT_TV_TEST_DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          DATABASE_URL = os.environ["DATABASE_URL"]
+          TEST_DATABASE_URL = os.environ["BOT_TV_TEST_DATABASE_URL"]
+          EXPECTED_HEAD = os.environ["ALEMBIC_HEAD"]
+
+          def redact(message: str) -> str:
+              scrubbed = message
+              for secret in (DATABASE_URL, TEST_DATABASE_URL):
+                  if secret:
+                      scrubbed = scrubbed.replace(secret, "[REDACTED]")
+              scrubbed = re.sub(
+                  r"postgresql(?:\+asyncpg)?://[^\s'\"<>]+",
+                  "[REDACTED]",
+                  scrubbed,
+              )
+              return scrubbed
+
+          def run_alembic(*args: str) -> subprocess.CompletedProcess[str]:
+              return subprocess.run(
+                  ["alembic", *args],
+                  capture_output=True,
+                  text=True,
+              )
+
+          upgrade = run_alembic("upgrade", "head")
+          if upgrade.returncode != 0:
+              detail = redact(
+                  (upgrade.stderr or upgrade.stdout or "alembic upgrade head failed").strip()
+              )
+              print(f"alembic upgrade failed: {detail}")
+              sys.exit(upgrade.returncode)
+
+          current = run_alembic("current")
+          if current.returncode != 0:
+              detail = redact(
+                  (current.stderr or current.stdout or "alembic current failed").strip()
+              )
+              print(f"alembic current failed: {detail}")
+              sys.exit(current.returncode)
+
+          revisions = [
+              match.group(1)
+              for match in re.finditer(
+                  r"\b(20\d{6}_[0-9a-z]+_[a-z0-9_]+)\b",
+                  current.stdout,
+              )
+          ]
+          unique_revisions = list(dict.fromkeys(revisions))
+          if len(unique_revisions) != 1:
+              print(
+                  "expected exactly one current Alembic revision, "
+                  f"got {unique_revisions!r}"
+              )
+              sys.exit(1)
+
+          current_revision = unique_revisions[0]
+          if current_revision != EXPECTED_HEAD:
+              print(
+                  "current revision "
+                  f"{current_revision!r} does not match head {EXPECTED_HEAD!r}"
+              )
+              sys.exit(1)
+
+          print(f"alembic_current={current_revision}")
+          PY
+
+      - name: Run full pytest suite
+        run: python -m pytest -p no:cacheprovider -ra --tb=short
+
+      - name: Alembic diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "=== alembic heads (offline) ==="
+          alembic heads
+          echo "=== migration files ==="
+          ls -1 alembic/versions/*.py
+
+  docker-images:
+    name: Docker Compose + Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://ci:ci@127.0.0.1:5432/bot_tv_compose_check
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Assert safe runtime variables
+        run: |
+          set -euo pipefail
+          test "$BOT_MODE" = "OFF"
+          test "$EMERGENCY_LOCK" = "true"
+          echo "BOT_MODE=OFF and EMERGENCY_LOCK=true confirmed"
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Assert rendered compose safety defaults
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+
+          def normalize_env(raw):
+              if isinstance(raw, dict):
+                  return raw
+              if isinstance(raw, list):
+                  normalized = {}
+                  for item in raw:
+                      if isinstance(item, str) and "=" in item:
+                          key, value = item.split("=", 1)
+                          normalized[key] = value
+                  return normalized
+              raise SystemExit(f"unexpected environment type: {type(raw)!r}")
+
+          result = subprocess.run(
+              ["docker", "compose", "config", "--format", "json"],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          config = json.loads(result.stdout)
+          for service_name in ("migrate", "api", "worker"):
+              service = config["services"][service_name]
+              env = normalize_env(service.get("environment", {}))
+              bot_mode = env.get("BOT_MODE")
+              emergency_lock = env.get("EMERGENCY_LOCK")
+              if bot_mode != "OFF":
+                  raise SystemExit(
+                      f"{service_name}: BOT_MODE={bot_mode!r}, expected 'OFF'"
+                  )
+              if str(emergency_lock).lower() != "true":
+                  raise SystemExit(
+                      f"{service_name}: EMERGENCY_LOCK={emergency_lock!r}, expected true"
+                  )
+              print(f"{service_name}: BOT_MODE=OFF EMERGENCY_LOCK=true OK")
+          PY
+
+      - name: Build Docker images
+        run: docker compose build --pull migrate api worker
+
+      - name: Verify built images exist
+        run: |
+          set -euo pipefail
+          mapfile -t images < <(docker compose config --images)
+          if [ "${#images[@]}" -eq 0 ]; then
+            echo "No images reported by docker compose config --images"
+            exit 1
+          fi
+          unique_count="$(printf '%s\n' "${images[@]}" | sort -u | wc -l)"
+          if [ "${unique_count}" -ne 3 ]; then
+            echo "Expected exactly 3 unique images, got ${unique_count}:"
+            printf '%s\n' "${images[@]}" | sort -u
+            exit 1
+          fi
+          for image in "${images[@]}"; do
+            if ! docker image inspect "${image}" >/dev/null; then
+              echo "Missing local image: ${image}"
+              exit 1
+            fi
+            echo "Verified image: ${image}"
+          done
+
+  pr-gate:
+    name: PR Gate
+    runs-on: ubuntu-latest
+    needs:
+      - pytest-postgres
+      - docker-images
+    if: always()
+    timeout-minutes: 5
+
+    steps:
+      - name: Require all gate jobs to succeed
+        run: |
+          set -euo pipefail
+          pytest_result="${{ needs.pytest-postgres.result }}"
+          docker_result="${{ needs.docker-images.result }}"
+          echo "pytest-postgres: ${pytest_result}"
+          echo "docker-images: ${docker_result}"
+          if [ "$pytest_result" != "success" ] || [ "$docker_result" != "success" ]; then
+            echo "PR Gate failed: one or more required jobs did not succeed"
+            exit 1
+          fi
+          echo "PR Gate passed"
