@@ -12,6 +12,7 @@ from app.models import (
     AmoCrmMirrorJob,
     Conversation,
     ConversationOpsEvent,
+    EphemeralPiiValue,
     InboxMessage,
     IngressEvent,
     ManagerMessage,
@@ -161,6 +162,7 @@ def test_alembic_metadata_imports() -> None:
     assert ManagerMessage.__tablename__ == "manager_messages"
     assert WorkerHeartbeat.__tablename__ == "worker_heartbeats"
     assert ConversationOpsEvent.__tablename__ == "conversation_ops_events"
+    assert EphemeralPiiValue.__tablename__ == "ephemeral_pii_values"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -172,6 +174,7 @@ def test_alembic_metadata_imports() -> None:
         "manager_messages",
         "worker_heartbeats",
         "conversation_ops_events",
+        "ephemeral_pii_values",
     }
 
 

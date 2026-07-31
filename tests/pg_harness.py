@@ -90,6 +90,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_ephemeral_pii = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.ephemeral_pii_values') "
+                    "IS NOT NULL"
+                )
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
@@ -99,6 +105,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "manager_messages")
             if has_ops_events:
                 tables.insert(0, "conversation_ops_events")
+            if has_ephemeral_pii:
+                tables.insert(0, "ephemeral_pii_values")
             if has_worker_heartbeats:
                 tables.insert(0, "worker_heartbeats")
             if has_ingress:

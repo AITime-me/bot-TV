@@ -35,6 +35,7 @@ from app.models.conversation_ops_event import (
     ConversationOpsEvent,
     ConversationOpsEventType,
 )
+from app.models.ephemeral_pii import EphemeralPiiValue
 from app.models.inbox import (
     InboxMessage,
     MessageDirection,
@@ -102,6 +103,7 @@ __all__ = [
     "Conversation",
     "ConversationOpsEvent",
     "ConversationOpsEventType",
+    "EphemeralPiiValue",
     "ConversationOwnership",
     "ConversationStatus",
     "HandoffState",

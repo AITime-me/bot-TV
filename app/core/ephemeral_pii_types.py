@@ -5,6 +5,10 @@ No storage, AI recovery, or integration adapters live here.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
+import secrets
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -17,17 +21,29 @@ _ALLOWED_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "EPHEMERAL_PII_VALUE_INVALID",
         "EPHEMERAL_PII_ENCRYPT_FAILED",
         "EPHEMERAL_PII_ACCESS_DENIED",
+        "EPHEMERAL_PII_REFERENCE_INVALID",
+        "EPHEMERAL_PII_STORE_FAILED",
+        "EPHEMERAL_PII_PURGE_FAILED",
+        "EPHEMERAL_PII_POLICY_INVALID",
     }
 )
 
 CRYPTO_VERSION_V1: Final[int] = 1
 KEY_SIZE_BYTES: Final[int] = 32
 NONCE_SIZE_BYTES: Final[int] = 12
+REFERENCE_RAW_BYTES: Final[int] = 32
+REFERENCE_DIGEST_BYTES: Final[int] = 32
+REFERENCE_TOKEN_LENGTH: Final[int] = 44
 # AES-GCM ciphertext always includes a 16-byte authentication tag.
 MIN_CIPHERTEXT_BYTES: Final[int] = 16
 # Hard limit for one ephemeral plaintext value (UTF-8 bytes). Phones are tiny;
 # keep headroom without allowing large free-text blobs.
 MAX_PLAINTEXT_BYTES: Final[int] = 256
+MAX_TTL_SECONDS: Final[int] = 86400
+MAX_PURGE_BATCH: Final[int] = 1000
+MAX_REFERENCE_COLLISION_RETRIES: Final[int] = 3
+
+_REFERENCE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}=$")
 
 
 class EphemeralPiiError(RuntimeError):
@@ -181,6 +197,125 @@ class EphemeralPiiCiphertext:
             f"ciphertext_len={len(self.ciphertext)}, "
             "key_id=<redacted>)"
         )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+
+def _canonical_reference_token(raw: bytes) -> str:
+    if type(raw) is not bytes or len(raw) != REFERENCE_RAW_BYTES:
+        raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_reference_token(token: str) -> bytes:
+    if _REFERENCE_TOKEN_RE.fullmatch(token) is None:
+        raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+    try:
+        decoded = base64.urlsafe_b64decode(token)
+    except Exception:
+        raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+    if type(decoded) is not bytes or len(decoded) != REFERENCE_RAW_BYTES:
+        raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+    if _canonical_reference_token(decoded) != token:
+        raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+    return decoded
+
+
+class EphemeralPiiReference:
+    """Opaque 256-bit reference. Raw bytes never appear in repr or PostgreSQL."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: bytes) -> None:
+        if type(raw) is not bytes or len(raw) != REFERENCE_RAW_BYTES:
+            raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+        object.__setattr__(self, "_raw", raw)
+
+    @classmethod
+    def generate(cls) -> EphemeralPiiReference:
+        try:
+            raw = secrets.token_bytes(REFERENCE_RAW_BYTES)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+        return cls(raw)
+
+    @classmethod
+    def parse(cls, value: object) -> EphemeralPiiReference:
+        if type(value) is not str:
+            raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+        return cls(_decode_reference_token(value))
+
+    def to_token(self) -> str:
+        return _canonical_reference_token(self._raw)
+
+    def digest(self) -> bytes:
+        return hashlib.sha256(self._raw).digest()
+
+    def __repr__(self) -> str:
+        return "EphemeralPiiReference(<redacted>)"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is EphemeralPiiReference and self._raw == other._raw
+
+    def __hash__(self) -> int:
+        return hash(self._raw)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class EphemeralPiiHandle:
+    """Caller-facing store result. No database ids or ciphertext."""
+
+    reference: EphemeralPiiReference
+    kind: EphemeralPiiKind
+    purpose: EphemeralPiiPurpose
+
+    def __post_init__(self) -> None:
+        if type(self.reference) is not EphemeralPiiReference:
+            raise EphemeralPiiError("EPHEMERAL_PII_REFERENCE_INVALID") from None
+        object.__setattr__(self, "kind", _require_exact_kind(self.kind))
+        object.__setattr__(self, "purpose", _require_exact_purpose(self.purpose))
+
+    def __repr__(self) -> str:
+        return (
+            "EphemeralPiiHandle("
+            "reference=<redacted>, "
+            f"kind={self.kind.value!r}, "
+            f"purpose={self.purpose.value!r})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class EphemeralPiiTtlPolicy:
+    """Trusted server-side TTL. Not accepted from store callers."""
+
+    ttl_seconds: int
+
+    def __post_init__(self) -> None:
+        if type(self.ttl_seconds) is not int or isinstance(self.ttl_seconds, bool):
+            raise EphemeralPiiError("EPHEMERAL_PII_POLICY_INVALID") from None
+        if not 1 <= self.ttl_seconds <= MAX_TTL_SECONDS:
+            raise EphemeralPiiError("EPHEMERAL_PII_POLICY_INVALID") from None
+
+    def __repr__(self) -> str:
+        return "EphemeralPiiTtlPolicy(<redacted>)"
 
     def __str__(self) -> str:
         return self.__repr__()

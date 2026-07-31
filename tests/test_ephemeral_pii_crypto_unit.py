@@ -17,6 +17,7 @@ from app.core.ephemeral_pii_crypto import (
     encrypt_text,
 )
 from app.core.ephemeral_pii_keys import (
+    ActiveEphemeralPiiKey,
     EnvEphemeralPiiKeyProvider,
     validate_key_id,
 )
@@ -968,3 +969,95 @@ def test_normal_encrypt_still_builds_valid_dto() -> None:
     assert len(encrypted.nonce) == NONCE_SIZE_BYTES
     assert type(encrypted.ciphertext) is bytes
     assert len(encrypted.ciphertext) >= MIN_CIPHERTEXT_BYTES
+
+
+class _SnapshotTrackingProvider:
+    def __init__(self, env: dict[str, str]) -> None:
+        self._env = env
+        self.active_calls = 0
+        self.get_key_calls = 0
+
+    def active_key_id(self) -> str:
+        self.active_calls += 1
+        return EnvEphemeralPiiKeyProvider(self._env).active_key_id()
+
+    def get_key(self, key_id: str) -> bytes:
+        self.get_key_calls += 1
+        return EnvEphemeralPiiKeyProvider(self._env).get_key(key_id)
+
+    def get_active_key(self) -> ActiveEphemeralPiiKey:
+        return EnvEphemeralPiiKeyProvider(self._env).get_active_key()
+
+
+def test_active_key_snapshot_encrypt_skips_provider_reads() -> None:
+    provider = _provider()
+    active = provider.get_active_key()
+    aad = _aad(key_id=active.key_id)
+    tracker = _SnapshotTrackingProvider(
+        _env_for(("K1", _KEY_K1_B64), ("K2", _KEY_K2_B64), active="K2")
+    )
+    encrypted = encrypt_text(
+        _SYNTHETIC_PHONE,
+        aad=aad,
+        key_provider=tracker,  # type: ignore[arg-type]
+        active_key=active,
+    )
+    assert encrypted.key_id == "K1"
+    assert tracker.active_calls == 0
+    assert tracker.get_key_calls == 0
+
+
+def test_active_key_snapshot_survives_active_rotation() -> None:
+    env = _env_for(("K1", _KEY_K1_B64), ("K2", _KEY_K2_B64), active="K1")
+    provider = EnvEphemeralPiiKeyProvider(env)
+    active = provider.get_active_key()
+    aad = _aad(key_id="K1")
+    env["EPHEMERAL_PII_ACTIVE_KEY_ID"] = "K2"
+    encrypted = encrypt_text(
+        _SYNTHETIC_PHONE,
+        aad=aad,
+        key_provider=EnvEphemeralPiiKeyProvider(env),
+        active_key=active,
+    )
+    assert encrypted.key_id == "K1"
+    assert decrypt_text(encrypted, aad=aad, key_provider=provider) == _SYNTHETIC_PHONE
+
+
+def test_active_key_mismatch_rejected() -> None:
+    provider = _provider()
+    active = provider.get_active_key()
+    aad = _aad(key_id="K2")
+    with pytest.raises(EphemeralPiiError) as raised:
+        encrypt_text(
+            _SYNTHETIC_PHONE,
+            aad=aad,
+            key_provider=provider,
+            active_key=active,
+        )
+    _assert_safe_error(raised.value, "EPHEMERAL_PII_CONFIG_INVALID")
+
+
+def test_active_key_repr_safe() -> None:
+    active = ActiveEphemeralPiiKey("K1", _KEY_K1)
+    rendered = f"{active!r}{active!s}{active}"
+    assert "ActiveEphemeralPiiKey(key_id=<redacted>, key=<redacted>)" in rendered
+    assert _KEY_K1_B64 not in rendered
+    assert "K1" not in rendered
+
+
+def test_get_active_key_reads_id_once() -> None:
+    calls: list[str] = []
+
+    class _OnceProvider(EnvEphemeralPiiKeyProvider):
+        def active_key_id(self) -> str:
+            calls.append("active")
+            return super().active_key_id()
+
+        def get_key(self, key_id: str) -> bytes:
+            calls.append("get")
+            return super().get_key(key_id)
+
+    provider = _OnceProvider(_env_for(("K1", _KEY_K1_B64), active="K1"))
+    active = provider.get_active_key()
+    assert active.key_id == "K1"
+    assert calls == ["active", "get"]

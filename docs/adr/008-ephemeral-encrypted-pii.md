@@ -119,3 +119,61 @@ sizes/markers.
 Future Stage 2B can persist ciphertext envelopes produced by this foundation
 without expanding the AI or log surfaces. Dependency lock grows by
 `cryptography` and its required transitive pins (`cffi`, `pycparser`) only.
+
+## Stage 2B store (accepted)
+
+### Scope
+
+- PostgreSQL table `ephemeral_pii_values` (ciphertext only; no plaintext/raw token)
+- Opaque `EphemeralPiiReference`: 256-bit CSPRNG token; SHA-256 digest stored
+- `ActiveEphemeralPiiKey` snapshot via `get_active_key()` to eliminate active-key
+  race between service AAD construction and `encrypt_text`
+- `EphemeralPiiStore` with service-owned `session_scope` transactions
+- Methods: `store`, `consume_once`, `delete`, `purge_expired`
+- No reusable `recover`; no AI recovery path; no worker purge wiring in this PR
+- No FK to `conversations`; binding enforced in service layer
+- No production TTL default; synthetic tests use 900 seconds via
+  `EphemeralPiiTtlPolicy`
+
+### Clock and TTL
+
+- Security decisions use PostgreSQL `statement_timestamp()`
+- `created_at` and `expires_at` computed in one INSERT from the same statement
+  clock via `make_interval(secs => trusted_ttl)`
+- Expired rows are denied at consume/delete even before physical purge
+- `select_for_consume` performs a **post-lock** expiry re-check in a second SQL
+  statement within the same transaction so a row that expires while a caller
+  waits on `FOR UPDATE` cannot be consumed after TTL
+
+### Internal projection boundary
+
+- `EphemeralPiiLockedRow` is an internal repository projection (`frozen` dataclass)
+- Custom redacted `__repr__` / `__str__` / `__format__`; no export helpers
+- Generic `dataclasses.asdict` on this type would expose ciphertext/nonce/key
+  material and is **forbidden** in production code and logging paths
+- The projection must not leave the repository/service boundary; no
+  `model_dump` / `to_dict` serializers
+- Residual risk: a future caller could still invoke `asdict` manually outside
+  reviewed paths; static tests guard against production usage
+
+### Consume-once
+
+- `SELECT FOR UPDATE` by `reference_digest`
+- Binding checks for `conversation_id`, `kind`, `purpose`
+- `decrypt_text` then physical `DELETE` then commit
+- Plaintext returned only after successful transaction commit
+- Residual risk: crash after commit but before caller receives plaintext leaves
+  row deleted with caller unaware (acceptable; no second disclosure)
+
+### Purge
+
+- Batch `DELETE` via CTE + `FOR UPDATE SKIP LOCKED`
+- Returns count only; not wired to worker loop in this PR
+
+### Explicit non-goals (Stage 2B)
+
+- Worker scheduling for purge
+- AI marker with lookup capability
+- Channel/booking/amoCRM/staff/n8n integrations
+- BOT-10 attachments
+- Production secrets/TTL in config

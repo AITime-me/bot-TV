@@ -10,6 +10,7 @@ import base64
 import os
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
 from app.core.ephemeral_pii_types import (
@@ -22,8 +23,30 @@ _ACTIVE_KEY_ID_ENV = "EPHEMERAL_PII_ACTIVE_KEY_ID"
 _KEY_ENV_PREFIX = "EPHEMERAL_PII_KEY_"
 
 # Exact closed pattern: ASCII uppercase, digits, underscore; 1–64 chars.
-# Dots, hyphens, slashes, spaces, lowercase, and Unicode are rejected.
 _KEY_ID_RE = re.compile(r"^[A-Z0-9_]{1,64}$")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ActiveEphemeralPiiKey:
+    """Immutable active key snapshot for encrypt without re-reading env."""
+
+    key_id: str
+    key: bytes
+
+    def __post_init__(self) -> None:
+        validated_id = validate_key_id(self.key_id)
+        if type(self.key) is not bytes or len(self.key) != KEY_SIZE_BYTES:
+            raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+        object.__setattr__(self, "key_id", validated_id)
+
+    def __repr__(self) -> str:
+        return "ActiveEphemeralPiiKey(key_id=<redacted>, key=<redacted>)"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
 
 
 class EphemeralPiiKeyProvider(Protocol):
@@ -32,6 +55,9 @@ class EphemeralPiiKeyProvider(Protocol):
 
     def get_key(self, key_id: str) -> bytes:
         """Return exactly 32 raw key bytes for the given key id."""
+
+    def get_active_key(self) -> ActiveEphemeralPiiKey:
+        """Return an immutable active key id/material pair."""
 
 
 def validate_key_id(value: object) -> str:
@@ -123,3 +149,8 @@ class EnvEphemeralPiiKeyProvider:
             raise
         except Exception:
             raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+
+    def get_active_key(self) -> ActiveEphemeralPiiKey:
+        key_id = self.active_key_id()
+        key = self.get_key(key_id)
+        return ActiveEphemeralPiiKey(key_id=key_id, key=key)
