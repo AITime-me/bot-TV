@@ -324,115 +324,14 @@ def test_ready_endpoint_fails_closed_for_unhealthy_worker() -> None:
 
 
 def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
-    dockerignore_lines = (_REPO_ROOT / ".dockerignore").read_text(
-        encoding="utf-8"
-    ).splitlines()
-    for required in (".git", ".env", ".env.*", ".venv", "tests", "docs"):
-        assert required in dockerignore_lines
-    assert "**" in dockerignore_lines
-
-    allow_rules = [line for line in dockerignore_lines if line.startswith("!")]
-    broad_recursive_allows = (
-        "!app/**",
-        "!alembic/**",
-        "!app/**/*.py",
-        "!alembic/**/*.py",
-        "!app/**/*",
-        "!alembic/**/*",
+    from tests.docker_runtime_allowlist import (
+        assert_canonical_docker_runtime_allowlist,
+        dockerignore_lines,
     )
-    for banned in broad_recursive_allows:
-        assert banned not in dockerignore_lines
 
-    # Exact runtime allowlist required by the current Dockerfile COPY set.
-    # Keep this list static: do not derive it by walking the working tree.
-    expected_allows = (
-        "!requirements-lock.txt",
-        "!alembic.ini",
-        "!alembic/",
-        "!alembic/env.py",
-        "!alembic/script.py.mako",
-        "!alembic/versions/",
-        "!alembic/versions/.gitkeep",
-        "!alembic/versions/20260727_01a_foundation.py",
-        "!alembic/versions/20260727_01b_ingress.py",
-        "!alembic/versions/20260727_01c_reply_outbound.py",
-        "!alembic/versions/20260728_09_amocrm_mirror.py",
-        "!alembic/versions/20260728_10_attempt_exhaustion.py",
-        "!alembic/versions/20260729_11_handoff_schema.py",
-        "!alembic/versions/20260729_12_worker_runtime.py",
-        "!alembic/versions/20260729_13_handoff_quarantine.py",
-        "!app/",
-        "!app/__init__.py",
-        "!app/channels/",
-        "!app/channels/__init__.py",
-        "!app/config.py",
-        "!app/core/",
-        "!app/core/__init__.py",
-        "!app/core/outbound_policy.py",
-        "!app/core/pii_gateway.py",
-        "!app/core/ephemeral_pii_types.py",
-        "!app/core/ephemeral_pii_keys.py",
-        "!app/core/ephemeral_pii_crypto.py",
-        "!app/db/",
-        "!app/db/__init__.py",
-        "!app/db/base.py",
-        "!app/db/clock.py",
-        "!app/db/session.py",
-        "!app/db/worker_lock.py",
-        "!app/http_healthcheck.py",
-        "!app/integrations/",
-        "!app/integrations/__init__.py",
-        "!app/main.py",
-        "!app/models/",
-        "!app/models/__init__.py",
-        "!app/models/amocrm_mirror.py",
-        "!app/models/conversation.py",
-        "!app/models/conversation_ops_event.py",
-        "!app/models/inbox.py",
-        "!app/models/ingress.py",
-        "!app/models/manager_message.py",
-        "!app/models/outbox.py",
-        "!app/models/reply_plan.py",
-        "!app/models/worker_heartbeat.py",
-        "!app/repositories/",
-        "!app/repositories/__init__.py",
-        "!app/repositories/amocrm_mirror.py",
-        "!app/repositories/conversations.py",
-        "!app/repositories/ingress.py",
-        "!app/repositories/manager_messages.py",
-        "!app/repositories/messages.py",
-        "!app/repositories/outbound.py",
-        "!app/repositories/reply_plans.py",
-        "!app/repositories/worker_heartbeats.py",
-        "!app/schemas/",
-        "!app/schemas/__init__.py",
-        "!app/schemas/inbound.py",
-        "!app/schemas/ingress.py",
-        "!app/schemas/manager_message.py",
-        "!app/services/",
-        "!app/services/__init__.py",
-        "!app/services/amocrm_adapter.py",
-        "!app/services/amocrm_mirror.py",
-        "!app/services/dialog_context.py",
-        "!app/services/handoff_expiry.py",
-        "!app/services/inbound.py",
-        "!app/services/ingress.py",
-        "!app/services/manager_messages.py",
-        "!app/services/outbound_arbiter.py",
-        "!app/services/reply_outbound.py",
-        "!app/services/synthetic_outbound.py",
-        "!app/services/takeover.py",
-        "!app/services/worker_health.py",
-        "!app/services/worker_runtime.py",
-        "!app/worker.py",
-        "!app/worker_healthcheck.py",
-    )
-    assert allow_rules == list(expected_allows)
-    for rule in allow_rules:
-        path = rule[1:]
-        assert "*" not in path
-        assert "?" not in path
-        assert "[" not in path
+    lines = dockerignore_lines(_REPO_ROOT)
+    assert_canonical_docker_runtime_allowlist(lines)
+    allow_rules = [line for line in lines if line.startswith("!")]
 
     canary_paths = (
         "app/secrets.json",
@@ -443,8 +342,8 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         assert f"!{canary}" not in allow_rules
         assert canary not in {rule[1:] for rule in allow_rules}
 
-    assert "**/__pycache__/" in dockerignore_lines
-    assert "**/*.py[cod]" in dockerignore_lines
+    assert "**/__pycache__/" in lines
+    assert "**/*.py[cod]" in lines
 
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "USER bot-tv" in dockerfile

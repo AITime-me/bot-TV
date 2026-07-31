@@ -9,7 +9,7 @@ import secrets
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from app.core.ephemeral_pii_keys import EphemeralPiiKeyProvider
+from app.core.ephemeral_pii_keys import ActiveEphemeralPiiKey, EphemeralPiiKeyProvider
 from app.core.ephemeral_pii_types import (
     CRYPTO_VERSION_V1,
     KEY_SIZE_BYTES,
@@ -63,6 +63,7 @@ def encrypt_text(
     *,
     aad: EphemeralPiiAad,
     key_provider: EphemeralPiiKeyProvider,
+    active_key: ActiveEphemeralPiiKey | None = None,
 ) -> EphemeralPiiCiphertext:
     """Encrypt a strict ``str`` plaintext under AES-256-GCM with required AAD."""
     if type(value) is not str:
@@ -80,17 +81,25 @@ def encrypt_text(
     if aad.crypto_version != CRYPTO_VERSION_V1:
         raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
 
-    try:
-        active_key_id = key_provider.active_key_id()
-        if active_key_id != aad.key_id:
+    if active_key is not None:
+        if type(active_key) is not ActiveEphemeralPiiKey:
             raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
-        key = _require_key_bytes(key_provider.get_key(active_key_id))
-    except EphemeralPiiError:
-        raise
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception:
-        raise EphemeralPiiError("EPHEMERAL_PII_KEY_UNAVAILABLE") from None
+        if active_key.key_id != aad.key_id:
+            raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+        key = _require_key_bytes(active_key.key)
+        active_key_id = active_key.key_id
+    else:
+        try:
+            active_key_id = key_provider.active_key_id()
+            if active_key_id != aad.key_id:
+                raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+            key = _require_key_bytes(key_provider.get_key(active_key_id))
+        except EphemeralPiiError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise EphemeralPiiError("EPHEMERAL_PII_KEY_UNAVAILABLE") from None
 
     try:
         nonce = secrets.token_bytes(NONCE_SIZE_BYTES)
