@@ -79,8 +79,10 @@ Downgrade is fail-closed if any `LEASED` or `DELETE_PENDING` rows remain.
 
 - Read/decrypt service API
 - Ack / `DELETE_PENDING` finalization
-- Purge implementation
 - Worker wiring, channel adapters, HTTP API
+
+Expiry purge of expired `STORED` / dual-expired `LEASED` is delivered in
+Stage 1A2B3 (see ADR 013); this ADR only prepared the supporting index.
 
 ## Consequences
 

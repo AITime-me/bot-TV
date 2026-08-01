@@ -1,9 +1,9 @@
-"""Encrypted attachment spool store Stage 1A1/1A2A/1A2B1/1A2B2.
+"""Encrypted attachment spool store Stage 1A1/1A2A/1A2B1/1A2B2/1A2B3.
 
 DB-authoritative WRITING → STORED lifecycle, lease acquire/release/reclaim,
-secure lease-gated read/decrypt with second revalidation, and lease-gated
-acknowledgement with DELETE_PENDING finalization.
-No delivery purge API.
+secure lease-gated read/decrypt with second revalidation, lease-gated
+acknowledgement with DELETE_PENDING finalization, and expiry purge into
+DELETE_PENDING with shared filesystem-first finalization.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from app.core.attachment_types import (
     LEASE_TTL_SECONDS,
     MAX_LEASE_RECLAIM_BATCH,
     MAX_LEASE_TOKEN_COLLISION_RETRIES,
+    MAX_PURGE_BATCH,
     MAX_RECONCILE_BATCH,
     MAX_REFERENCE_COLLISION_RETRIES,
     AttachmentAad,
@@ -41,6 +42,7 @@ from app.core.attachment_types import (
     AttachmentMime,
     AttachmentPlaintext,
     AttachmentPurpose,
+    AttachmentPurgeResult,
     AttachmentReconcileResult,
     AttachmentReference,
     AttachmentSpoolPolicy,
@@ -571,6 +573,93 @@ class AttachmentSpoolStore:
             io_unavailable_skipped=io_unavailable_skipped,
         )
 
+    async def purge_expired(self, *, limit: int) -> AttachmentPurgeResult:
+        _require_purge_limit(limit)
+        transitioned_stored = 0
+        transitioned_leased = 0
+        deleted = 0
+        unsafe_skipped = 0
+        io_unavailable_skipped = 0
+        skipped = 0
+        snapshots: list[_DeletePendingFinalizeSnapshot] = []
+        try:
+            async with session_scope(self._session_factory) as session:
+                rows = await spool_repo.select_expired_for_purge(
+                    session, limit=limit
+                )
+                for row in rows:
+                    if row.state == "STORED":
+                        updated = (
+                            await spool_repo.transition_expired_stored_to_delete_pending(
+                                session, row_id=row.id
+                            )
+                        )
+                        if updated is None:
+                            skipped += 1
+                            continue
+                        snapshots.append(
+                            _DeletePendingFinalizeSnapshot.from_row(updated)
+                        )
+                        transitioned_stored += 1
+                    elif row.state == "LEASED":
+                        updated = (
+                            await spool_repo.transition_expired_leased_to_delete_pending(
+                                session, row_id=row.id
+                            )
+                        )
+                        if updated is None:
+                            skipped += 1
+                            continue
+                        snapshots.append(
+                            _DeletePendingFinalizeSnapshot.from_row(updated)
+                        )
+                        transitioned_leased += 1
+                    else:
+                        skipped += 1
+                        continue
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            # Includes AttachmentError from from_row/mapper (e.g. STORE_FAILED).
+            raise AttachmentError("ATTACHMENT_RECONCILE_FAILED") from None
+
+        try:
+            for snapshot in snapshots:
+                outcome = await self._finalize_delete_pending(snapshot)
+                if outcome == "deleted":
+                    deleted += 1
+                elif outcome == "already_gone":
+                    skipped += 1
+                elif outcome == "conflict":
+                    skipped += 1
+                elif outcome == "fs_unsafe":
+                    unsafe_skipped += 1
+                elif outcome == "fs_io":
+                    io_unavailable_skipped += 1
+                elif outcome == "store_failed":
+                    raise AttachmentError(
+                        "ATTACHMENT_RECONCILE_FAILED"
+                    ) from None
+                else:
+                    raise AttachmentError(
+                        "ATTACHMENT_RECONCILE_FAILED"
+                    ) from None
+        except AttachmentError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise AttachmentError("ATTACHMENT_RECONCILE_FAILED") from None
+
+        return AttachmentPurgeResult(
+            transitioned_stored=transitioned_stored,
+            transitioned_leased=transitioned_leased,
+            deleted=deleted,
+            unsafe_skipped=unsafe_skipped,
+            io_unavailable_skipped=io_unavailable_skipped,
+            skipped=skipped,
+        )
+
     async def _reconcile_stale_writing_row(
         self, session: AsyncSession, row: spool_repo.AttachmentSpoolRow
     ) -> str:
@@ -894,6 +983,14 @@ def _require_reclaim_limit(value: object) -> int:
     if type(value) is not int or isinstance(value, bool):
         raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
     if not 1 <= value <= MAX_LEASE_RECLAIM_BATCH:
+        raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
+    return value
+
+
+def _require_purge_limit(value: object) -> int:
+    if type(value) is not int or isinstance(value, bool):
+        raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
+    if not 1 <= value <= MAX_PURGE_BATCH:
         raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
     return value
 

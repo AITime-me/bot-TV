@@ -53,6 +53,7 @@ LEASE_TOKEN_LENGTH: Final[int] = 44
 LEASE_TTL_SECONDS: Final[int] = 300
 MAX_LEASE_TOKEN_COLLISION_RETRIES: Final[int] = 3
 MAX_LEASE_RECLAIM_BATCH: Final[int] = 1000
+MAX_PURGE_BATCH: Final[int] = 1000
 
 _REFERENCE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}=$")
 _LEASE_TOKEN_RE = _REFERENCE_TOKEN_RE
@@ -629,6 +630,48 @@ class AttachmentReconcileResult:
             f"deleted_delete_pending={self.deleted_delete_pending}, "
             f"unsafe_skipped={self.unsafe_skipped}, "
             f"io_unavailable_skipped={self.io_unavailable_skipped})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AttachmentPurgeResult:
+    """Count-only expiry purge outcome. No paths or identifiers."""
+
+    transitioned_stored: int
+    transitioned_leased: int
+    deleted: int
+    unsafe_skipped: int
+    io_unavailable_skipped: int
+    skipped: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "transitioned_stored",
+            "transitioned_leased",
+            "deleted",
+            "unsafe_skipped",
+            "io_unavailable_skipped",
+            "skipped",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool) or value < 0:
+                raise AttachmentError("ATTACHMENT_RECONCILE_FAILED") from None
+
+    def __repr__(self) -> str:
+        return (
+            "AttachmentPurgeResult("
+            f"transitioned_stored={self.transitioned_stored}, "
+            f"transitioned_leased={self.transitioned_leased}, "
+            f"deleted={self.deleted}, "
+            f"unsafe_skipped={self.unsafe_skipped}, "
+            f"io_unavailable_skipped={self.io_unavailable_skipped}, "
+            f"skipped={self.skipped})"
         )
 
     def __str__(self) -> str:
