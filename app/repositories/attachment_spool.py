@@ -381,3 +381,47 @@ async def apply_lease(
     if row is None:
         return None
     return _to_row(row)
+
+
+async def transition_leased_to_delete_pending(
+    session: AsyncSession,
+    *,
+    row_id: uuid.UUID,
+    lease_token_digest: bytes,
+) -> AttachmentSpoolRow | None:
+    """Conditionally transition LEASED → DELETE_PENDING. Lease active at UPDATE time."""
+    result = await session.execute(
+        update(AttachmentSpoolObject)
+        .where(
+            AttachmentSpoolObject.id == row_id,
+            AttachmentSpoolObject.state == "LEASED",
+            AttachmentSpoolObject.lease_token_digest == lease_token_digest,
+            AttachmentSpoolObject.lease_expires_at.is_not(None),
+            AttachmentSpoolObject.lease_expires_at > func.statement_timestamp(),
+        )
+        .values(
+            state="DELETE_PENDING",
+            updated_at=func.statement_timestamp(),
+        )
+        .returning(AttachmentSpoolObject)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    return _to_row(row)
+
+
+async def select_delete_pending_for_finalize(
+    session: AsyncSession,
+    *,
+    limit: int,
+) -> list[AttachmentSpoolRow]:
+    stmt = (
+        select(AttachmentSpoolObject)
+        .where(AttachmentSpoolObject.state == "DELETE_PENDING")
+        .order_by(AttachmentSpoolObject.updated_at, AttachmentSpoolObject.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.scalars(stmt)).all()
+    return [_to_row(row) for row in rows]

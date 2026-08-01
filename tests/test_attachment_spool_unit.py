@@ -177,6 +177,7 @@ def test_handle_and_reconcile_result_redacted() -> None:
         deleted_orphan_temps=0,
         deleted_orphan_finals=0,
         deleted_unrecoverable_stored=0,
+        deleted_delete_pending=0,
         unsafe_skipped=0,
         io_unavailable_skipped=0,
     )
@@ -224,12 +225,26 @@ def test_no_public_recover_or_decrypt_api() -> None:
     assert "release" in names
     assert "reclaim_expired_leases" in names
     assert "read" in names
+    assert "acknowledge" in names
     assert "recover" not in names
     assert "decrypt" not in names
     assert "open_once" not in names
     assert "read_for_delivery" not in names
     assert "acquire_delivery" not in names
     assert "acknowledge_delivered" not in names
+    assert "ack" not in names
+    assert "purge" not in names
+
+
+@pytest.fixture(autouse=True)
+def _reconcile_without_delete_pending_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _empty(*_a: Any, **_k: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(
+        "app.services.attachment_spool_store.spool_repo.select_delete_pending_for_finalize",
+        _empty,
+    )
 
 
 def test_collision_retry_constant() -> None:

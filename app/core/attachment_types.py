@@ -599,6 +599,7 @@ class AttachmentReconcileResult:
     deleted_orphan_temps: int
     deleted_orphan_finals: int
     deleted_unrecoverable_stored: int
+    deleted_delete_pending: int
     unsafe_skipped: int
     io_unavailable_skipped: int
 
@@ -609,6 +610,7 @@ class AttachmentReconcileResult:
             "deleted_orphan_temps",
             "deleted_orphan_finals",
             "deleted_unrecoverable_stored",
+            "deleted_delete_pending",
             "unsafe_skipped",
             "io_unavailable_skipped",
         ):
@@ -624,6 +626,7 @@ class AttachmentReconcileResult:
             f"deleted_orphan_temps={self.deleted_orphan_temps}, "
             f"deleted_orphan_finals={self.deleted_orphan_finals}, "
             f"deleted_unrecoverable_stored={self.deleted_unrecoverable_stored}, "
+            f"deleted_delete_pending={self.deleted_delete_pending}, "
             f"unsafe_skipped={self.unsafe_skipped}, "
             f"io_unavailable_skipped={self.io_unavailable_skipped})"
         )
