@@ -35,6 +35,7 @@ from app.models.conversation_ops_event import (
     ConversationOpsEvent,
     ConversationOpsEventType,
 )
+from app.models.attachment_spool import AttachmentSpoolObject
 from app.models.ephemeral_pii import EphemeralPiiValue
 from app.models.inbox import (
     InboxMessage,
@@ -103,6 +104,7 @@ __all__ = [
     "Conversation",
     "ConversationOpsEvent",
     "ConversationOpsEventType",
+    "AttachmentSpoolObject",
     "EphemeralPiiValue",
     "ConversationOwnership",
     "ConversationStatus",
