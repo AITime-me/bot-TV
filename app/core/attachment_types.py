@@ -478,6 +478,28 @@ class AttachmentLeaseReclaimResult:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class AttachmentPlaintext:
+    """Decrypted attachment bytes with server-detected MIME only."""
+
+    data: bytes
+    mime: AttachmentMime
+
+    def __post_init__(self) -> None:
+        if type(self.data) is not bytes or self.data == b"":
+            raise AttachmentError("ATTACHMENT_VALUE_INVALID") from None
+        object.__setattr__(self, "mime", _require_exact_mime(self.mime))
+
+    def __repr__(self) -> str:
+        return f"AttachmentPlaintext(mime={self.mime.value!r}, data=<redacted>)"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class AttachmentHandle:
     """Caller-facing store result. No database ids or ciphertext."""
 

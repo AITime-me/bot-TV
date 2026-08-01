@@ -17,11 +17,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 class TxnTracker:
     events: list[str] = field(default_factory=list)
     fail_commit: bool = False
+    fail_commit_number: int | None = None
     session: Any = field(default=None)
+    _commit_attempts: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.session is None:
             self.session = _NestedCapableSession()
+
+    def _should_fail_commit(self) -> bool:
+        self._commit_attempts += 1
+        if self.fail_commit_number is not None:
+            return self._commit_attempts == self.fail_commit_number
+        return self.fail_commit
 
 
 class _NestedTxn:
@@ -57,7 +65,7 @@ def make_observing_session_scope(
             tracker.events.append("rollback")
             raise
         else:
-            if tracker.fail_commit:
+            if tracker._should_fail_commit():
                 tracker.events.append("rollback")
                 raise RuntimeError("synthetic commit failure")
             tracker.events.append("commit")
