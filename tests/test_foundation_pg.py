@@ -49,6 +49,7 @@ _FOUNDATION_TABLES = (
     "worker_heartbeats",
     "conversation_ops_events",
     "ephemeral_pii_values",
+    "attachment_spool_objects",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -373,6 +374,8 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
         "conversation_event_seq",
     ),
     "uq_ephemeral_pii_values_reference_digest": ("reference_digest",),
+    "uq_attachment_spool_objects_reference_digest": ("reference_digest",),
+    "uq_attachment_spool_objects_object_id": ("object_id",),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -406,6 +409,8 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
         "created_at",
     ),
     "ix_ephemeral_pii_values_expires_at": ("expires_at",),
+    "ix_attachment_spool_objects_expires_at": ("expires_at",),
+    "ix_attachment_spool_objects_state_updated_at": ("state", "updated_at"),
 }
 
 

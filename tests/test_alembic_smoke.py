@@ -10,6 +10,7 @@ from sqlalchemy import CheckConstraint, UniqueConstraint
 from app.db.base import Base
 from app.models import (
     AmoCrmMirrorJob,
+    AttachmentSpoolObject,
     Conversation,
     ConversationOpsEvent,
     EphemeralPiiValue,
@@ -163,6 +164,7 @@ def test_alembic_metadata_imports() -> None:
     assert WorkerHeartbeat.__tablename__ == "worker_heartbeats"
     assert ConversationOpsEvent.__tablename__ == "conversation_ops_events"
     assert EphemeralPiiValue.__tablename__ == "ephemeral_pii_values"
+    assert AttachmentSpoolObject.__tablename__ == "attachment_spool_objects"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -175,6 +177,7 @@ def test_alembic_metadata_imports() -> None:
         "worker_heartbeats",
         "conversation_ops_events",
         "ephemeral_pii_values",
+        "attachment_spool_objects",
     }
 
 
