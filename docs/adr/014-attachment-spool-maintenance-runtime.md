@@ -1,0 +1,167 @@
+# ADR 014: Attachment Spool Maintenance Runtime (CURSOR-13 Stage 1)
+
+## Status
+
+Accepted — Stage 1 library-only implementation scope.
+
+## Context
+
+Stages 1A1–1A2B3 delivered public `AttachmentSpoolStore.reconcile` and
+`purge_expired` APIs with row-level `FOR UPDATE SKIP LOCKED` concurrency and a
+shared filesystem-first `DELETE_PENDING` finalizer. ADR 013 left operators to
+schedule those APIs externally. CURSOR-13 Stage 1 adds a reusable in-process
+maintenance runner without activating production scheduling.
+
+## Decision
+
+### Runtime form
+
+- Library class `AttachmentMaintenanceRunner` in
+  `app/services/attachment_maintenance.py`.
+- Public API: `run_once()`, `run_forever(*, stop_event)`, `status`.
+- Constructor-injected `AttachmentSpoolStore` + `AttachmentMaintenanceConfig`.
+- **Not** wired into FastAPI lifespan, existing `WorkerRuntime`, CLI, compose,
+  cron, or env/`Settings.from_env` in this stage.
+- Runner does not start automatically.
+
+### One-cycle orchestration
+
+1. Call `store.reconcile(limit=config.reconcile_limit)`.
+2. Call `store.purge_expired(limit=config.purge_limit)`.
+3. Aggregate a typed `AttachmentMaintenanceCycleResult` (`SUCCESS` / `PARTIAL` /
+   `FAILED` only).
+
+Rules:
+
+- Purge runs after operational `AttachmentError` from reconcile.
+- Unexpected non-`AttachmentError` `Exception` from reconcile skips purge,
+  records status `INTERNAL_ERROR`, and is re-raised (fatal to `run_forever`).
+- One cycle = one bounded reconcile batch + one bounded purge batch (no drain
+  loop).
+- Runner calls only public store APIs; no repository SQL and no direct
+  filesystem lifecycle.
+
+### Per-instance serialization
+
+- One private `asyncio.Lock` per runner instance.
+- **Every** immutable status snapshot replacement happens only while holding
+  that lock (cycle body, `run_forever` loop start, and `run_forever` finally).
+- Lock covers reconcile + purge + status transition for a single cycle.
+- Concurrent `run_once` calls wait (serialize); no overlapping cycles.
+- Interval / initial-delay waits do **not** hold the lock.
+- `run_forever` does not hold the lock around `run_once` (non-reentrant lock).
+- If stop ends an interval wait while an external `run_once` holds the lock,
+  finally waits for the lock and only clears `loop_running` — it must not wipe
+  a fresher in-flight or completed cycle snapshot.
+- No global lock, PostgreSQL advisory lock, Redis, or leader table.
+
+### Duplicate `run_forever` guard
+
+- At most one active `run_forever` per instance.
+- Second call fails fast with `RuntimeError("ATTACHMENT_MAINTENANCE_ALREADY_RUNNING")`
+  before any await.
+- After setting the guard, enter `try` immediately (no status/log calls between
+  guard set and `try`).
+- Guard cleared in `finally` (under the cycle lock) on normal stop, cancellation,
+  waiter/`now_fn`/store failure, and logging-adjacent paths so the same instance
+  may restart.
+
+### Long-running loop
+
+- Fixed delay **after** each completed cycle (`interval_seconds`).
+- `initial_delay_seconds` default `0` → immediate first run.
+- Interruptible wait abstraction (production: `stop_event` + timeout; tests:
+  injectable event-driven waiter). No `asyncio.sleep` in runner.
+
+### `stop_event` vs cancellation
+
+- `stop_event` interrupts only initial-delay and interval waits.
+- `stop_event` does **not** cancel an in-flight reconcile/purge.
+- If stop is set during an active cycle, the cycle completes fully; then the
+  loop exits without another interval/cycle.
+- Graceful shutdown may therefore wait for the current cycle (accepted).
+- External `Task.cancel()` propagates `CancelledError`; cycle status becomes
+  `CANCELLED` when cancel hits inside a cycle; wait-time cancel does not
+  overwrite the last completed cycle status.
+- Forced kill remains crash-safe via durable `WRITING` / `DELETE_PENDING`
+  recovery (ADR 012/013).
+
+### Error taxonomy
+
+| Class | Behavior |
+|-------|----------|
+| `AttachmentError` | Operational; safe `exc.code` only; cycle result PARTIAL/FAILED; loop continues |
+| `asyncio.CancelledError` | Propagate; status CANCELLED if inside cycle; not an operational failure counter bump |
+| Other `Exception` | Status INTERNAL_ERROR; log `type(exc).__name__` only; re-raise; no result DTO |
+
+### Status and logging
+
+- Immutable `AttachmentMaintenanceStatus` snapshots replaced under the cycle
+  lock (not GIL-based atomicity claims).
+- Exact idle / active / completed invariants:
+  - active: `cycle_running=True`, `started_at` set, `finished_at`/`status`/codes
+    cleared;
+  - completed SUCCESS/PARTIAL/FAILED/CANCELLED/INTERNAL_ERROR require timestamps
+    and matching operational code rules; CANCELLED does not bump the
+    unsuccessful counter; INTERNAL_ERROR clears operational codes and bumps it.
+- Timezone-aware UTC timestamps via injectable `now_fn`.
+- `now_fn` failure before publishing active status does not create a zombie
+  active cycle. Finish-time `now_fn` failure uses started_at as fallback,
+  publishes INTERNAL_ERROR (or CANCELLED when cancelling), and re-raises with
+  CancelledError taking priority over a finish-clock failure.
+- Wall-clock timestamps may move backwards. A finish timestamp earlier than the
+  cycle `started_at` is **clamped** to `started_at` so completed-status
+  invariants hold; clamping is not INTERNAL_ERROR and does not change waiter
+  interval scheduling (scheduling remains the interruptible waiter contract).
+- Logging is **best-effort and non-fatal** via a private `_log_safely` wrapper:
+  logger adapter failures cannot stick the guard, leave `cycle_running=True`,
+  skip purge after operational `AttachmentError`, mask `CancelledError`, alter
+  cycle results, or stop `run_forever`.
+- Structured stdlib logs with fixed event names and numeric counters only.
+- No `logger.exception`; no exception text/args/traceback in normal events;
+  no UUID/path/token/digest/SQL/credentials.
+- Concurrency unit tests use a deterministic observed lock/barrier (no
+  sleep/`timeout=0` scheduling primitives for proofs).
+
+### Config (Stage 1)
+
+- `AttachmentMaintenanceConfig`: required `interval_seconds`, `reconcile_limit`,
+  `purge_limit`; optional `initial_delay_seconds=0`.
+- Exact `int` validation; `bool` rejected; ranges 1..86400 / 0..86400 / 1..1000.
+- Invalid → `ValueError` with fixed messages.
+- No env parsing; no `enabled` flag; no `BOT_MODE` / `EMERGENCY_LOCK` coupling.
+
+### Multi-instance
+
+- Correctness across processes relies on existing row-level SKIP LOCKED contracts.
+- Parallel maintenance processes are correctness-safe but may waste IO.
+- Advisory lock is **not** required for correctness and is not added here.
+
+### Explicit Stage 1 exclusions
+
+- CLI / process entrypoint
+- Compose / Docker / deploy / cron / systemd
+- HTTP health endpoints
+- `app/config.py`, `app/main.py`, `app/worker.py` changes
+- Models / migrations / dependency updates
+- Channel adapters and client outbound
+
+### Stage 2 boundary (not implemented)
+
+- Separate process entrypoint (recommended: not a sixth `WorkerRuntime` loop)
+- Env config with fail-closed `ENABLED=false` default
+- Signal handler that only sets `stop_event`
+- Isolated PostgreSQL integration tests
+- Still no production deploy without explicit owner approval (Stage 3)
+
+## Consequences
+
+- Domain lifecycle rules remain unchanged; Stage 1 only adds an execution
+  mechanism that must be invoked by a future Stage 2 process.
+- ADR 013 “operators schedule externally” remains true until Stage 2/3 wiring.
+- Residual risk: graceful stop may wait on a long active reconcile/purge cycle.
+
+## Non-claims
+
+This ADR does **not** activate production maintenance, shared spool volume
+wiring, or automatic deploy.
