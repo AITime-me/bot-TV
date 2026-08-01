@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -425,3 +425,95 @@ async def select_delete_pending_for_finalize(
     )
     rows = (await session.scalars(stmt)).all()
     return [_to_row(row) for row in rows]
+
+
+async def select_expired_for_purge(
+    session: AsyncSession,
+    *,
+    limit: int,
+) -> list[AttachmentSpoolRow]:
+    """Lock expired STORED or dual-expired LEASED candidates for purge."""
+    stmt = (
+        select(AttachmentSpoolObject)
+        .where(
+            or_(
+                and_(
+                    AttachmentSpoolObject.state == "STORED",
+                    AttachmentSpoolObject.expires_at
+                    <= func.statement_timestamp(),
+                ),
+                and_(
+                    AttachmentSpoolObject.state == "LEASED",
+                    AttachmentSpoolObject.expires_at
+                    <= func.statement_timestamp(),
+                    AttachmentSpoolObject.lease_expires_at.is_not(None),
+                    AttachmentSpoolObject.lease_expires_at
+                    <= func.statement_timestamp(),
+                ),
+            )
+        )
+        .order_by(
+            AttachmentSpoolObject.expires_at,
+            AttachmentSpoolObject.id,
+        )
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.scalars(stmt)).all()
+    return [_to_row(row) for row in rows]
+
+
+async def transition_expired_stored_to_delete_pending(
+    session: AsyncSession,
+    *,
+    row_id: uuid.UUID,
+) -> AttachmentSpoolRow | None:
+    """Conditionally transition expired STORED → DELETE_PENDING."""
+    result = await session.execute(
+        update(AttachmentSpoolObject)
+        .where(
+            AttachmentSpoolObject.id == row_id,
+            AttachmentSpoolObject.state == "STORED",
+            AttachmentSpoolObject.expires_at <= func.statement_timestamp(),
+        )
+        .values(
+            state="DELETE_PENDING",
+            updated_at=func.statement_timestamp(),
+        )
+        .returning(AttachmentSpoolObject)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    return _to_row(row)
+
+
+async def transition_expired_leased_to_delete_pending(
+    session: AsyncSession,
+    *,
+    row_id: uuid.UUID,
+) -> AttachmentSpoolRow | None:
+    """Conditionally transition dual-expired LEASED → DELETE_PENDING; clear lease."""
+    result = await session.execute(
+        update(AttachmentSpoolObject)
+        .where(
+            AttachmentSpoolObject.id == row_id,
+            AttachmentSpoolObject.state == "LEASED",
+            AttachmentSpoolObject.expires_at <= func.statement_timestamp(),
+            AttachmentSpoolObject.lease_expires_at.is_not(None),
+            AttachmentSpoolObject.lease_expires_at
+            <= func.statement_timestamp(),
+        )
+        .values(
+            state="DELETE_PENDING",
+            updated_at=func.statement_timestamp(),
+            lease_token_digest=None,
+            leased_at=None,
+            lease_expires_at=None,
+        )
+        .returning(AttachmentSpoolObject)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    return _to_row(row)

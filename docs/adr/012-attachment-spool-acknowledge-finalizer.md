@@ -137,11 +137,13 @@ for operator investigation. This is accepted residual risk.
 
 ### Explicit exclusions
 
-- Stage 1A2B3 purge of expired `STORED` / `LEASED`
 - Clearing lease fields on acknowledgement
-- `ack` alias, public purge API
+- `ack` alias
 - Worker, adapters, HTTP API, compose, deploy changes
 - Schema migration (none required)
+
+Stage 1A2B3 delivers expiry purge that creates `DELETE_PENDING` rows with a
+NULL lease tuple and reuses this shared finalizer (see ADR 013).
 
 ## Consequences
 
