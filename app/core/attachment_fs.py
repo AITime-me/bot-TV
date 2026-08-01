@@ -424,6 +424,77 @@ def verify_ciphertext_file(
         raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
 
 
+def read_ciphertext_verified(
+    root: Path,
+    object_id: uuid.UUID,
+    *,
+    expected_size: int,
+    expected_sha256: bytes,
+) -> bytes:
+    """Read final ciphertext after size/hash verification. UUID-derived path only."""
+    object_id = _require_object_uuid(object_id)
+    if type(expected_size) is not int or isinstance(expected_size, bool) or expected_size < 0:
+        raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+    if type(expected_sha256) is not bytes or len(expected_sha256) != SHA256_DIGEST_BYTES:
+        raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+
+    status = inspect_ciphertext_file(
+        root,
+        object_id,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+        final=True,
+    )
+    if status is not CiphertextInspectStatus.VALID:
+        raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+
+    try:
+        root = _require_absolute_path(root)
+        path = _ensure_under_root(root, root / final_relpath(object_id))
+    except AttachmentError:
+        raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+
+    fd: int | None = None
+    try:
+        if path.is_symlink():
+            raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+        fd = os.open(path, _READ_FLAGS)
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode):
+            raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+        if fst.st_size != expected_size:
+            raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+        chunks: list[bytes] = []
+        remaining = expected_size
+        digest = hashlib.sha256()
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if sum(len(c) for c in chunks) != expected_size:
+            raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+        if digest.digest() != expected_sha256:
+            raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+        return b"".join(chunks)
+    except AttachmentError:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        if _is_confirmed_missing(exc):
+            raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+        raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+
 def safe_unlink_object_file(
     root: Path,
     object_id: uuid.UUID,

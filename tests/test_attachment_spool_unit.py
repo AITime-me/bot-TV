@@ -223,6 +223,7 @@ def test_no_public_recover_or_decrypt_api() -> None:
     assert "acquire" in names
     assert "release" in names
     assert "reclaim_expired_leases" in names
+    assert "read" in names
     assert "recover" not in names
     assert "decrypt" not in names
     assert "open_once" not in names

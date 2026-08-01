@@ -422,3 +422,71 @@ def test_existing_final_and_error_hides_path(tmp_path: Path) -> None:
     assert str(root) not in repr(raised.value)
     assert str(root) not in str(raised.value)
 
+
+def test_read_ciphertext_verified_returns_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "spool"
+    root.mkdir()
+    object_id = uuid.uuid4()
+    ciphertext = os.urandom(48)
+    digest = hashlib.sha256(ciphertext).digest()
+    attachment_fs.write_ciphertext_atomic(
+        root, object_id, ciphertext, expected_sha256=digest
+    )
+    out = attachment_fs.read_ciphertext_verified(
+        root, object_id, expected_size=len(ciphertext), expected_sha256=digest
+    )
+    assert out == ciphertext
+
+
+def test_read_ciphertext_verified_rejects_tmp_only(tmp_path: Path) -> None:
+    root = tmp_path / "spool"
+    root.mkdir()
+    object_id = uuid.uuid4()
+    ciphertext = os.urandom(32)
+    digest = hashlib.sha256(ciphertext).digest()
+    shard = root / object_id.hex[:2]
+    shard.mkdir(parents=True)
+    temp = root / attachment_fs.temp_relpath(object_id)
+    temp.write_bytes(ciphertext)
+    with pytest.raises(AttachmentError) as raised:
+        attachment_fs.read_ciphertext_verified(
+            root, object_id, expected_size=len(ciphertext), expected_sha256=digest
+        )
+    assert raised.value.code == "ATTACHMENT_FILESYSTEM_FAILED"
+    assert str(root) not in repr(raised.value)
+
+
+def test_read_ciphertext_verified_missing_final(tmp_path: Path) -> None:
+    root = tmp_path / "spool"
+    root.mkdir()
+    object_id = uuid.uuid4()
+    with pytest.raises(AttachmentError) as raised:
+        attachment_fs.read_ciphertext_verified(
+            root,
+            object_id,
+            expected_size=32,
+            expected_sha256=hashlib.sha256(b"x").digest(),
+        )
+    assert raised.value.code == "ATTACHMENT_FILESYSTEM_FAILED"
+
+
+def test_read_ciphertext_verified_corrupted_hash(tmp_path: Path) -> None:
+    root = tmp_path / "spool"
+    root.mkdir()
+    object_id = uuid.uuid4()
+    ciphertext = os.urandom(32)
+    attachment_fs.write_ciphertext_atomic(
+        root,
+        object_id,
+        ciphertext,
+        expected_sha256=hashlib.sha256(ciphertext).digest(),
+    )
+    with pytest.raises(AttachmentError) as raised:
+        attachment_fs.read_ciphertext_verified(
+            root,
+            object_id,
+            expected_size=len(ciphertext),
+            expected_sha256=hashlib.sha256(b"wrong").digest(),
+        )
+    assert raised.value.code == "ATTACHMENT_FILESYSTEM_FAILED"
+
