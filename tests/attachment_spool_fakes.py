@@ -17,7 +17,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 class TxnTracker:
     events: list[str] = field(default_factory=list)
     fail_commit: bool = False
-    session: Any = field(default_factory=lambda: object())
+    session: Any = field(default=None)
+
+    def __post_init__(self) -> None:
+        if self.session is None:
+            self.session = _NestedCapableSession()
+
+
+class _NestedTxn:
+    async def __aenter__(self) -> "_NestedTxn":
+        return self
+
+    async def __aexit__(self, *_a: Any) -> bool:
+        return False
+
+
+class _NestedCapableSession:
+    def begin_nested(self) -> _NestedTxn:
+        return _NestedTxn()
+
+    async def flush(self) -> None:
+        return None
 
 
 def make_observing_session_scope(

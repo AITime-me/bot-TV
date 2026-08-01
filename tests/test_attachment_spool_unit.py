@@ -156,6 +156,8 @@ def test_policy_and_enums(tmp_path: Path) -> None:
     assert AttachmentMime.IMAGE_PNG.value == "image/png"
     assert AttachmentState.WRITING.value == "WRITING"
     assert AttachmentState.STORED.value == "STORED"
+    assert AttachmentState.LEASED.value == "LEASED"
+    assert AttachmentState.DELETE_PENDING.value == "DELETE_PENDING"
 
 
 def test_handle_and_reconcile_result_redacted() -> None:
@@ -205,7 +207,7 @@ def test_static_import_boundaries() -> None:
     assert "acquire_delivery" not in store
     assert "read_for_delivery" not in store
     assert "acknowledge_delivered" not in store
-    assert "DELETE_PENDING" not in store
+    assert "mark_delete_pending" not in store
     assert "content_sha256" not in store
     assert "content_sha256" not in repo
     assert "content_sha256" not in model
@@ -218,11 +220,15 @@ def test_no_public_recover_or_decrypt_api() -> None:
     names = set(dir(AttachmentSpoolStore))
     assert "store" in names
     assert "reconcile" in names
+    assert "acquire" in names
+    assert "release" in names
+    assert "reclaim_expired_leases" in names
     assert "recover" not in names
     assert "decrypt" not in names
     assert "open_once" not in names
     assert "read_for_delivery" not in names
     assert "acquire_delivery" not in names
+    assert "acknowledge_delivered" not in names
 
 
 def test_collision_retry_constant() -> None:
@@ -1674,3 +1680,48 @@ async def test_reject_non_bytes_and_mime_denied(tmp_path: Path) -> None:
             purpose=AttachmentPurpose.INBOUND_ATTACHMENT_RELAY,
         )
     assert raised2.value.code == "ATTACHMENT_MIME_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ignores_leased_and_delete_pending_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stored_calls: list[str] = []
+
+    async def _no_writing(*_a: Any, **_k: Any) -> list[Any]:
+        return []
+
+    async def _stored(*_a: Any, **_k: Any) -> list[Any]:
+        stored_calls.append("called")
+        return []
+
+    monkeypatch.setattr(
+        "app.services.attachment_spool_store.spool_repo.select_stale_writing_for_reconcile",
+        _no_writing,
+    )
+    monkeypatch.setattr(
+        "app.services.attachment_spool_store.spool_repo.select_stored_missing_file_candidates",
+        _stored,
+    )
+    monkeypatch.setattr(
+        "app.services.attachment_spool_store.attachment_fs.iter_shard_dirs",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        "app.services.attachment_spool_store.session_scope",
+        make_observing_session_scope(TxnTracker()),
+    )
+    root = tmp_path / "spool"
+    root.mkdir()
+    result = await _store(root=root).reconcile(limit=10)
+    assert stored_calls == ["called"]
+    assert result.promoted_to_stored == 0
+    assert result.deleted_unrecoverable_stored == 0
+    repo_source = (
+        _REPO_ROOT / "app/repositories/attachment_spool.py"
+    ).read_text(encoding="utf-8")
+    assert 'select_stored_missing_file_candidates' in repo_source
+    stored_fn = repo_source.split("async def select_stored_missing_file_candidates", 1)[1]
+    assert 'state == "STORED"' in stored_fn.split("async def ", 1)[0]
+    writing_fn = repo_source.split("async def select_stale_writing_for_reconcile", 1)[1]
+    assert 'state == "WRITING"' in writing_fn.split("async def ", 1)[0]

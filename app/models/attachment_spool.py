@@ -13,6 +13,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -29,6 +30,13 @@ _ALLOWED_MIMES = ("image/jpeg", "image/png")
 _MIME_SQL = ", ".join(f"'{value}'" for value in _ALLOWED_MIMES)
 _MAX_PLAINTEXT = 5 * 1024 * 1024
 _GCM_TAG = 16
+_STATE_LEASE_CHECK = (
+    "(state = 'WRITING' AND lease_token_digest IS NULL) OR "
+    "(state = 'STORED' AND lease_token_digest IS NULL) OR "
+    "(state = 'LEASED' AND lease_token_digest IS NOT NULL "
+    "AND lease_expires_at > leased_at) OR "
+    "(state = 'DELETE_PENDING')"
+)
 
 
 class AttachmentSpoolObject(Base):
@@ -73,7 +81,7 @@ class AttachmentSpoolObject(Base):
             name="ck_attachment_spool_objects_detected_mime",
         ),
         CheckConstraint(
-            "state IN ('WRITING', 'STORED')",
+            "state IN ('WRITING', 'STORED', 'LEASED', 'DELETE_PENDING')",
             name="ck_attachment_spool_objects_state",
         ),
         CheckConstraint(
@@ -92,11 +100,42 @@ class AttachmentSpoolObject(Base):
             "expires_at > created_at",
             name="ck_attachment_spool_objects_expires_after_created",
         ),
+        CheckConstraint(
+            "lease_token_digest IS NULL OR octet_length(lease_token_digest) = 32",
+            name="ck_attachment_spool_objects_lease_digest_len",
+        ),
+        CheckConstraint(
+            "(lease_token_digest IS NULL AND leased_at IS NULL "
+            "AND lease_expires_at IS NULL) OR "
+            "(lease_token_digest IS NOT NULL AND leased_at IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL)",
+            name="ck_attachment_spool_objects_lease_fields_all_or_none",
+        ),
+        CheckConstraint(
+            _STATE_LEASE_CHECK,
+            name="ck_attachment_spool_objects_state_lease",
+        ),
         Index("ix_attachment_spool_objects_expires_at", "expires_at"),
         Index(
             "ix_attachment_spool_objects_state_updated_at",
             "state",
             "updated_at",
+        ),
+        Index(
+            "uq_attachment_spool_objects_lease_token_digest",
+            "lease_token_digest",
+            unique=True,
+            postgresql_where=text("lease_token_digest IS NOT NULL"),
+        ),
+        Index(
+            "ix_attachment_spool_objects_leased_expires_at",
+            "lease_expires_at",
+            postgresql_where=text("state = 'LEASED'"),
+        ),
+        Index(
+            "ix_attachment_spool_objects_object_expiry_purge",
+            "expires_at",
+            postgresql_where=text("state IN ('STORED', 'LEASED')"),
         ),
     )
 
@@ -133,6 +172,15 @@ class AttachmentSpoolObject(Base):
         DateTime(timezone=True),
         nullable=False,
     )
+    lease_token_digest: Mapped[bytes | None] = mapped_column(BYTEA, nullable=True)
+    leased_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     def __repr__(self) -> str:
         return (
@@ -147,5 +195,6 @@ class AttachmentSpoolObject(Base):
             "reference_digest=<redacted>, "
             "ciphertext_sha256=<redacted>, "
             "nonce=<redacted>, "
-            "key_id=<redacted>)"
+            "key_id=<redacted>, "
+            "lease_token_digest=<redacted>)"
         )

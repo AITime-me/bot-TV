@@ -45,6 +45,7 @@ Thumbs.db
 !alembic/versions/20260729_13_handoff_quarantine.py
 !alembic/versions/20260731_14_ephemeral_pii_values.py
 !alembic/versions/20260801_15_attachment_spool.py
+!alembic/versions/20260801_16_spool_leases.py
 !app/
 !app/__init__.py
 !app/channels/

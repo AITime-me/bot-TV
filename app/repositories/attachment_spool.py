@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -37,6 +38,10 @@ class AttachmentSpoolRow:
     crypto_version: int
     state: str
     reference_digest: bytes
+    expires_at: datetime | None = None
+    lease_token_digest: bytes | None = None
+    leased_at: datetime | None = None
+    lease_expires_at: datetime | None = None
 
     def __repr__(self) -> str:
         return (
@@ -53,7 +58,8 @@ class AttachmentSpoolRow:
             "reference_digest=<redacted>, "
             "ciphertext_sha256=<redacted>, "
             "nonce=<redacted>, "
-            "key_id=<redacted>)"
+            "key_id=<redacted>, "
+            "lease_token_digest=<redacted>)"
         )
 
     def __str__(self) -> str:
@@ -79,7 +85,19 @@ def _to_row(row: AttachmentSpoolObject) -> AttachmentSpoolRow:
         crypto_version=int(row.crypto_version),
         state=row.state,
         reference_digest=row.reference_digest,
+        expires_at=row.expires_at,
+        lease_token_digest=row.lease_token_digest,
+        leased_at=row.leased_at,
+        lease_expires_at=row.lease_expires_at,
     )
+
+
+async def fetch_statement_timestamp(session: AsyncSession) -> datetime:
+    """Fresh PostgreSQL statement_timestamp() for eligibility decisions."""
+    value = await session.scalar(select(func.statement_timestamp()))
+    if type(value) is not datetime:
+        raise RuntimeError("statement_timestamp unavailable")
+    return value
 
 
 async def insert_writing(
@@ -257,3 +275,109 @@ async def select_stored_missing_file_candidates(
     )
     rows = (await session.scalars(stmt)).all()
     return [_to_row(row) for row in rows]
+
+
+async def select_for_update_by_reference_digest(
+    session: AsyncSession,
+    *,
+    reference_digest: bytes,
+) -> AttachmentSpoolRow | None:
+    stmt = (
+        select(AttachmentSpoolObject)
+        .where(AttachmentSpoolObject.reference_digest == reference_digest)
+        .with_for_update()
+    )
+    row = await session.scalar(stmt)
+    if row is None:
+        return None
+    return _to_row(row)
+
+
+async def select_for_update_by_lease_digest(
+    session: AsyncSession,
+    *,
+    lease_token_digest: bytes,
+) -> AttachmentSpoolRow | None:
+    stmt = (
+        select(AttachmentSpoolObject)
+        .where(AttachmentSpoolObject.lease_token_digest == lease_token_digest)
+        .with_for_update()
+    )
+    row = await session.scalar(stmt)
+    if row is None:
+        return None
+    return _to_row(row)
+
+
+async def select_expired_leased_for_reclaim(
+    session: AsyncSession,
+    *,
+    limit: int,
+) -> list[AttachmentSpoolRow]:
+    stmt = (
+        select(AttachmentSpoolObject)
+        .where(
+            AttachmentSpoolObject.state == "LEASED",
+            AttachmentSpoolObject.lease_expires_at <= func.statement_timestamp(),
+        )
+        .order_by(
+            AttachmentSpoolObject.lease_expires_at,
+            AttachmentSpoolObject.id,
+        )
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.scalars(stmt)).all()
+    return [_to_row(row) for row in rows]
+
+
+async def clear_lease_to_stored(
+    session: AsyncSession,
+    *,
+    row_id: uuid.UUID,
+) -> bool:
+    result = await session.execute(
+        update(AttachmentSpoolObject)
+        .where(
+            AttachmentSpoolObject.id == row_id,
+            AttachmentSpoolObject.state == "LEASED",
+        )
+        .values(
+            state="STORED",
+            lease_token_digest=None,
+            leased_at=None,
+            lease_expires_at=None,
+            updated_at=func.statement_timestamp(),
+        )
+        .returning(AttachmentSpoolObject.id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def apply_lease(
+    session: AsyncSession,
+    *,
+    row_id: uuid.UUID,
+    lease_token_digest: bytes,
+    lease_ttl_seconds: int,
+) -> AttachmentSpoolRow | None:
+    result = await session.execute(
+        update(AttachmentSpoolObject)
+        .where(
+            AttachmentSpoolObject.id == row_id,
+            AttachmentSpoolObject.state == "STORED",
+        )
+        .values(
+            state="LEASED",
+            lease_token_digest=lease_token_digest,
+            leased_at=func.statement_timestamp(),
+            lease_expires_at=func.statement_timestamp()
+            + func.make_interval(0, 0, 0, 0, 0, 0, lease_ttl_seconds),
+            updated_at=func.statement_timestamp(),
+        )
+        .returning(AttachmentSpoolObject)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    return _to_row(row)
