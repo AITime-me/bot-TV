@@ -83,6 +83,9 @@ All public errors use `from None`; no path/UUID/digest/SQL leakage.
 
 ## Consequences
 
-- Existing `reconcile` continues to target only `WRITING` and `STORED`.
+- For Stage 1A2B1, `reconcile` targeted only `WRITING` and `STORED`.
 - `release` and `reclaim_expired_leases` remain unchanged.
 - No schema migration required for 1A2B1.
+
+See also [ADR 012](012-attachment-spool-acknowledge-finalizer.md) for Stage 1A2B2
+acknowledge and `DELETE_PENDING` reconciliation.

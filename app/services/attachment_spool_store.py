@@ -1,8 +1,9 @@
-"""Encrypted attachment spool store Stage 1A1/1A2A/1A2B1.
+"""Encrypted attachment spool store Stage 1A1/1A2A/1A2B1/1A2B2.
 
 DB-authoritative WRITING → STORED lifecycle, lease acquire/release/reclaim,
-and secure lease-gated read/decrypt with second revalidation.
-No delivery ack/purge API.
+secure lease-gated read/decrypt with second revalidation, and lease-gated
+acknowledgement with DELETE_PENDING finalization.
+No delivery purge API.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -396,6 +397,45 @@ class AttachmentSpoolStore:
             raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
         return AttachmentPlaintext(data=plaintext, mime=snapshot.mime)
 
+    async def acknowledge(self, lease_token: AttachmentLeaseToken) -> None:
+        if type(lease_token) is not AttachmentLeaseToken:
+            raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        lease_digest = lease_token.digest()
+        snapshot: _DeletePendingFinalizeSnapshot | None = None
+        try:
+            async with session_scope(self._session_factory) as session:
+                row = await spool_repo.select_for_update_by_lease_digest(
+                    session,
+                    lease_token_digest=lease_digest,
+                )
+                if row is None:
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                if row.state == "DELETE_PENDING":
+                    if row.lease_token_digest != lease_digest:
+                        raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                    snapshot = _DeletePendingFinalizeSnapshot.from_row(row)
+                elif row.state == "LEASED":
+                    updated = await spool_repo.transition_leased_to_delete_pending(
+                        session,
+                        row_id=row.id,
+                        lease_token_digest=lease_digest,
+                    )
+                    if updated is None:
+                        raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                    snapshot = _DeletePendingFinalizeSnapshot.from_row(updated)
+                else:
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        except AttachmentError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+        if snapshot is None:
+            raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        outcome = await self._finalize_delete_pending(snapshot)
+        _raise_ack_finalize_outcome(outcome)
+
     async def release(self, token: AttachmentLeaseToken) -> None:
         if type(token) is not AttachmentLeaseToken:
             raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
@@ -467,6 +507,7 @@ class AttachmentSpoolStore:
         deleted_orphan_temps = 0
         deleted_orphan_finals = 0
         deleted_unrecoverable = 0
+        deleted_delete_pending = 0
         unsafe_skipped = 0
         io_unavailable_skipped = 0
         try:
@@ -506,6 +547,12 @@ class AttachmentSpoolStore:
             deleted_unrecoverable += stored_deleted
             unsafe_skipped += stored_unsafe
             io_unavailable_skipped += stored_io
+            dp_deleted, dp_unsafe, dp_io = await self._reconcile_delete_pending(
+                limit=limit
+            )
+            deleted_delete_pending += dp_deleted
+            unsafe_skipped += dp_unsafe
+            io_unavailable_skipped += dp_io
         except AttachmentError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -519,6 +566,7 @@ class AttachmentSpoolStore:
             deleted_orphan_temps=deleted_orphan_temps,
             deleted_orphan_finals=deleted_orphan_finals,
             deleted_unrecoverable_stored=deleted_unrecoverable,
+            deleted_delete_pending=deleted_delete_pending,
             unsafe_skipped=unsafe_skipped,
             io_unavailable_skipped=io_unavailable_skipped,
         )
@@ -753,6 +801,56 @@ class AttachmentSpoolStore:
                     io_skipped += 1
         return deleted, unsafe, io_skipped
 
+    async def _finalize_delete_pending(
+        self, snapshot: _DeletePendingFinalizeSnapshot
+    ) -> _FinalizeOutcome:
+        unlink_status = attachment_fs.unlink_final(
+            self._policy.spool_root,
+            snapshot.object_id,
+        )
+        if unlink_status is CiphertextUnlinkStatus.UNSAFE:
+            return "fs_unsafe"
+        if unlink_status is CiphertextUnlinkStatus.IO_UNAVAILABLE:
+            return "fs_io"
+        if not attachment_fs.unlink_succeeded(unlink_status):
+            return "fs_io"
+        try:
+            async with session_scope(self._session_factory) as session:
+                row = await spool_repo.select_for_update_by_id(
+                    session, row_id=snapshot.row_id
+                )
+                if row is None:
+                    return "already_gone"
+                if not snapshot.matches_locked_row(row):
+                    return "conflict"
+                await spool_repo.delete_by_id(session, row_id=snapshot.row_id)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            return "store_failed"
+        return "deleted"
+
+    async def _reconcile_delete_pending(self, *, limit: int) -> tuple[int, int, int]:
+        snapshots: list[_DeletePendingFinalizeSnapshot] = []
+        async with session_scope(self._session_factory) as session:
+            rows = await spool_repo.select_delete_pending_for_finalize(
+                session, limit=limit
+            )
+            for row in rows:
+                snapshots.append(_DeletePendingFinalizeSnapshot.from_row(row))
+        deleted = 0
+        unsafe = 0
+        io_skipped = 0
+        for snapshot in snapshots:
+            outcome = await self._finalize_delete_pending(snapshot)
+            if outcome == "deleted":
+                deleted += 1
+            elif outcome == "fs_unsafe":
+                unsafe += 1
+            elif outcome == "fs_io":
+                io_skipped += 1
+        return deleted, unsafe, io_skipped
+
 
 def _require_plaintext_bytes(value: object) -> bytes:
     if type(value) is not bytes:
@@ -948,6 +1046,156 @@ class _ReadCryptoSnapshot:
 
     def __format__(self, format_spec: str) -> str:
         return self.__repr__()
+
+
+_FinalizeOutcome = Literal[
+    "deleted",
+    "already_gone",
+    "conflict",
+    "store_failed",
+    "fs_unsafe",
+    "fs_io",
+]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _DeletePendingFinalizeSnapshot:
+    row_id: UUID
+    object_id: UUID
+    conversation_id: UUID
+    kind: AttachmentKind
+    purpose: AttachmentPurpose
+    mime: AttachmentMime
+    reference_digest: bytes
+    plaintext_size: int
+    ciphertext_size: int
+    ciphertext_sha256: bytes
+    nonce: bytes
+    key_id: str
+    crypto_version: int
+    object_expires_at: datetime
+    lease_token_digest: bytes | None
+    leased_at: datetime | None
+    lease_expires_at: datetime | None
+
+    @classmethod
+    def from_row(cls, row: spool_repo.AttachmentSpoolRow) -> _DeletePendingFinalizeSnapshot:
+        if row.state != "DELETE_PENDING":
+            raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+        if row.expires_at is None:
+            raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+        kind = _row_kind_for_snapshot(row.kind)
+        purpose = _row_purpose_for_snapshot(row.purpose)
+        mime = _row_mime_for_snapshot(row.detected_mime)
+        return cls(
+            row_id=row.id,
+            object_id=row.object_id,
+            conversation_id=row.conversation_id,
+            kind=kind,
+            purpose=purpose,
+            mime=mime,
+            reference_digest=row.reference_digest,
+            plaintext_size=row.plaintext_size,
+            ciphertext_size=row.ciphertext_size,
+            ciphertext_sha256=row.ciphertext_sha256,
+            nonce=row.nonce,
+            key_id=row.key_id,
+            crypto_version=row.crypto_version,
+            object_expires_at=row.expires_at,
+            lease_token_digest=row.lease_token_digest,
+            leased_at=row.leased_at,
+            lease_expires_at=row.lease_expires_at,
+        )
+
+    def matches_locked_row(self, row: spool_repo.AttachmentSpoolRow) -> bool:
+        if row.state != "DELETE_PENDING":
+            return False
+        if row.id != self.row_id:
+            return False
+        if row.object_id != self.object_id:
+            return False
+        if row.conversation_id != self.conversation_id:
+            return False
+        if row.kind != self.kind.value:
+            return False
+        if row.purpose != self.purpose.value:
+            return False
+        if row.detected_mime != self.mime.value:
+            return False
+        if row.reference_digest != self.reference_digest:
+            return False
+        if row.plaintext_size != self.plaintext_size:
+            return False
+        if row.ciphertext_size != self.ciphertext_size:
+            return False
+        if row.ciphertext_sha256 != self.ciphertext_sha256:
+            return False
+        if row.nonce != self.nonce:
+            return False
+        if row.key_id != self.key_id:
+            return False
+        if row.crypto_version != self.crypto_version:
+            return False
+        if row.expires_at != self.object_expires_at:
+            return False
+        if row.lease_token_digest != self.lease_token_digest:
+            return False
+        if row.leased_at != self.leased_at:
+            return False
+        if row.lease_expires_at != self.lease_expires_at:
+            return False
+        return True
+
+    def __repr__(self) -> str:
+        return "_DeletePendingFinalizeSnapshot(<redacted>)"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+
+def _raise_ack_finalize_outcome(outcome: _FinalizeOutcome) -> None:
+    if outcome in ("deleted", "already_gone"):
+        return
+    if outcome == "conflict":
+        raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+    if outcome in ("fs_unsafe", "fs_io"):
+        raise AttachmentError("ATTACHMENT_FILESYSTEM_FAILED") from None
+    raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+
+
+def _row_kind_for_snapshot(value: str) -> AttachmentKind:
+    if type(value) is not str:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    try:
+        kind = AttachmentKind(value)
+    except ValueError:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    return _require_kind(kind)
+
+
+def _row_purpose_for_snapshot(value: str) -> AttachmentPurpose:
+    if type(value) is not str:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    try:
+        purpose = AttachmentPurpose(value)
+    except ValueError:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    return _require_purpose(purpose)
+
+
+def _row_mime_for_snapshot(value: str) -> AttachmentMime:
+    if type(value) is not str:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    try:
+        mime = AttachmentMime(value)
+    except ValueError:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    if type(mime) is not AttachmentMime:
+        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+    return mime
 
 
 def _row_kind(value: str) -> AttachmentKind:
