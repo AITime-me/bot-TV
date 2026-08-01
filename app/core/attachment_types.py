@@ -1,4 +1,4 @@
-"""Closed types for temporary encrypted attachment spool (Stage 1A1).
+"""Closed types for temporary encrypted attachment spool (Stage 1A1/1A2A).
 
 No channel adapters, delivery leases, AI recovery, or worker wiring.
 """
@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
@@ -20,6 +21,7 @@ _ALLOWED_ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
         "ATTACHMENT_POLICY_INVALID",
         "ATTACHMENT_REFERENCE_INVALID",
+        "ATTACHMENT_LEASE_TOKEN_INVALID",
         "ATTACHMENT_VALUE_INVALID",
         "ATTACHMENT_TOO_LARGE",
         "ATTACHMENT_MIME_DENIED",
@@ -46,8 +48,14 @@ MAX_TTL_SECONDS: Final[int] = 86400
 WRITING_GRACE_SECONDS: Final[int] = 600
 MAX_RECONCILE_BATCH: Final[int] = 1000
 MAX_REFERENCE_COLLISION_RETRIES: Final[int] = 3
+LEASE_TOKEN_RAW_BYTES: Final[int] = 32
+LEASE_TOKEN_LENGTH: Final[int] = 44
+LEASE_TTL_SECONDS: Final[int] = 300
+MAX_LEASE_TOKEN_COLLISION_RETRIES: Final[int] = 3
+MAX_LEASE_RECLAIM_BATCH: Final[int] = 1000
 
 _REFERENCE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}=$")
+_LEASE_TOKEN_RE = _REFERENCE_TOKEN_RE
 
 
 class AttachmentError(RuntimeError):
@@ -81,6 +89,8 @@ class AttachmentMime(StrEnum):
 class AttachmentState(StrEnum):
     WRITING = "WRITING"
     STORED = "STORED"
+    LEASED = "LEASED"
+    DELETE_PENDING = "DELETE_PENDING"
 
 
 class CiphertextInspectStatus(StrEnum):
@@ -341,6 +351,130 @@ class AttachmentReference:
 
     def __hash__(self) -> int:
         return hash(self._raw)
+
+
+def _canonical_lease_token(raw: bytes) -> str:
+    if type(raw) is not bytes or len(raw) != LEASE_TOKEN_RAW_BYTES:
+        raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_lease_token(token: str) -> bytes:
+    if _LEASE_TOKEN_RE.fullmatch(token) is None:
+        raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+    try:
+        decoded = base64.urlsafe_b64decode(token)
+    except Exception:
+        raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+    if type(decoded) is not bytes or len(decoded) != LEASE_TOKEN_RAW_BYTES:
+        raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+    if _canonical_lease_token(decoded) != token:
+        raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+    return decoded
+
+
+class AttachmentLeaseToken:
+    """Opaque 256-bit lease credential. Raw bytes never appear in repr or PostgreSQL."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: bytes) -> None:
+        if type(raw) is not bytes or len(raw) != LEASE_TOKEN_RAW_BYTES:
+            raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+        object.__setattr__(self, "_raw", raw)
+
+    @classmethod
+    def generate(cls) -> AttachmentLeaseToken:
+        try:
+            raw = secrets.token_bytes(LEASE_TOKEN_RAW_BYTES)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+        return cls(raw)
+
+    @classmethod
+    def parse(cls, value: object) -> AttachmentLeaseToken:
+        if type(value) is not str:
+            raise AttachmentError("ATTACHMENT_LEASE_TOKEN_INVALID") from None
+        return cls(_decode_lease_token(value))
+
+    def to_token(self) -> str:
+        return _canonical_lease_token(self._raw)
+
+    def digest(self) -> bytes:
+        return hashlib.sha256(self._raw).digest()
+
+    def __repr__(self) -> str:
+        return "AttachmentLeaseToken(<redacted>)"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is AttachmentLeaseToken and self._raw == other._raw
+
+    def __hash__(self) -> int:
+        return hash(self._raw)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AttachmentLeaseHandle:
+    """Lease grant returned by acquire. Contains only token and lease expiry."""
+
+    token: AttachmentLeaseToken
+    lease_expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.token) is not AttachmentLeaseToken:
+            raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        if type(self.lease_expires_at) is not datetime:
+            raise AttachmentError("ATTACHMENT_CONFIG_INVALID") from None
+        if self.lease_expires_at.tzinfo is None:
+            raise AttachmentError("ATTACHMENT_CONFIG_INVALID") from None
+
+    def __repr__(self) -> str:
+        return (
+            "AttachmentLeaseHandle("
+            "token=<redacted>, "
+            "lease_expires_at=<redacted>)"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AttachmentLeaseReclaimResult:
+    """Count-only expired-lease reclaim outcome."""
+
+    reclaimed: int
+    skipped: int
+
+    def __post_init__(self) -> None:
+        for name in ("reclaimed", "skipped"):
+            value = getattr(self, name)
+            if type(value) is not int or isinstance(value, bool) or value < 0:
+                raise AttachmentError("ATTACHMENT_RECONCILE_FAILED") from None
+
+    def __repr__(self) -> str:
+        return (
+            "AttachmentLeaseReclaimResult("
+            f"reclaimed={self.reclaimed}, "
+            f"skipped={self.skipped})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
 
 
 @dataclass(frozen=True, slots=True, repr=False)

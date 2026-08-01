@@ -411,6 +411,9 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_ephemeral_pii_values_expires_at": ("expires_at",),
     "ix_attachment_spool_objects_expires_at": ("expires_at",),
     "ix_attachment_spool_objects_state_updated_at": ("state", "updated_at"),
+    "ix_attachment_spool_objects_leased_expires_at": ("lease_expires_at",),
+    "ix_attachment_spool_objects_object_expiry_purge": ("expires_at",),
+    "uq_attachment_spool_objects_lease_token_digest": ("lease_token_digest",),
 }
 
 

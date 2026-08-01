@@ -1,6 +1,7 @@
-"""Encrypted attachment spool store Stage 1A1.
+"""Encrypted attachment spool store Stage 1A1/1A2A.
 
-DB-authoritative WRITING → STORED lifecycle. No delivery lease/read/ack API.
+DB-authoritative WRITING → STORED lifecycle and lease acquire/release/reclaim.
+No delivery read/ack API.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Final
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import attachment_fs as attachment_fs
@@ -19,12 +21,18 @@ from app.core.attachment_keys import AttachmentKeyProvider
 from app.core.attachment_mime import detect_attachment_mime
 from app.core.attachment_types import (
     CRYPTO_VERSION_V1,
+    LEASE_TTL_SECONDS,
+    MAX_LEASE_RECLAIM_BATCH,
+    MAX_LEASE_TOKEN_COLLISION_RETRIES,
     MAX_RECONCILE_BATCH,
     MAX_REFERENCE_COLLISION_RETRIES,
     AttachmentAad,
     AttachmentError,
     AttachmentHandle,
     AttachmentKind,
+    AttachmentLeaseHandle,
+    AttachmentLeaseReclaimResult,
+    AttachmentLeaseToken,
     AttachmentPurpose,
     AttachmentReconcileResult,
     AttachmentReference,
@@ -211,6 +219,149 @@ class AttachmentSpoolStore:
             )
 
         raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+
+    async def acquire(self, reference: AttachmentReference) -> AttachmentLeaseHandle:
+        if type(reference) is not AttachmentReference:
+            raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        reference_digest = reference.digest()
+        pending_handle: AttachmentLeaseHandle | None = None
+        try:
+            async with session_scope(self._session_factory) as session:
+                row = await spool_repo.select_for_update_by_reference_digest(
+                    session,
+                    reference_digest=reference_digest,
+                )
+                if row is None:
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                now = await spool_repo.fetch_statement_timestamp(session)
+                decision = _acquire_decision(row, now)
+                if decision == "deny":
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                if decision == "reclaim":
+                    cleared = await spool_repo.clear_lease_to_stored(
+                        session, row_id=row.id
+                    )
+                    if not cleared:
+                        raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                    row = await spool_repo.select_for_update_by_id(
+                        session, row_id=row.id
+                    )
+                    if row is None or row.state != "STORED":
+                        raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                    now = await spool_repo.fetch_statement_timestamp(session)
+                    if not _stored_object_active(row, now):
+                        raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+
+                lease_row: spool_repo.AttachmentSpoolRow | None = None
+                token: AttachmentLeaseToken | None = None
+                for _ in range(MAX_LEASE_TOKEN_COLLISION_RETRIES):
+                    token = AttachmentLeaseToken.generate()
+                    lease_digest = token.digest()
+                    try:
+                        async with session.begin_nested():
+                            lease_row = await spool_repo.apply_lease(
+                                session,
+                                row_id=row.id,
+                                lease_token_digest=lease_digest,
+                                lease_ttl_seconds=LEASE_TTL_SECONDS,
+                            )
+                            if lease_row is None:
+                                raise AttachmentError(
+                                    "ATTACHMENT_ACCESS_DENIED"
+                                ) from None
+                            await session.flush()
+                    except IntegrityError as exc:
+                        if _is_lease_digest_unique_collision(exc):
+                            lease_row = None
+                            continue
+                        raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+                    break
+                else:
+                    raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+
+                if (
+                    lease_row is None
+                    or token is None
+                    or lease_row.lease_expires_at is None
+                ):
+                    raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+                pending_handle = AttachmentLeaseHandle(
+                    token=token,
+                    lease_expires_at=lease_row.lease_expires_at,
+                )
+        except AttachmentError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+        if pending_handle is None:
+            raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+        return pending_handle
+
+    async def release(self, token: AttachmentLeaseToken) -> None:
+        if type(token) is not AttachmentLeaseToken:
+            raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        lease_digest = token.digest()
+        try:
+            async with session_scope(self._session_factory) as session:
+                row = await spool_repo.select_for_update_by_lease_digest(
+                    session,
+                    lease_token_digest=lease_digest,
+                )
+                if row is None:
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                now = await spool_repo.fetch_statement_timestamp(session)
+                if not _release_allowed(row, lease_digest, now):
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+                cleared = await spool_repo.clear_lease_to_stored(
+                    session, row_id=row.id
+                )
+                if not cleared:
+                    raise AttachmentError("ATTACHMENT_ACCESS_DENIED") from None
+        except AttachmentError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise AttachmentError("ATTACHMENT_STORE_FAILED") from None
+
+    async def reclaim_expired_leases(
+        self, *, limit: int
+    ) -> AttachmentLeaseReclaimResult:
+        _require_reclaim_limit(limit)
+        reclaimed = 0
+        skipped = 0
+        try:
+            async with session_scope(self._session_factory) as session:
+                rows = await spool_repo.select_expired_leased_for_reclaim(
+                    session, limit=limit
+                )
+                for row in rows:
+                    now = await spool_repo.fetch_statement_timestamp(session)
+                    if row.state != "LEASED":
+                        skipped += 1
+                        continue
+                    if (
+                        row.lease_expires_at is None
+                        or row.lease_expires_at > now
+                    ):
+                        skipped += 1
+                        continue
+                    cleared = await spool_repo.clear_lease_to_stored(
+                        session, row_id=row.id
+                    )
+                    if cleared:
+                        reclaimed += 1
+                    else:
+                        skipped += 1
+        except AttachmentError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise AttachmentError("ATTACHMENT_RECONCILE_FAILED") from None
+        return AttachmentLeaseReclaimResult(reclaimed=reclaimed, skipped=skipped)
 
     async def reconcile(self, *, limit: int) -> AttachmentReconcileResult:
         _require_reconcile_limit(limit)
@@ -542,3 +693,114 @@ def _require_reconcile_limit(value: object) -> int:
     if not 1 <= value <= MAX_RECONCILE_BATCH:
         raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
     return value
+
+
+def _require_reclaim_limit(value: object) -> int:
+    if type(value) is not int or isinstance(value, bool):
+        raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
+    if not 1 <= value <= MAX_LEASE_RECLAIM_BATCH:
+        raise AttachmentError("ATTACHMENT_POLICY_INVALID") from None
+    return value
+
+
+def _stored_object_active(
+    row: spool_repo.AttachmentSpoolRow, now: object
+) -> bool:
+    if row.expires_at is None:
+        return False
+    return row.expires_at > now  # type: ignore[operator]
+
+
+def _acquire_decision(
+    row: spool_repo.AttachmentSpoolRow, now: object
+) -> str:
+    if row.state in ("WRITING", "DELETE_PENDING"):
+        return "deny"
+    if row.expires_at is None or row.expires_at <= now:  # type: ignore[operator]
+        return "deny"
+    if row.state == "STORED":
+        return "eligible"
+    if row.state == "LEASED":
+        if row.lease_expires_at is None:
+            return "deny"
+        if row.lease_expires_at > now:  # type: ignore[operator]
+            return "deny"
+        return "reclaim"
+    return "deny"
+
+
+def _release_allowed(
+    row: spool_repo.AttachmentSpoolRow,
+    lease_digest: bytes,
+    now: object,
+) -> bool:
+    if row.state != "LEASED":
+        return False
+    if row.lease_token_digest != lease_digest:
+        return False
+    if row.lease_expires_at is None or row.lease_expires_at <= now:  # type: ignore[operator]
+        return False
+    return True
+
+
+_LEASE_DIGEST_UNIQUE_CONSTRAINT: Final[str] = (
+    "uq_attachment_spool_objects_lease_token_digest"
+)
+_PG_UNIQUE_VIOLATION_SQLSTATE: Final[str] = "23505"
+_PG_EXCEPTION_CHAIN_LIMIT: Final[int] = 4
+
+
+def _normalize_sqlstate(value: object) -> str | None:
+    if type(value) is not str or value == "":
+        return None
+    return value
+
+
+def _normalize_constraint_name(value: object) -> str | None:
+    if type(value) is not str or value == "":
+        return None
+    return value
+
+
+def _structured_pg_violation_fields(exc: object | None) -> tuple[str | None, str | None]:
+    """Extract SQLSTATE and constraint name from a bounded exception chain."""
+    sqlstate: str | None = None
+    constraint_name: str | None = None
+    current = exc
+    for _ in range(_PG_EXCEPTION_CHAIN_LIMIT):
+        if current is None:
+            break
+        if sqlstate is None:
+            sqlstate = _normalize_sqlstate(getattr(current, "sqlstate", None))
+        if sqlstate is None:
+            sqlstate = _normalize_sqlstate(getattr(current, "pgcode", None))
+        if constraint_name is None:
+            constraint_name = _normalize_constraint_name(
+                getattr(current, "constraint_name", None)
+            )
+        if constraint_name is None:
+            diag = getattr(current, "diag", None)
+            if diag is not None:
+                constraint_name = _normalize_constraint_name(
+                    getattr(diag, "constraint_name", None)
+                )
+        if sqlstate is not None and constraint_name is not None:
+            break
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        if cause is not None:
+            current = cause
+            continue
+        current = context
+    return sqlstate, constraint_name
+
+
+def _is_lease_digest_unique_collision(exc: IntegrityError) -> bool:
+    sqlstate, constraint_name = _structured_pg_violation_fields(
+        getattr(exc, "orig", None)
+    )
+    if sqlstate != _PG_UNIQUE_VIOLATION_SQLSTATE:
+        return False
+    if constraint_name != _LEASE_DIGEST_UNIQUE_CONSTRAINT:
+        return False
+    return True

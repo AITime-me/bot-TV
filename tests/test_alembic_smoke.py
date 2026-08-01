@@ -213,6 +213,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260729_12_worker_runtime"].down_revision
         == "20260729_11_handoff_schema"
     )
+    assert "20260801_16_spool_leases" in by_id
+    assert (
+        by_id["20260801_16_spool_leases"].down_revision
+        == "20260801_15_attachment_spool"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -222,6 +227,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260728_10_attempt_exhaustion",
         "20260729_11_handoff_schema",
         "20260729_12_worker_runtime",
+        "20260801_16_spool_leases",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -229,6 +235,16 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         text = Path(rev.path).read_text(encoding="utf-8")
         assert "def upgrade()" in text
         assert "def downgrade()" in text
+
+    # alembic_version.version_num is VARCHAR(32); overflow truncates upgrades.
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revision_ids = [rev.revision for rev in revisions]
+    assert all(type(revision_id) is str and revision_id for revision_id in revision_ids)
+    assert all(len(revision_id) <= 32 for revision_id in revision_ids)
+    assert len(revision_ids) == len(set(revision_ids))
+    assert "20260801_16_spool_leases" in revision_ids
+    assert len("20260801_16_spool_leases") <= 32
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
