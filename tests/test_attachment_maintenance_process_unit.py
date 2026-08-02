@@ -10,6 +10,8 @@ import base64
 import logging
 import secrets
 import signal
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from app.attachment_maintenance import (
     run_attachment_maintenance,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _FAKE_DB = "postgresql+asyncpg://bot:secret@127.0.0.1:5432/bot_tv_test"
 _KEY_B64 = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
 _KEY_ID = "ATTK1"
@@ -254,6 +257,90 @@ def test_spool_ttl_default_and_invalid() -> None:
         _parse_spool_ttl_seconds({"ATTACHMENT_SPOOL_TTL_SECONDS": "86401"})
     with pytest.raises(ValueError, match="ATTACHMENT_SPOOL_TTL_SECONDS"):
         _parse_spool_ttl_seconds({"ATTACHMENT_SPOOL_TTL_SECONDS": "true"})
+
+
+def _run_logging_isolation_subprocess(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def test_legacy_alembic_fileconfig_default_disables_maintenance_logger() -> None:
+    """Legacy hazard (isolated): default fileConfig disables pre-imported logger."""
+    script = r"""
+from logging.config import fileConfig
+from pathlib import Path
+import app.attachment_maintenance as m
+
+assert m.logger.disabled is False
+fileConfig(str(Path.cwd() / "alembic.ini"))
+assert m.logger.disabled is True
+print("ok")
+"""
+    completed = _run_logging_isolation_subprocess(script)
+    assert completed.returncode == 0, (
+        f"subprocess failed rc={completed.returncode} "
+        f"stderr={completed.stderr!r} stdout={completed.stdout!r}"
+    )
+    assert "ok" in completed.stdout
+    blob = completed.stdout + completed.stderr
+    assert "password" not in blob.lower()
+    assert "secret" not in blob.lower()
+
+
+def test_compatible_fileconfig_keeps_maintenance_log_safely_emitting() -> None:
+    """Compatible bootstrap (isolated): _log_safely still delivers once per emit."""
+    script = r"""
+import logging
+from logging.config import fileConfig
+from pathlib import Path
+import app.attachment_maintenance as m
+
+logger = m.logger
+assert logger.disabled is False
+captured: list[str] = []
+
+class MemoryHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        captured.append(record.getMessage())
+
+handler = MemoryHandler()
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+fileConfig(str(Path.cwd() / "alembic.ini"), disable_existing_loggers=False)
+assert logger.disabled is False
+assert handler in logger.handlers
+
+m._log_safely(logging.INFO, "attachment_maintenance_process_starting")
+assert captured == ["attachment_maintenance_process_starting"], captured
+
+fileConfig(str(Path.cwd() / "alembic.ini"), disable_existing_loggers=False)
+assert logger.disabled is False
+assert handler in logger.handlers
+m._log_safely(logging.INFO, "attachment_maintenance_process_starting")
+assert captured == [
+    "attachment_maintenance_process_starting",
+    "attachment_maintenance_process_starting",
+], captured
+print("ok")
+"""
+    completed = _run_logging_isolation_subprocess(script)
+    assert completed.returncode == 0, (
+        f"subprocess failed rc={completed.returncode} "
+        f"stderr={completed.stderr!r} stdout={completed.stdout!r}"
+    )
+    assert "ok" in completed.stdout
+    blob = completed.stdout + completed.stderr
+    assert "password" not in blob.lower()
+    assert _KEY_B64 not in blob
+    assert _FAKE_DB not in blob
 
 
 @pytest.mark.asyncio

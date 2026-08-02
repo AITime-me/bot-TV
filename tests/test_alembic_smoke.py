@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from alembic.config import Config
@@ -21,6 +24,8 @@ from app.models import (
     ReplyPlan,
     WorkerHeartbeat,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 _EXPECTED_CHECKS_01A_STABLE = {
@@ -423,3 +428,92 @@ def test_model_migration_check_and_unique_parity() -> None:
     ):
         assert complex_check in migration_11
         assert complex_check in model_checks
+
+
+def test_alembic_env_fileconfig_call_site_disables_existing_loggers_false() -> None:
+    """AST contract: production env.py must pass disable_existing_loggers=False.
+
+    Protects the real call-site (not comments/strings). Subprocess behavioral
+    tests cover runtime fileConfig semantics without touching pytest logging.
+    """
+    source = (_REPO_ROOT / "alembic" / "env.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="alembic/env.py")
+    matches: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "fileConfig":
+            matches.append(node)
+        elif isinstance(func, ast.Attribute) and func.attr == "fileConfig":
+            matches.append(node)
+    assert len(matches) == 1, f"expected exactly one fileConfig call, got {len(matches)}"
+    call = matches[0]
+    keyword = next(
+        (
+            kw
+            for kw in call.keywords
+            if kw.arg == "disable_existing_loggers"
+        ),
+        None,
+    )
+    assert keyword is not None, "disable_existing_loggers keyword is required"
+    value = keyword.value
+    assert isinstance(value, ast.Constant), "disable_existing_loggers must be a literal"
+    assert value.value is False, "disable_existing_loggers must be literal False"
+
+
+def test_fileconfig_false_preserves_preexisting_logger_in_subprocess() -> None:
+    """Runtime semantics for disable_existing_loggers=False (isolated process)."""
+    script = r"""
+import logging
+import sys
+from logging.config import fileConfig
+from pathlib import Path
+
+root = Path.cwd()
+name = "bot_tv.fileconfig_isolation.probe"
+logger = logging.getLogger(name)
+assert logger.disabled is False
+
+captured: list[str] = []
+
+class MemoryHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        captured.append(record.getMessage())
+
+handler = MemoryHandler()
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+fileConfig(str(root / "alembic.ini"), disable_existing_loggers=False)
+assert logger.disabled is False
+assert handler in logger.handlers
+
+logger.info("probe_one")
+assert captured == ["probe_one"], captured
+
+fileConfig(str(root / "alembic.ini"), disable_existing_loggers=False)
+assert logger.disabled is False
+assert handler in logger.handlers
+logger.info("probe_two")
+assert captured == ["probe_one", "probe_two"], captured
+print("ok")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"subprocess failed rc={completed.returncode} "
+        f"stderr={completed.stderr!r} stdout={completed.stdout!r}"
+    )
+    assert "ok" in completed.stdout
+    blob = completed.stdout + completed.stderr
+    assert "password" not in blob.lower()
+    assert "postgresql+" not in blob.lower()
