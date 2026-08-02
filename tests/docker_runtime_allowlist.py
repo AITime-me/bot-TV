@@ -40,6 +40,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/attachment_crypto.py",
     "!app/core/attachment_mime.py",
     "!app/core/attachment_fs.py",
+    "!app/core/attachment_maintenance_types.py",
     "!app/db/",
     "!app/db/__init__.py",
     "!app/db/base.py",
@@ -87,6 +88,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/dialog_context.py",
     "!app/services/ephemeral_pii_store.py",
     "!app/services/attachment_spool_store.py",
+    "!app/services/attachment_maintenance.py",
     "!app/services/handoff_expiry.py",
     "!app/services/inbound.py",
     "!app/services/ingress.py",
@@ -97,6 +99,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/takeover.py",
     "!app/services/worker_health.py",
     "!app/services/worker_runtime.py",
+    "!app/attachment_maintenance.py",
     "!app/worker.py",
     "!app/worker_healthcheck.py",
 )
