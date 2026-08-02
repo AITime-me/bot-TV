@@ -74,3 +74,36 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # Default-off: not started by `docker compose up -d`.
+  # Activation requires profile `attachment-maintenance` AND
+  # ATTACHMENT_MAINTENANCE_ENABLED=true plus a host-local keyring env_file.
+  # Keyring vars must come only from env_file (not service environment).
+  attachment-maintenance:
+    build:
+      context: .
+    command: ["python", "-m", "app.attachment_maintenance"]
+    profiles: ["attachment-maintenance"]
+    environment:
+      <<: *runtime-environment
+      ATTACHMENT_MAINTENANCE_ENABLED: ${ATTACHMENT_MAINTENANCE_ENABLED:-false}
+      ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS: ${ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS:-60}
+      ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS: ${ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS:-0}
+      ATTACHMENT_RECONCILE_BATCH_LIMIT: ${ATTACHMENT_RECONCILE_BATCH_LIMIT:-100}
+      ATTACHMENT_PURGE_BATCH_LIMIT: ${ATTACHMENT_PURGE_BATCH_LIMIT:-100}
+      ATTACHMENT_SPOOL_ROOT: ${ATTACHMENT_SPOOL_ROOT:-/var/lib/bot-tv/attachment-spool}
+      ATTACHMENT_SPOOL_TTL_SECONDS: ${ATTACHMENT_SPOOL_TTL_SECONDS:-900}
+    env_file:
+      - path: ${ATTACHMENT_SPOOL_KEYS_ENV_FILE:-/etc/bot-tv/attachment-spool-keys.env}
+        required: false
+    <<: *runtime-hardening
+    volumes:
+      - attachment-spool:/var/lib/bot-tv/attachment-spool
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: on-failure
+    stop_grace_period: 60s
+
+volumes:
+  attachment-spool:

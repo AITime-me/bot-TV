@@ -171,6 +171,38 @@ docker compose build
 docker compose up -d
 ```
 
+Обычный `docker compose up -d` **не** запускает attachment maintenance.
+Сервис `attachment-maintenance` объявлен с profile `attachment-maintenance` и
+остаётся выключенным, пока оператор явно не активирует profile **и** не
+выставит `ATTACHMENT_MAINTENANCE_ENABLED=true`.
+
+### Attachment maintenance (CURSOR-13 Stage 3A, default-off)
+
+Compose wiring присутствует, но staging/production activation **не** входит в
+Stage 3A и требует отдельного разрешения владельца.
+
+Перед любым будущим включением (Stage 3B preflight):
+
+- Docker Compose на хосте >= 2.24.0 (`env_file.required=false`);
+- schema/migrations актуальны;
+- external host-local keyring file существует по
+  `ATTACHMENT_SPOOL_KEYS_ENV_FILE` (default
+  `/etc/bot-tv/attachment-spool-keys.env`), вне Git, с ограниченными правами
+  чтения; файл должен содержать active key id, active key material и все ещё
+  нужные старые `ATTACHMENT_SPOOL_KEY_<ID>`;
+- named volume `attachment-spool` смонтирован в container path
+  `/var/lib/bot-tv/attachment-spool`; пользователь контейнера `bot-tv` должен
+  иметь read/write/delete до включения (не исправлять права запуском от root);
+- не печатать `docker compose config` без `--quiet`, rendered environment и
+  содержимое keyring-файла;
+- запускать одну replica; не использовать `--scale`.
+
+Immediate rollback будущего включения: остановить только
+`attachment-maintenance`; api/worker, БД и spool не трогать.
+
+Любой будущий producer/consumer `AttachmentSpoolStore` обязан использовать тот
+же named volume, тот же container path, ту же БД и совместимый keyring.
+
 ### Обязательный шлюз перед первым deploy
 
 До production/staging deploy `CURSOR-10` необходимо выполнить в среде с

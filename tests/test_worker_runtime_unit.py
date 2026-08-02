@@ -324,7 +324,10 @@ def test_ready_endpoint_fails_closed_for_unhealthy_worker() -> None:
 
 
 def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
+    import re
+
     from tests.docker_runtime_allowlist import (
+        EXPECTED_DOCKER_ALLOW_RULES,
         assert_canonical_docker_runtime_allowlist,
         dockerignore_lines,
     )
@@ -344,29 +347,140 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
 
     assert "**/__pycache__/" in lines
     assert "**/*.py[cod]" in lines
+    assert "!app/attachment_maintenance.py" in EXPECTED_DOCKER_ALLOW_RULES
+    assert "!app/attachment_maintenance.py" in allow_rules
 
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "USER bot-tv" in dockerfile
     assert "COPY . " not in dockerfile
     assert "requirements-lock.txt" in dockerfile
 
-    compose = yaml.safe_load(
-        (_REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    )
-    assert set(compose["services"]) == {"migrate", "api", "worker"}
+    compose_text = (_REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = yaml.safe_load(compose_text)
+    assert set(compose["services"]) == {
+        "migrate",
+        "api",
+        "worker",
+        "attachment-maintenance",
+    }
     for service_name in ("api", "worker"):
         service = compose["services"][service_name]
         assert service["restart"] == "unless-stopped"
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
         assert service["healthcheck"]["test"][0:3] == ["CMD", "python", "-m"]
+        assert "attachment-spool" not in {
+            _compose_volume_source(item) for item in service.get("volumes", [])
+        }
     assert compose["services"]["worker"]["command"] == [
         "python",
         "-m",
         "app.worker",
     ]
+    assert compose["services"]["worker"]["stop_grace_period"] == "30s"
     assert compose["services"]["migrate"]["command"] == [
         "alembic",
         "upgrade",
         "head",
     ]
+    assert compose["services"]["migrate"]["restart"] == "no"
+
+    spool_root = "/var/lib/bot-tv/attachment-spool"
+    maintenance = compose["services"]["attachment-maintenance"]
+    assert maintenance["command"] == ["python", "-m", "app.attachment_maintenance"]
+    assert maintenance["profiles"] == ["attachment-maintenance"]
+    assert maintenance["restart"] == "on-failure"
+    assert maintenance["stop_grace_period"] == "60s"
+    assert maintenance["depends_on"] == {
+        "migrate": {"condition": "service_completed_successfully"}
+    }
+    assert maintenance["read_only"] is True
+    assert maintenance["init"] is True
+    assert maintenance["cap_drop"] == ["ALL"]
+    assert maintenance["security_opt"] == ["no-new-privileges:true"]
+    assert maintenance["tmpfs"] == ["/tmp:size=32m,mode=1777"]
+    assert "ports" not in maintenance
+    assert "healthcheck" not in maintenance
+    assert "privileged" not in maintenance
+    assert "network_mode" not in maintenance
+    assert "deploy" not in maintenance
+    assert maintenance.get("deploy", {}).get("replicas") in (None, 1)
+
+    env = maintenance["environment"]
+    assert env["ATTACHMENT_MAINTENANCE_ENABLED"] == (
+        "${ATTACHMENT_MAINTENANCE_ENABLED:-false}"
+    )
+    assert env["ATTACHMENT_SPOOL_ROOT"] == (
+        "${ATTACHMENT_SPOOL_ROOT:-/var/lib/bot-tv/attachment-spool}"
+    )
+    assert env["ATTACHMENT_SPOOL_TTL_SECONDS"] == (
+        "${ATTACHMENT_SPOOL_TTL_SECONDS:-900}"
+    )
+    assert env["ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS"] == (
+        "${ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS:-60}"
+    )
+    assert env["ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS"] == (
+        "${ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS:-0}"
+    )
+    assert env["ATTACHMENT_RECONCILE_BATCH_LIMIT"] == (
+        "${ATTACHMENT_RECONCILE_BATCH_LIMIT:-100}"
+    )
+    assert env["ATTACHMENT_PURGE_BATCH_LIMIT"] == (
+        "${ATTACHMENT_PURGE_BATCH_LIMIT:-100}"
+    )
+    assert "ATTACHMENT_SPOOL_ACTIVE_KEY_ID" not in env
+    assert not any(key.startswith("ATTACHMENT_SPOOL_KEY_") for key in env)
+
+    env_files = maintenance["env_file"]
+    assert len(env_files) == 1
+    env_file = env_files[0]
+    assert env_file["required"] is False
+    assert env_file["path"] == (
+        "${ATTACHMENT_SPOOL_KEYS_ENV_FILE:-/etc/bot-tv/attachment-spool-keys.env}"
+    )
+    assert "ATTACHMENT_SPOOL_KEYS_ENV_FILE" in env_file["path"]
+    assert "/etc/bot-tv/attachment-spool-keys.env" in env_file["path"]
+
+    assert "attachment-spool" in compose["volumes"]
+    mounts = maintenance["volumes"]
+    assert len(mounts) == 1
+    mount = mounts[0]
+    assert _compose_volume_source(mount) == "attachment-spool"
+    assert _compose_volume_target(mount) == spool_root
+    assert _compose_volume_is_read_write(mount) is True
+    assert spool_root != "/tmp"
+    assert not spool_root.startswith("/tmp/")
+
+    assert re.search(
+        r"ATTACHMENT_SPOOL_KEY_[A-Z0-9_]+",
+        compose_text,
+    ) is None
+    assert "ATTACHMENT_SPOOL_ACTIVE_KEY_ID:" not in compose_text
+
+
+def _compose_volume_source(item: object) -> str | None:
+    if isinstance(item, str):
+        return item.split(":", 1)[0]
+    if isinstance(item, dict):
+        source = item.get("source")
+        return source if isinstance(source, str) else None
+    return None
+
+
+def _compose_volume_target(item: object) -> str | None:
+    if isinstance(item, str):
+        parts = item.split(":")
+        return parts[1] if len(parts) >= 2 else None
+    if isinstance(item, dict):
+        target = item.get("target")
+        return target if isinstance(target, str) else None
+    return None
+
+
+def _compose_volume_is_read_write(item: object) -> bool:
+    if isinstance(item, str):
+        parts = item.split(":")
+        return "ro" not in parts[2:]
+    if isinstance(item, dict):
+        return item.get("read_only") is not True
+    return False
