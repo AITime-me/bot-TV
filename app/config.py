@@ -110,6 +110,11 @@ class Settings:
     worker_heartbeat_interval_seconds: int = 10
     worker_heartbeat_stale_seconds: int = 45
     worker_max_consecutive_failures: int = 3
+    attachment_maintenance_enabled: bool = False
+    attachment_maintenance_interval_seconds: int = 60
+    attachment_maintenance_initial_delay_seconds: int = 0
+    attachment_reconcile_batch_limit: int = 100
+    attachment_purge_batch_limit: int = 100
 
     def __repr__(self) -> str:
         if self.database_url is None:
@@ -131,7 +136,17 @@ class Settings:
             "worker_max_consecutive_failures="
             f"{self.worker_max_consecutive_failures!r}, "
             "handoff_expiry_poll_seconds="
-            f"{self.handoff_expiry_poll_seconds!r})"
+            f"{self.handoff_expiry_poll_seconds!r}, "
+            "attachment_maintenance_enabled="
+            f"{self.attachment_maintenance_enabled!r}, "
+            "attachment_maintenance_interval_seconds="
+            f"{self.attachment_maintenance_interval_seconds!r}, "
+            "attachment_maintenance_initial_delay_seconds="
+            f"{self.attachment_maintenance_initial_delay_seconds!r}, "
+            "attachment_reconcile_batch_limit="
+            f"{self.attachment_reconcile_batch_limit!r}, "
+            "attachment_purge_batch_limit="
+            f"{self.attachment_purge_batch_limit!r})"
         )
 
     def __post_init__(self) -> None:
@@ -187,6 +202,40 @@ class Settings:
             raise ValueError(
                 "worker_max_consecutive_failures must be between 1 and 20"
             )
+        if type(self.attachment_maintenance_enabled) is not bool:
+            raise ValueError("attachment_maintenance_enabled must be a boolean")
+        if type(self.attachment_maintenance_interval_seconds) is not int:
+            raise ValueError(
+                "attachment_maintenance_interval_seconds must be an integer"
+            )
+        if not 1 <= self.attachment_maintenance_interval_seconds <= 86400:
+            raise ValueError(
+                "attachment_maintenance_interval_seconds must be between "
+                "1 and 86400"
+            )
+        if type(self.attachment_maintenance_initial_delay_seconds) is not int:
+            raise ValueError(
+                "attachment_maintenance_initial_delay_seconds must be an integer"
+            )
+        if not 0 <= self.attachment_maintenance_initial_delay_seconds <= 86400:
+            raise ValueError(
+                "attachment_maintenance_initial_delay_seconds must be between "
+                "0 and 86400"
+            )
+        if type(self.attachment_reconcile_batch_limit) is not int:
+            raise ValueError(
+                "attachment_reconcile_batch_limit must be an integer"
+            )
+        if not 1 <= self.attachment_reconcile_batch_limit <= 1000:
+            raise ValueError(
+                "attachment_reconcile_batch_limit must be between 1 and 1000"
+            )
+        if type(self.attachment_purge_batch_limit) is not int:
+            raise ValueError("attachment_purge_batch_limit must be an integer")
+        if not 1 <= self.attachment_purge_batch_limit <= 1000:
+            raise ValueError(
+                "attachment_purge_batch_limit must be between 1 and 1000"
+            )
 
     def validate_worker_runtime(self) -> None:
         """Validate cross-field constraints used only by the worker process."""
@@ -205,6 +254,15 @@ class Settings:
             raise ValueError(
                 "WORKER_HEARTBEAT_STALE_SECONDS is too small for configured "
                 "poll/heartbeat/tick timeout values"
+            )
+
+    def validate_attachment_maintenance_runtime(self) -> None:
+        """Validate constraints used only by the attachment maintenance process."""
+        if not self.attachment_maintenance_enabled:
+            return
+        if self.database_url is None:
+            raise ValueError(
+                "DATABASE_URL is required for attachment maintenance"
             )
 
     @property
@@ -272,5 +330,36 @@ class Settings:
                 source.get("WORKER_MAX_CONSECUTIVE_FAILURES", "3"),
                 minimum=1,
                 maximum=20,
+            ),
+            attachment_maintenance_enabled=_parse_bool(
+                "ATTACHMENT_MAINTENANCE_ENABLED",
+                source.get("ATTACHMENT_MAINTENANCE_ENABLED", "false"),
+            ),
+            attachment_maintenance_interval_seconds=_parse_int_range(
+                "ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS",
+                source.get("ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS", "60"),
+                minimum=1,
+                maximum=86400,
+            ),
+            attachment_maintenance_initial_delay_seconds=_parse_int_range(
+                "ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS",
+                source.get(
+                    "ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS",
+                    "0",
+                ),
+                minimum=0,
+                maximum=86400,
+            ),
+            attachment_reconcile_batch_limit=_parse_int_range(
+                "ATTACHMENT_RECONCILE_BATCH_LIMIT",
+                source.get("ATTACHMENT_RECONCILE_BATCH_LIMIT", "100"),
+                minimum=1,
+                maximum=1000,
+            ),
+            attachment_purge_batch_limit=_parse_int_range(
+                "ATTACHMENT_PURGE_BATCH_LIMIT",
+                source.get("ATTACHMENT_PURGE_BATCH_LIMIT", "100"),
+                minimum=1,
+                maximum=1000,
             ),
         )

@@ -25,7 +25,10 @@ from app.models import (  # noqa: F401 — register metadata
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Keep app.* loggers usable for in-process Alembic (pytest PG fixtures).
+    # Default disable_existing_loggers=True permanently silences already-imported
+    # module loggers for the rest of the pytest process.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

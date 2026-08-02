@@ -309,7 +309,8 @@ def test_settings_repr_redacts_password_but_keeps_safe_parts() -> None:
         assert "bot_tv_foundation_test" in rendered
     safe_default = repr(Settings.from_env({}))
     assert "database_url=None" in safe_default
-    assert safe_default.endswith("handoff_expiry_poll_seconds=1)")
+    assert safe_default.endswith("attachment_purge_batch_limit=100)")
+    assert "attachment_maintenance_enabled=False" in safe_default
     # The raw value stays reachable for the engine, only rendering is redacted.
     assert settings.database_url == _FAKE_URL
 

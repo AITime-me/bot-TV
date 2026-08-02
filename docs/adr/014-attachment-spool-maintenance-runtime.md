@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — Stage 1 library-only implementation scope.
+Accepted — Stage 1 library-only and Stage 2A process wiring scopes.
 
 ## Context
 
@@ -146,22 +146,62 @@ Rules:
 - Models / migrations / dependency updates
 - Channel adapters and client outbound
 
-### Stage 2 boundary (not implemented)
+### Stage 2A — process wiring (accepted)
 
-- Separate process entrypoint (recommended: not a sixth `WorkerRuntime` loop)
-- Env config with fail-closed `ENABLED=false` default
-- Signal handler that only sets `stop_event`
-- Isolated PostgreSQL integration tests
-- Still no production deploy without explicit owner approval (Stage 3)
+- Separate process entrypoint: `python -m app.attachment_maintenance`
+  (`app/attachment_maintenance.py`). **Not** a sixth `WorkerRuntime` loop and
+  **not** FastAPI lifespan / `app/main.py`.
+- Fail-closed `ATTACHMENT_MAINTENANCE_ENABLED=false` by default (Settings).
+- Maintenance pacing/limits live in `Settings.from_env`; enablement is **not**
+  coupled to `BOT_MODE` or `EMERGENCY_LOCK`.
+- Spool root and TTL are **process-local** env only (`ATTACHMENT_SPOOL_ROOT`,
+  `ATTACHMENT_SPOOL_TTL_SECONDS`, default TTL `900`) — not Settings fields.
+- When enabled, spool root must already exist as a non-symlink absolute
+  directory; the entrypoint never creates it (`mkdir` forbidden).
+- Startup probes the active attachment key via `EnvAttachmentKeyProvider`
+  before creating the runner; keys stay outside Settings.
+- `DATABASE_URL` is required only when enabled
+  (`validate_attachment_maintenance_runtime`).
+- SIGINT/SIGTERM only set `stop_event` (Windows unsupported handlers ignored);
+  in-flight cycles are not cancelled by stop; waits remain interruptible.
+- Exit: disabled/clean stop/KeyboardInterrupt → `0`; startup or unexpected
+  runtime `Exception` → `1` with stderr `error_code={TypeName}` only;
+  `CancelledError` is not masked as `Exception`.
+- Engine `dispose()` is attempted once after successful `create_engine`; success
+  is not guaranteed. `_dispose_engine` catches only ordinary `Exception` and
+  returns it for lifecycle classification (no logging inside the helper).
+- `attachment_maintenance_process_stopped` means fully successful completion:
+  runner returned normally **and** engine dispose succeeded. It is **not**
+  logged after cancellation, startup failure, runtime fatal, or dispose failure.
+- When a primary exception is already pending (startup / runtime /
+  `CancelledError`), a secondary dispose `Exception` is suppressed and must not
+  create a second `process_fatal` (or any cleanup-warning event).
+- Clean-run dispose failure is the sole `process_fatal` for that path and exits
+  `1`. Runtime fatal logs exactly one `process_fatal` for the primary exception.
+- Process logs use fixed event names and safe `error_code` scalars only (no
+  paths, URLs, keys, IDs, exception text, or `exc_info`).
+- Stage 2A ships unit/process tests only (no live PostgreSQL in this stage).
+- Docker runtime allowlist includes the entrypoint and Stage 1 maintenance
+  modules; **no** Compose service, volume, or healthcheck.
+
+### Stage 2B (not implemented)
+
+- Isolated real-PostgreSQL integration tests for the process construction path
+  (safe `BOT_TV_TEST_DATABASE_URL` only).
+
+### Stage 3 (not implemented)
+
+- Compose service, shared spool volume, container healthcheck, production env,
+  operational monitoring, rollout, and deploy — require explicit owner approval.
 
 ## Consequences
 
 - Domain lifecycle rules remain unchanged; Stage 1 only adds an execution
-  mechanism that must be invoked by a future Stage 2 process.
-- ADR 013 “operators schedule externally” remains true until Stage 2/3 wiring.
+  mechanism; Stage 2A adds a safe opt-in process host that stays off by default.
+- ADR 013 “operators schedule externally” remains true until Stage 3 wiring.
 - Residual risk: graceful stop may wait on a long active reconcile/purge cycle.
 
 ## Non-claims
 
 This ADR does **not** activate production maintenance, shared spool volume
-wiring, or automatic deploy.
+wiring, Compose scheduling, or automatic deploy.
