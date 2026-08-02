@@ -3,7 +3,10 @@
 ## Status
 
 Accepted — Stage 1 library-only, Stage 2A process wiring, Stage 2B PostgreSQL
-integration tests, and Stage 3A default-off Compose service wiring.
+integration tests, Stage 3A default-off Compose service wiring, Stage 3B
+staging runtime rollout, and CURSOR-14 Stage 2 supervision hardening
+(SUCCESS-only tmpfs heartbeat, Docker healthcheck, `unless-stopped` with
+idle-wait for disabled/known startup failures).
 
 ## Context
 
@@ -149,7 +152,7 @@ Rules:
 
 ### Stage 2A — process wiring (accepted)
 
-- Separate process entrypoint: `python -m app.attachment_maintenance`
+- Separate process entrypoint: `python -B -m app.attachment_maintenance`
   (`app/attachment_maintenance.py`). **Not** a sixth `WorkerRuntime` loop and
   **not** FastAPI lifespan / `app/main.py`.
 - Fail-closed `ATTACHMENT_MAINTENANCE_ENABLED=false` by default (Settings).
@@ -193,21 +196,24 @@ Rules:
 ### Stage 3A — Compose wiring (accepted, default-off)
 
 - Compose service `attachment-maintenance` with command
-  `python -m app.attachment_maintenance`.
+  `python -B -m app.attachment_maintenance`.
 - Activation uses Compose profile `attachment-maintenance`. Default
   `docker compose up -d` does **not** start the service.
 - Second independent gate: `ATTACHMENT_MAINTENANCE_ENABLED` remains default
   `false` in Compose; enabling requires an explicit deployment env change.
-- `restart: on-failure` (not `unless-stopped` / `always`) so a clean disabled
-  exit `0` cannot create a restart loop.
+- Historical Stage 3A choice: `restart: on-failure` (not `unless-stopped` /
+  `always`) so a clean disabled exit `0` could not create a restart loop.
+  CURSOR-14 supersedes this (see below) by keeping the process alive in
+  idle-wait when disabled or when known startup configuration/keyring
+  validation fails, then using `restart: unless-stopped` for host/daemon
+  reboot survival after an intentional first start.
 - `stop_grace_period: 60s`. SIGTERM only sets `stop_event`; an in-flight cycle
   is not cancelled. There is no hard cycle duration bound; after grace Docker
   may SIGKILL. Durable `WRITING` / `DELETE_PENDING` reconciliation recovers the
   crash window. 60s is an operational allowance, not an absolute guarantee.
-- No container `healthcheck`. Docker tracks PID 1; a decorative
-  import/process-presence probe would not add a useful guarantee. Progress is
-  observed through structured process/runner logs. A future heartbeat/status
-  mechanism would be a separate stage.
+- Historical Stage 3A choice: no container `healthcheck`; progress was observed
+  through structured process/runner logs. CURSOR-14 adds a SUCCESS-only
+  heartbeat healthcheck (see below).
 - One operational replica only. Do not `--scale attachment-maintenance=N`.
   Brief overlap remains correctness-safe via row-level `FOR UPDATE SKIP LOCKED`;
   that is not a recommendation for permanent multi-replica operation.
@@ -228,11 +234,47 @@ Rules:
 - Stage 3A does **not** activate staging/production. Server rollout remains
   Stage 3B/3C with separate owner authorization.
 
-### Stage 3B/3C (not implemented)
+### CURSOR-14 — Supervision hardening (accepted for implementation)
 
-- Staging/production rollout, runtime verification, ownership/permissions
-  preflight for volume user `bot-tv`, Compose >= 2.24.0 on the host, and
-  controlled enablement of profile + `ATTACHMENT_MAINTENANCE_ENABLED=true`.
+- SUCCESS-only filesystem heartbeat under existing tmpfs:
+  `/tmp/bot-tv-attachment-maintenance-heartbeat.json`.
+- Exact schema: `{"v":1,"completed_at":"<UTC ISO-8601>"}` only. No PII,
+  secrets, object IDs, paths, key IDs, counters, or exception text. No DB row
+  and no migration.
+- Atomic write: exclusive temp in the same directory → fsync → `os.replace`;
+  mode `0600`; symlink/non-regular final path rejected.
+- Heartbeat updates only after `AttachmentMaintenanceCycleStatus.SUCCESS`
+  (both reconcile and purge completed). PARTIAL/FAILED/CANCELLED/INTERNAL_ERROR
+  do not refresh the file. Writer failures are best-effort and do not kill the
+  maintenance loop.
+- Docker healthcheck:
+  `python -B -m app.attachment_maintenance_healthcheck`
+  with `interval: 10s`, `timeout: 5s`, `retries: 3`, `start_period: 90s`.
+- Default freshness: `ATTACHMENT_MAINTENANCE_HEARTBEAT_STALE_SECONDS=180`
+  (fail-closed parsing; no silent fallback for invalid values). Future skew
+  allowance: 30 seconds.
+- Healthcheck is read-only: no DB, Settings, keyring, encrypt/decrypt, or
+  maintenance cycle. Success is silent; failure prints one safe code on stderr.
+- Restart policy: `unless-stopped`. Default-off profile still prevents start
+  until an explicit `compose up` with the profile. Manual `compose stop` keeps
+  the service stopped. Previously running containers return after host/Docker
+  daemon restart.
+- Disabled mode and known startup `ValueError` / `AttachmentError` paths:
+  log safely, write no heartbeat, idle-wait on `stop_event` (no busy-loop, no
+  restart storm). Unexpected programming exceptions at startup or mid-loop
+  remain fatal (non-zero exit → Docker may restart).
+- Honest limit: Docker `unhealthy` does **not** itself restart the container;
+  restart policy reacts to process exit. External monitoring remains a future
+  option. Host/daemon reboot survival is a separate owner-approved runtime gate
+  after staging acceptance.
+
+### Stage 3B/3C (staging/production gates)
+
+- Staging runtime verification, ownership/permissions preflight for volume user
+  `bot-tv`, Compose >= 2.24.0 on the host, controlled enablement of profile +
+  `ATTACHMENT_MAINTENANCE_ENABLED=true`, and separate owner-approved
+  reboot-survival testing. Production remains out of scope until explicitly
+  authorized.
 
 ## Consequences
 
@@ -246,6 +288,7 @@ Rules:
 
 ## Non-claims
 
-This ADR does **not** activate production or staging maintenance, grant
-`api`/`worker` spool mounts, add a maintenance healthcheck/heartbeat, or
-change `EnvAttachmentKeyProvider` / crypto transport.
+This ADR does **not** activate production maintenance, grant `api`/`worker`
+spool mounts, change `EnvAttachmentKeyProvider` / crypto transport, add a DB
+heartbeat table/migration, auto-restart on Docker `unhealthy` alone, or
+replace an owner-approved reboot-survival runtime gate.

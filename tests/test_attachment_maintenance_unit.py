@@ -236,6 +236,7 @@ def _runner(
     waiter: _FakeWaiter | None = None,
     clock: _Clock | None = None,
     logger: logging.Logger | None = None,
+    heartbeat_writer: object | None = None,
 ) -> tuple[AttachmentMaintenanceRunner, _FakeStore, _FakeWaiter, _Clock]:
     fake_store = store if store is not None else _FakeStore()
     fake_waiter = waiter if waiter is not None else _FakeWaiter()
@@ -246,6 +247,7 @@ def _runner(
         _waiter=fake_waiter,
         _now_fn=fake_clock.now,
         _logger=logger,
+        _heartbeat_writer=heartbeat_writer,  # type: ignore[arg-type]
     )
     return runner, fake_store, fake_waiter, fake_clock
 
@@ -1249,3 +1251,110 @@ async def test_throwing_logger_does_not_mask_cancellation() -> None:
         if store.reconcile_gate is not None:
             store.reconcile_gate.set()
         await _cancel_tasks(task)
+
+
+# --- SUCCESS-only heartbeat (CURSOR-14) ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_success_writes_heartbeat_once_with_finish_timestamp(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    writes: list[datetime] = []
+
+    def writer(completed_at: datetime) -> None:
+        writes.append(completed_at)
+
+    runner, store, _, clock = _runner(heartbeat_writer=writer)
+    with caplog.at_level(logging.INFO):
+        result = await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert result.status is AttachmentMaintenanceCycleStatus.SUCCESS
+    assert len(writes) == 1
+    assert writes[0] == runner.status.last_success_at
+    assert writes[0] == runner.status.last_cycle_finished_at
+    assert store.reconcile_calls == 1
+    assert store.purge_calls == 1
+    assert clock.calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_does_not_write_heartbeat() -> None:
+    writes: list[datetime] = []
+    store = _FakeStore()
+    store.reconcile_result = asyncio.CancelledError()
+    runner, store, _, _ = _runner(store, heartbeat_writer=writes.append)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert store.purge_calls == 0
+    assert runner.status.last_cycle_status is AttachmentMaintenanceCycleStatus.CANCELLED
+    assert runner.status.last_success_at is None
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_partial_does_not_write_heartbeat() -> None:
+    writes: list[datetime] = []
+    store = _FakeStore()
+    store.reconcile_result = AttachmentError("ATTACHMENT_RECONCILE_FAILED")
+    runner, _, _, _ = _runner(store, heartbeat_writer=writes.append)
+    result = await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert result.status is AttachmentMaintenanceCycleStatus.PARTIAL
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_failed_does_not_write_heartbeat() -> None:
+    writes: list[datetime] = []
+    store = _FakeStore()
+    store.reconcile_result = AttachmentError("ATTACHMENT_RECONCILE_FAILED")
+    store.purge_result = AttachmentError("ATTACHMENT_RECONCILE_FAILED")
+    runner, _, _, _ = _runner(store, heartbeat_writer=writes.append)
+    result = await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert result.status is AttachmentMaintenanceCycleStatus.FAILED
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_does_not_write_heartbeat() -> None:
+    writes: list[datetime] = []
+    store = _FakeStore()
+    store.reconcile_result = RuntimeError("boom-sensitive-message")
+    runner, _, _, _ = _runner(store, heartbeat_writer=writes.append)
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_writer_failure_does_not_kill_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def boom(_completed_at: datetime) -> None:
+        raise RuntimeError("heartbeat-disk-full-secret")
+
+    runner, _, _, _ = _runner(heartbeat_writer=boom)
+    with caplog.at_level(logging.WARNING):
+        result = await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert result.status is AttachmentMaintenanceCycleStatus.SUCCESS
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        msg.startswith("attachment_maintenance_heartbeat_write_failed")
+        and "error_code=RuntimeError" in msg
+        for msg in messages
+    )
+    blob = " ".join(messages)
+    assert "heartbeat-disk-full-secret" not in blob
+    for item in _FORBIDDEN:
+        assert item not in blob
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_advances_across_successful_cycles() -> None:
+    writes: list[datetime] = []
+    runner, _, _, _ = _runner(heartbeat_writer=writes.append)
+    first = await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    second = await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert first.status is AttachmentMaintenanceCycleStatus.SUCCESS
+    assert second.status is AttachmentMaintenanceCycleStatus.SUCCESS
+    assert len(writes) == 2
+    assert writes[1] >= writes[0]

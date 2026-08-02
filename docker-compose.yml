@@ -82,13 +82,14 @@ services:
   attachment-maintenance:
     build:
       context: .
-    command: ["python", "-m", "app.attachment_maintenance"]
+    command: ["python", "-B", "-m", "app.attachment_maintenance"]
     profiles: ["attachment-maintenance"]
     environment:
       <<: *runtime-environment
       ATTACHMENT_MAINTENANCE_ENABLED: ${ATTACHMENT_MAINTENANCE_ENABLED:-false}
       ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS: ${ATTACHMENT_MAINTENANCE_INTERVAL_SECONDS:-60}
       ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS: ${ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS:-0}
+      ATTACHMENT_MAINTENANCE_HEARTBEAT_STALE_SECONDS: ${ATTACHMENT_MAINTENANCE_HEARTBEAT_STALE_SECONDS:-180}
       ATTACHMENT_RECONCILE_BATCH_LIMIT: ${ATTACHMENT_RECONCILE_BATCH_LIMIT:-100}
       ATTACHMENT_PURGE_BATCH_LIMIT: ${ATTACHMENT_PURGE_BATCH_LIMIT:-100}
       ATTACHMENT_SPOOL_ROOT: ${ATTACHMENT_SPOOL_ROOT:-/var/lib/bot-tv/attachment-spool}
@@ -102,8 +103,21 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    restart: on-failure
+    restart: unless-stopped
     stop_grace_period: 60s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-B",
+          "-m",
+          "app.attachment_maintenance_healthcheck",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
 
 volumes:
   attachment-spool:

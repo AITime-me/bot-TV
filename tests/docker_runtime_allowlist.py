@@ -41,6 +41,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/attachment_mime.py",
     "!app/core/attachment_fs.py",
     "!app/core/attachment_maintenance_types.py",
+    "!app/core/attachment_maintenance_heartbeat.py",
     "!app/db/",
     "!app/db/__init__.py",
     "!app/db/base.py",
@@ -100,6 +101,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/worker_health.py",
     "!app/services/worker_runtime.py",
     "!app/attachment_maintenance.py",
+    "!app/attachment_maintenance_healthcheck.py",
     "!app/worker.py",
     "!app/worker_healthcheck.py",
 )

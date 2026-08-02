@@ -349,6 +349,8 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
     assert "**/*.py[cod]" in lines
     assert "!app/attachment_maintenance.py" in EXPECTED_DOCKER_ALLOW_RULES
     assert "!app/attachment_maintenance.py" in allow_rules
+    assert "!app/attachment_maintenance_healthcheck.py" in EXPECTED_DOCKER_ALLOW_RULES
+    assert "!app/core/attachment_maintenance_heartbeat.py" in EXPECTED_DOCKER_ALLOW_RULES
 
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "USER bot-tv" in dockerfile
@@ -387,9 +389,14 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
 
     spool_root = "/var/lib/bot-tv/attachment-spool"
     maintenance = compose["services"]["attachment-maintenance"]
-    assert maintenance["command"] == ["python", "-m", "app.attachment_maintenance"]
+    assert maintenance["command"] == [
+        "python",
+        "-B",
+        "-m",
+        "app.attachment_maintenance",
+    ]
     assert maintenance["profiles"] == ["attachment-maintenance"]
-    assert maintenance["restart"] == "on-failure"
+    assert maintenance["restart"] == "unless-stopped"
     assert maintenance["stop_grace_period"] == "60s"
     assert maintenance["depends_on"] == {
         "migrate": {"condition": "service_completed_successfully"}
@@ -400,7 +407,18 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
     assert maintenance["security_opt"] == ["no-new-privileges:true"]
     assert maintenance["tmpfs"] == ["/tmp:size=32m,mode=1777"]
     assert "ports" not in maintenance
-    assert "healthcheck" not in maintenance
+    healthcheck = maintenance["healthcheck"]
+    assert healthcheck["test"] == [
+        "CMD",
+        "python",
+        "-B",
+        "-m",
+        "app.attachment_maintenance_healthcheck",
+    ]
+    assert healthcheck["interval"] == "10s"
+    assert healthcheck["timeout"] == "5s"
+    assert healthcheck["retries"] == 3
+    assert healthcheck["start_period"] == "90s"
     assert "privileged" not in maintenance
     assert "network_mode" not in maintenance
     assert "deploy" not in maintenance
@@ -421,6 +439,9 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
     )
     assert env["ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS"] == (
         "${ATTACHMENT_MAINTENANCE_INITIAL_DELAY_SECONDS:-0}"
+    )
+    assert env["ATTACHMENT_MAINTENANCE_HEARTBEAT_STALE_SECONDS"] == (
+        "${ATTACHMENT_MAINTENANCE_HEARTBEAT_STALE_SECONDS:-180}"
     )
     assert env["ATTACHMENT_RECONCILE_BATCH_LIMIT"] == (
         "${ATTACHMENT_RECONCILE_BATCH_LIMIT:-100}"
