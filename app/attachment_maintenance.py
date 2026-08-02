@@ -1,7 +1,8 @@
 """Attachment spool maintenance process entrypoint (CURSOR-13 Stage 2A).
 
 Separate process host for AttachmentMaintenanceRunner.
-Not wired into FastAPI, WorkerRuntime, compose, or deploy.
+CURSOR-14: SUCCESS-only tmpfs heartbeat + idle-wait for disabled/startup
+configuration failures under restart: unless-stopped.
 """
 
 from __future__ import annotations
@@ -12,10 +13,14 @@ import os
 import signal
 import sys
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 
 from app.config import Settings, _parse_int_range
 from app.core.attachment_keys import EnvAttachmentKeyProvider
+from app.core.attachment_maintenance_heartbeat import (
+    write_attachment_maintenance_heartbeat,
+)
 from app.core.attachment_maintenance_types import AttachmentMaintenanceConfig
 from app.core.attachment_types import (
     MAX_TTL_SECONDS,
@@ -29,6 +34,10 @@ from app.services.attachment_spool_store import AttachmentSpoolStore
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SPOOL_TTL_SECONDS = 900
+
+# Narrow, expected startup configuration failures. Unexpected programming
+# errors must remain fatal and must not enter idle-wait.
+_KNOWN_STARTUP_ERRORS = (ValueError, AttachmentError)
 
 
 def _is_safe_scalar(value: object) -> bool:
@@ -109,6 +118,11 @@ def _install_stop_signals(stop_event: asyncio.Event) -> None:
             pass
 
 
+async def _idle_wait(stop_event: asyncio.Event) -> None:
+    """Block until stop_event without polling, heartbeat writes, or periodic logs."""
+    await stop_event.wait()
+
+
 async def _dispose_engine(engine: object) -> Exception | None:
     """Attempt dispose once. Catch only ``Exception``; return it or ``None``.
 
@@ -122,6 +136,10 @@ async def _dispose_engine(engine: object) -> Exception | None:
     return None
 
 
+def _production_heartbeat_writer(completed_at: datetime) -> None:
+    write_attachment_maintenance_heartbeat(completed_at)
+
+
 async def run_attachment_maintenance(
     settings: Settings,
     *,
@@ -129,8 +147,12 @@ async def run_attachment_maintenance(
 ) -> None:
     source = os.environ if environ is None else environ
     _log_safely(logging.INFO, "attachment_maintenance_process_starting")
+    stop_event = asyncio.Event()
+    _install_stop_signals(stop_event)
+
     if not settings.attachment_maintenance_enabled:
         _log_safely(logging.INFO, "attachment_maintenance_process_disabled")
+        await _idle_wait(stop_event)
         return
 
     engine = None
@@ -159,13 +181,29 @@ async def run_attachment_maintenance(
                     settings.attachment_maintenance_initial_delay_seconds
                 ),
             )
-            runner = AttachmentMaintenanceRunner(store=store, config=config)
-            stop_event = asyncio.Event()
-            _install_stop_signals(stop_event)
+            runner = AttachmentMaintenanceRunner(
+                store=store,
+                config=config,
+                _heartbeat_writer=_production_heartbeat_writer,
+            )
             _log_safely(logging.INFO, "attachment_maintenance_process_started")
         except asyncio.CancelledError as exc:
             primary_error = exc
             raise
+        except _KNOWN_STARTUP_ERRORS as exc:
+            _log_safely(
+                logging.ERROR,
+                "attachment_maintenance_process_startup_failed",
+                error_code=_safe_error_code(exc),
+            )
+            if engine is not None:
+                dispose_error = await _dispose_engine(engine)
+                engine = None
+                if dispose_error is not None:
+                    # Prefer the original startup configuration failure.
+                    pass
+            await _idle_wait(stop_event)
+            return
         except Exception as exc:
             primary_error = exc
             _log_safely(

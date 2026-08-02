@@ -72,9 +72,17 @@ class _FakeEngine:
 class _RecordingRunner:
     instances: list[_RecordingRunner] = []
 
-    def __init__(self, *, store: object, config: AttachmentMaintenanceConfig) -> None:
+    def __init__(
+        self,
+        *,
+        store: object,
+        config: AttachmentMaintenanceConfig,
+        _heartbeat_writer: object | None = None,
+        **_kwargs: object,
+    ) -> None:
         self.store = store
         self.config = config
+        self.heartbeat_writer = _heartbeat_writer
         self.run_forever_calls: list[asyncio.Event] = []
         self.run_result: BaseException | None = None
         _RecordingRunner.instances.append(self)
@@ -134,14 +142,23 @@ def _runner_raises(result: BaseException):
         *,
         store: object,
         config: AttachmentMaintenanceConfig,
+        _heartbeat_writer: object | None = None,
+        **_kwargs: object,
     ) -> None:
         _RecordingRunner.instances.append(self)
         self.store = store
         self.config = config
+        self.heartbeat_writer = _heartbeat_writer
         self.run_forever_calls = []
         self.run_result = result
 
     return init_fail
+
+
+async def _idle_immediate(stop_event: asyncio.Event) -> None:
+    """Test seam: record that idle-wait was entered without hanging."""
+    stop_event.set()
+    await stop_event.wait()
 
 
 @pytest.fixture(autouse=True)
@@ -349,12 +366,19 @@ async def test_disabled_exits_without_creating_dependencies(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     calls: list[str] = []
+    idle_calls: list[asyncio.Event] = []
 
     def boom(*_args: object, **_kwargs: object) -> None:
         calls.append("create_engine")
         raise AssertionError("create_engine must not be called when disabled")
 
+    async def track_idle(stop_event: asyncio.Event) -> None:
+        idle_calls.append(stop_event)
+        stop_event.set()
+        await stop_event.wait()
+
     monkeypatch.setattr(maintenance_mod, "create_engine", boom)
+    monkeypatch.setattr(maintenance_mod, "_idle_wait", track_idle)
     monkeypatch.setattr(
         maintenance_mod,
         "EnvAttachmentKeyProvider",
@@ -377,6 +401,7 @@ async def test_disabled_exits_without_creating_dependencies(
         await run_attachment_maintenance(Settings.from_env({}), environ={})
 
     assert calls == []
+    assert len(idle_calls) == 1
     events = [record.getMessage() for record in caplog.records]
     assert "attachment_maintenance_process_starting" in events
     assert "attachment_maintenance_process_disabled" in events
@@ -430,9 +455,20 @@ async def test_enabled_construction_order_and_config(
         captured["store_kwargs"] = kwargs
         return object()
 
-    def fake_runner(*, store: object, config: AttachmentMaintenanceConfig) -> _RecordingRunner:
+    def fake_runner(
+        *,
+        store: object,
+        config: AttachmentMaintenanceConfig,
+        _heartbeat_writer: object | None = None,
+        **_kwargs: object,
+    ) -> _RecordingRunner:
         order.append("runner")
-        return _RecordingRunner(store=store, config=config)
+        captured["heartbeat_writer"] = _heartbeat_writer
+        return _RecordingRunner(
+            store=store,
+            config=config,
+            _heartbeat_writer=_heartbeat_writer,
+        )
 
     monkeypatch.setattr(maintenance_mod, "create_engine", fake_create_engine)
     monkeypatch.setattr(maintenance_mod, "create_session_factory", fake_session_factory)
@@ -473,16 +509,26 @@ async def test_enabled_construction_order_and_config(
     assert captured["policy_root"] == root
     assert captured["policy_ttl"] == 450
     assert isinstance(captured["store_kwargs"]["policy"], AttachmentSpoolPolicy)
+    assert captured["heartbeat_writer"] is maintenance_mod._production_heartbeat_writer
+    assert runner.heartbeat_writer is maintenance_mod._production_heartbeat_writer
 
 
 @pytest.mark.asyncio
-async def test_missing_database_url_when_enabled_fail_fast(
+async def test_missing_database_url_when_enabled_idle_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     root = tmp_path / "spool"
     root.mkdir()
+    idle_calls: list[asyncio.Event] = []
+
+    async def track_idle(stop_event: asyncio.Event) -> None:
+        idle_calls.append(stop_event)
+        stop_event.set()
+        await stop_event.wait()
+
+    monkeypatch.setattr(maintenance_mod, "_idle_wait", track_idle)
     monkeypatch.setattr(
         maintenance_mod,
         "create_engine",
@@ -490,19 +536,22 @@ async def test_missing_database_url_when_enabled_fail_fast(
     )
     settings = Settings(attachment_maintenance_enabled=True, database_url=None)
     with caplog.at_level(logging.ERROR, logger=maintenance_mod.__name__):
-        with pytest.raises(ValueError, match="DATABASE_URL"):
-            await run_attachment_maintenance(
-                settings,
-                environ=_key_env(ATTACHMENT_SPOOL_ROOT=str(root)),
-            )
+        await run_attachment_maintenance(
+            settings,
+            environ=_key_env(ATTACHMENT_SPOOL_ROOT=str(root)),
+        )
+    assert len(idle_calls) == 1
     assert any(
         "attachment_maintenance_process_startup_failed" in r.getMessage()
         for r in caplog.records
     )
+    assert any(
+        "error_code=ValueError" in r.getMessage() for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
-async def test_missing_key_fail_fast(
+async def test_missing_key_idle_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -510,20 +559,26 @@ async def test_missing_key_fail_fast(
     root = tmp_path / "spool"
     root.mkdir()
     created: list[str] = []
+    idle_calls: list[asyncio.Event] = []
 
     def track_engine(*_a: object, **_k: object) -> None:
         created.append("engine")
         raise AssertionError("engine must not be created before key probe")
 
+    async def track_idle(stop_event: asyncio.Event) -> None:
+        idle_calls.append(stop_event)
+        stop_event.set()
+        await stop_event.wait()
+
     monkeypatch.setattr(maintenance_mod, "create_engine", track_engine)
+    monkeypatch.setattr(maintenance_mod, "_idle_wait", track_idle)
     with caplog.at_level(logging.ERROR, logger=maintenance_mod.__name__):
-        with pytest.raises(AttachmentError) as raised:
-            await run_attachment_maintenance(
-                _enabled_settings(),
-                environ={"ATTACHMENT_SPOOL_ROOT": str(root)},
-            )
-    assert raised.value.code == "ATTACHMENT_KEY_UNAVAILABLE"
+        await run_attachment_maintenance(
+            _enabled_settings(),
+            environ={"ATTACHMENT_SPOOL_ROOT": str(root)},
+        )
     assert created == []
+    assert len(idle_calls) == 1
     blob = " ".join(r.getMessage() for r in caplog.records)
     assert "attachment_maintenance_process_startup_failed" in blob
     assert "error_code=ATTACHMENT_KEY_UNAVAILABLE" in blob
@@ -536,27 +591,34 @@ async def test_missing_key_fail_fast(
 
 
 @pytest.mark.asyncio
-async def test_invalid_key_fail_fast(
+async def test_invalid_key_idle_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "spool"
     root.mkdir()
+    idle_calls: list[asyncio.Event] = []
+
+    async def track_idle(stop_event: asyncio.Event) -> None:
+        idle_calls.append(stop_event)
+        stop_event.set()
+        await stop_event.wait()
+
+    monkeypatch.setattr(maintenance_mod, "_idle_wait", track_idle)
     monkeypatch.setattr(
         maintenance_mod,
         "create_engine",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("engine")),
     )
-    with pytest.raises(AttachmentError) as raised:
-        await run_attachment_maintenance(
-            _enabled_settings(),
-            environ={
-                "ATTACHMENT_SPOOL_ROOT": str(root),
-                "ATTACHMENT_SPOOL_ACTIVE_KEY_ID": "ATTK1",
-                "ATTACHMENT_SPOOL_KEY_ATTK1": "not-valid-key-material!!!",
-            },
-        )
-    assert raised.value.code == "ATTACHMENT_CONFIG_INVALID"
+    await run_attachment_maintenance(
+        _enabled_settings(),
+        environ={
+            "ATTACHMENT_SPOOL_ROOT": str(root),
+            "ATTACHMENT_SPOOL_ACTIVE_KEY_ID": "ATTK1",
+            "ATTACHMENT_SPOOL_KEY_ATTK1": "not-valid-key-material!!!",
+        },
+    )
+    assert len(idle_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -804,7 +866,12 @@ async def test_dispose_after_runner_constructor_failure(
     monkeypatch.setattr(maintenance_mod, "create_engine", lambda _s: engine)
     monkeypatch.setattr(maintenance_mod, "create_session_factory", lambda _e: object())
 
-    def fail_runner(*, store: object, config: AttachmentMaintenanceConfig) -> object:
+    def fail_runner(
+        *,
+        store: object,
+        config: AttachmentMaintenanceConfig,
+        **_kwargs: object,
+    ) -> object:
         raise RuntimeError("runner_ctor_secret")
 
     monkeypatch.setattr(maintenance_mod, "AttachmentMaintenanceRunner", fail_runner)
@@ -1105,7 +1172,7 @@ async def test_default_ttl_applied_in_policy(
 
 
 @pytest.mark.asyncio
-async def test_store_constructor_failure_disposes_and_startup_failed(
+async def test_store_constructor_failure_disposes_and_idle_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -1116,14 +1183,26 @@ async def test_store_constructor_failure_disposes_and_startup_failed(
     token_sentinel = "lease-token-sentinel-n5-xyz"
     engine = _FakeEngine()
     runner_created = {"n": 0}
+    idle_calls: list[asyncio.Event] = []
+
+    async def track_idle(stop_event: asyncio.Event) -> None:
+        idle_calls.append(stop_event)
+        stop_event.set()
+        await stop_event.wait()
 
     monkeypatch.setattr(maintenance_mod, "create_engine", lambda _s: engine)
     monkeypatch.setattr(maintenance_mod, "create_session_factory", lambda _e: object())
+    monkeypatch.setattr(maintenance_mod, "_idle_wait", track_idle)
 
     def fail_store(**_kwargs: object) -> object:
         raise ValueError(store_msg)
 
-    def tracking_runner(*, store: object, config: AttachmentMaintenanceConfig) -> object:
+    def tracking_runner(
+        *,
+        store: object,
+        config: AttachmentMaintenanceConfig,
+        **_kwargs: object,
+    ) -> object:
         runner_created["n"] += 1
         raise AssertionError("runner must not be constructed")
 
@@ -1131,13 +1210,13 @@ async def test_store_constructor_failure_disposes_and_startup_failed(
     monkeypatch.setattr(maintenance_mod, "AttachmentMaintenanceRunner", tracking_runner)
 
     with caplog.at_level(logging.INFO, logger=maintenance_mod.__name__):
-        with pytest.raises(ValueError, match=store_msg):
-            await run_attachment_maintenance(
-                _enabled_settings(),
-                environ=_key_env(ATTACHMENT_SPOOL_ROOT=str(root)),
-            )
+        await run_attachment_maintenance(
+            _enabled_settings(),
+            environ=_key_env(ATTACHMENT_SPOOL_ROOT=str(root)),
+        )
     messages = _messages(caplog)
     assert runner_created["n"] == 0
+    assert len(idle_calls) == 1
     assert engine.dispose_calls == 1
     assert _count_event(messages, "attachment_maintenance_process_startup_failed") == 1
     assert _count_event(messages, "attachment_maintenance_process_fatal") == 0
@@ -1305,8 +1384,16 @@ async def test_startup_primary_plus_dispose_failure_preserves_primary(
     primary = "startup_store_valueerror_sentinel"
     secondary = "startup_dispose_runtime_sentinel"
     engine = _FakeEngine(dispose_error=RuntimeError(secondary))
+    idle_calls: list[asyncio.Event] = []
+
+    async def track_idle(stop_event: asyncio.Event) -> None:
+        idle_calls.append(stop_event)
+        stop_event.set()
+        await stop_event.wait()
+
     monkeypatch.setattr(maintenance_mod, "create_engine", lambda _s: engine)
     monkeypatch.setattr(maintenance_mod, "create_session_factory", lambda _e: object())
+    monkeypatch.setattr(maintenance_mod, "_idle_wait", track_idle)
 
     def fail_store(**_kwargs: object) -> object:
         raise ValueError(primary)
@@ -1319,14 +1406,21 @@ async def test_startup_primary_plus_dispose_failure_preserves_primary(
     )
 
     with caplog.at_level(logging.INFO, logger=maintenance_mod.__name__):
-        with pytest.raises(ValueError, match=primary):
-            await run_attachment_maintenance(
-                _enabled_settings(),
-                environ=_key_env(ATTACHMENT_SPOOL_ROOT=str(root)),
-            )
+        await run_attachment_maintenance(
+            _enabled_settings(),
+            environ=_key_env(ATTACHMENT_SPOOL_ROOT=str(root)),
+        )
     messages = _messages(caplog)
+    assert len(idle_calls) == 1
     assert engine.dispose_calls == 1
     assert _count_event(messages, "attachment_maintenance_process_startup_failed") == 1
     assert _count_event(messages, "attachment_maintenance_process_fatal") == 0
+    assert any(
+        msg.startswith("attachment_maintenance_process_startup_failed")
+        and "error_code=ValueError" in msg
+        for msg in messages
+    )
+    assert not any("error_code=RuntimeError" in msg for msg in messages)
+    _assert_no_secrets(" ".join(messages), root=root, extra=(primary, secondary))
     assert _count_event(messages, "attachment_maintenance_process_stopped") == 0
     _assert_no_secrets(" ".join(messages), root=root, extra=(primary, secondary))

@@ -31,6 +31,7 @@ _ALREADY_RUNNING = "ATTACHMENT_MAINTENANCE_ALREADY_RUNNING"
 
 Waiter = Callable[..., Awaitable[bool]]
 NowFn = Callable[[], datetime]
+HeartbeatWriter = Callable[[datetime], None]
 
 
 def _default_utc_now() -> datetime:
@@ -69,6 +70,7 @@ class AttachmentMaintenanceRunner:
         _waiter: Waiter | None = None,
         _now_fn: NowFn | None = None,
         _logger: logging.Logger | None = None,
+        _heartbeat_writer: HeartbeatWriter | None = None,
     ) -> None:
         if not isinstance(config, AttachmentMaintenanceConfig):
             raise TypeError("config must be AttachmentMaintenanceConfig")
@@ -77,6 +79,7 @@ class AttachmentMaintenanceRunner:
         self._waiter: Waiter = _default_waiter if _waiter is None else _waiter
         self._now_fn: NowFn = _default_utc_now if _now_fn is None else _now_fn
         self._logger = logger if _logger is None else _logger
+        self._heartbeat_writer = _heartbeat_writer
         self._cycle_lock = asyncio.Lock()
         self._loop_active = False
         self._status = idle_maintenance_status()
@@ -238,12 +241,34 @@ class AttachmentMaintenanceRunner:
             purge_error_code=purge_error_code,
         )
         self._finish_result_cycle(result, started_at=started_at)
+        if result.status is AttachmentMaintenanceCycleStatus.SUCCESS:
+            self._write_heartbeat_best_effort()
         self._log_safely(
             logging.INFO,
             "attachment_maintenance_cycle_completed",
             status=result.status.value,
         )
         return result
+
+    def _write_heartbeat_best_effort(self) -> None:
+        writer = self._heartbeat_writer
+        if writer is None:
+            return
+        completed_at = self._status.last_success_at
+        if completed_at is None:
+            return
+        try:
+            writer(completed_at)
+        except Exception as exc:
+            code = type(exc).__name__
+            code_attr = getattr(exc, "code", None)
+            if type(code_attr) is str and code_attr != "":
+                code = code_attr
+            self._log_safely(
+                logging.WARNING,
+                "attachment_maintenance_heartbeat_write_failed",
+                error_code=code,
+            )
 
     def _build_cycle_result(
         self,
