@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted — Stage 1 library-only and Stage 2A process wiring scopes.
+Accepted — Stage 1 library-only, Stage 2A process wiring, Stage 2B PostgreSQL
+integration tests, and Stage 3A default-off Compose service wiring.
 
 ## Context
 
@@ -184,24 +185,67 @@ Rules:
 - Docker runtime allowlist includes the entrypoint and Stage 1 maintenance
   modules; **no** Compose service, volume, or healthcheck.
 
-### Stage 2B (not implemented)
+### Stage 2B — PostgreSQL integration tests (accepted)
 
 - Isolated real-PostgreSQL integration tests for the process construction path
   (safe `BOT_TV_TEST_DATABASE_URL` only).
 
-### Stage 3 (not implemented)
+### Stage 3A — Compose wiring (accepted, default-off)
 
-- Compose service, shared spool volume, container healthcheck, production env,
-  operational monitoring, rollout, and deploy — require explicit owner approval.
+- Compose service `attachment-maintenance` with command
+  `python -m app.attachment_maintenance`.
+- Activation uses Compose profile `attachment-maintenance`. Default
+  `docker compose up -d` does **not** start the service.
+- Second independent gate: `ATTACHMENT_MAINTENANCE_ENABLED` remains default
+  `false` in Compose; enabling requires an explicit deployment env change.
+- `restart: on-failure` (not `unless-stopped` / `always`) so a clean disabled
+  exit `0` cannot create a restart loop.
+- `stop_grace_period: 60s`. SIGTERM only sets `stop_event`; an in-flight cycle
+  is not cancelled. There is no hard cycle duration bound; after grace Docker
+  may SIGKILL. Durable `WRITING` / `DELETE_PENDING` reconciliation recovers the
+  crash window. 60s is an operational allowance, not an absolute guarantee.
+- No container `healthcheck`. Docker tracks PID 1; a decorative
+  import/process-presence probe would not add a useful guarantee. Progress is
+  observed through structured process/runner logs. A future heartbeat/status
+  mechanism would be a separate stage.
+- One operational replica only. Do not `--scale attachment-maintenance=N`.
+  Brief overlap remains correctness-safe via row-level `FOR UPDATE SKIP LOCKED`;
+  that is not a recommendation for permanent multi-replica operation.
+- Named volume `attachment-spool` mounted read-write only on
+  `attachment-maintenance` at `/var/lib/bot-tv/attachment-spool`, matching
+  `ATTACHMENT_SPOOL_ROOT`. Stage 3A does **not** mount the volume on `api` or
+  `worker` while they do not use `AttachmentSpoolStore`.
+- Shared-spool invariant for any future producer/consumer: same named volume,
+  same container path, same database, and a compatible keyring.
+- Attachment keyring is **not** listed in Compose `environment`. Keys arrive
+  only from an external host-local `env_file` (Compose >= 2.24.0,
+  `required: false`):
+  path `${ATTACHMENT_SPOOL_KEYS_ENV_FILE:-/etc/bot-tv/attachment-spool-keys.env}`.
+  The file must contain `ATTACHMENT_SPOOL_ACTIVE_KEY_ID`, the active
+  `ATTACHMENT_SPOOL_KEY_<ID>`, and every older `ATTACHMENT_SPOOL_KEY_<ID>` still
+  required to decrypt existing spool objects. The file stays outside Git; do
+  not print rendered Compose environment or the file contents.
+- Stage 3A does **not** activate staging/production. Server rollout remains
+  Stage 3B/3C with separate owner authorization.
+
+### Stage 3B/3C (not implemented)
+
+- Staging/production rollout, runtime verification, ownership/permissions
+  preflight for volume user `bot-tv`, Compose >= 2.24.0 on the host, and
+  controlled enablement of profile + `ATTACHMENT_MAINTENANCE_ENABLED=true`.
 
 ## Consequences
 
 - Domain lifecycle rules remain unchanged; Stage 1 only adds an execution
   mechanism; Stage 2A adds a safe opt-in process host that stays off by default.
-- ADR 013 “operators schedule externally” remains true until Stage 3 wiring.
+- Stage 3A makes Compose wiring available behind a profile while keeping the
+  process fail-closed until operators intentionally enable it.
+- ADR 013 “operators schedule externally” remains true until an authorized
+  Stage 3B/3C rollout starts the profiled service with enablement set.
 - Residual risk: graceful stop may wait on a long active reconcile/purge cycle.
 
 ## Non-claims
 
-This ADR does **not** activate production maintenance, shared spool volume
-wiring, Compose scheduling, or automatic deploy.
+This ADR does **not** activate production or staging maintenance, grant
+`api`/`worker` spool mounts, add a maintenance healthcheck/heartbeat, or
+change `EnvAttachmentKeyProvider` / crypto transport.

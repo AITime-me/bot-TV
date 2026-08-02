@@ -202,8 +202,33 @@ jobs:
           test "$EMERGENCY_LOCK" = "true"
           echo "BOT_MODE=OFF and EMERGENCY_LOCK=true confirmed"
 
+      - name: Assert Docker Compose version supports optional env_file
+        run: |
+          set -euo pipefail
+          version="$(docker compose version --short)"
+          export COMPOSE_VERSION="$version"
+          python3 - <<'PY'
+          import os
+          import re
+
+          raw = os.environ["COMPOSE_VERSION"]
+          match = re.match(r"^(\d+)\.(\d+)\.(\d+)", raw)
+          if match is None:
+              raise SystemExit(f"unrecognized docker compose version: {raw!r}")
+          parsed = tuple(int(part) for part in match.groups())
+          if parsed < (2, 24, 0):
+              raise SystemExit(
+                  f"docker compose {raw!r} is below required 2.24.0 "
+                  "(optional env_file.required=false)"
+              )
+          print(f"docker compose {raw} meets >=2.24.0")
+          PY
+
       - name: Validate Docker Compose configuration
-        run: docker compose config --quiet
+        run: |
+          set -euo pipefail
+          docker compose config --quiet
+          docker compose --profile attachment-maintenance config --quiet
 
       - name: Assert rendered compose safety defaults
         run: |
@@ -244,10 +269,15 @@ jobs:
                       f"{service_name}: EMERGENCY_LOCK={emergency_lock!r}, expected true"
                   )
               print(f"{service_name}: BOT_MODE=OFF EMERGENCY_LOCK=true OK")
+          if "attachment-maintenance" in config["services"]:
+              raise SystemExit(
+                  "attachment-maintenance must stay profile-gated in default config"
+              )
+          print("default config omits attachment-maintenance OK")
           PY
 
       - name: Build Docker images
-        run: docker compose build --pull migrate api worker
+        run: docker compose build --pull migrate api worker attachment-maintenance
 
       - name: Verify built images exist
         run: |
@@ -259,7 +289,7 @@ jobs:
           fi
           unique_count="$(printf '%s\n' "${images[@]}" | sort -u | wc -l)"
           if [ "${unique_count}" -ne 3 ]; then
-            echo "Expected exactly 3 unique images, got ${unique_count}:"
+            echo "Expected exactly 3 unique default-profile images, got ${unique_count}:"
             printf '%s\n' "${images[@]}" | sort -u
             exit 1
           fi
@@ -270,6 +300,21 @@ jobs:
             fi
             echo "Verified image: ${image}"
           done
+          mapfile -t profile_images < <(
+            docker compose --profile attachment-maintenance config --images
+          )
+          profile_unique="$(printf '%s\n' "${profile_images[@]}" | sort -u | wc -l)"
+          if [ "${profile_unique}" -ne 4 ]; then
+            echo "Expected exactly 4 unique profile images, got ${profile_unique}"
+            exit 1
+          fi
+          for image in "${profile_images[@]}"; do
+            if ! docker image inspect "${image}" >/dev/null; then
+              echo "Missing local profile image: ${image}"
+              exit 1
+            fi
+          done
+          echo "Verified attachment-maintenance profile image set"
 
   pr-gate:
     name: PR Gate
