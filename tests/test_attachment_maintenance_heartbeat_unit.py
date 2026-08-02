@@ -257,6 +257,27 @@ def test_symlink_read_rejected(tmp_path: Path) -> None:
     assert raised.value.code == HEARTBEAT_SYMLINK
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize(
+    "payload_template",
+    [
+        '{{"v":1,"completed_at":{constant}}}\n',
+        '{{"v":{constant},"completed_at":"2026-08-02T17:24:06.123456+00:00"}}\n',
+    ],
+)
+def test_nonstandard_json_constants_rejected(
+    tmp_path: Path,
+    constant: str,
+    payload_template: str,
+) -> None:
+    """Production parse_constant must reject NaN/Infinity fail-closed."""
+    path = tmp_path / "hb.json"
+    _write_raw(path, payload_template.format(constant=constant).encode("utf-8"))
+    with pytest.raises(HeartbeatError) as raised:
+        read_and_validate_heartbeat(path=path, now=_T0)
+    assert raised.value.code == HEARTBEAT_MALFORMED
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

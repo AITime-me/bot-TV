@@ -152,7 +152,7 @@ Rules:
 
 ### Stage 2A — process wiring (accepted)
 
-- Separate process entrypoint: `python -m app.attachment_maintenance`
+- Separate process entrypoint: `python -B -m app.attachment_maintenance`
   (`app/attachment_maintenance.py`). **Not** a sixth `WorkerRuntime` loop and
   **not** FastAPI lifespan / `app/main.py`.
 - Fail-closed `ATTACHMENT_MAINTENANCE_ENABLED=false` by default (Settings).
@@ -196,7 +196,7 @@ Rules:
 ### Stage 3A — Compose wiring (accepted, default-off)
 
 - Compose service `attachment-maintenance` with command
-  `python -m app.attachment_maintenance`.
+  `python -B -m app.attachment_maintenance`.
 - Activation uses Compose profile `attachment-maintenance`. Default
   `docker compose up -d` does **not** start the service.
 - Second independent gate: `ATTACHMENT_MAINTENANCE_ENABLED` remains default

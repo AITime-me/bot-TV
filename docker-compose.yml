@@ -82,7 +82,7 @@ services:
   attachment-maintenance:
     build:
       context: .
-    command: ["python", "-m", "app.attachment_maintenance"]
+    command: ["python", "-B", "-m", "app.attachment_maintenance"]
     profiles: ["attachment-maintenance"]
     environment:
       <<: *runtime-environment

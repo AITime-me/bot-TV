@@ -1278,6 +1278,20 @@ async def test_success_writes_heartbeat_once_with_finish_timestamp(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_does_not_write_heartbeat() -> None:
+    writes: list[datetime] = []
+    store = _FakeStore()
+    store.reconcile_result = asyncio.CancelledError()
+    runner, store, _, _ = _runner(store, heartbeat_writer=writes.append)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(runner.run_once(), timeout=_TEST_TIMEOUT)
+    assert store.purge_calls == 0
+    assert runner.status.last_cycle_status is AttachmentMaintenanceCycleStatus.CANCELLED
+    assert runner.status.last_success_at is None
+    assert writes == []
+
+
+@pytest.mark.asyncio
 async def test_partial_does_not_write_heartbeat() -> None:
     writes: list[datetime] = []
     store = _FakeStore()

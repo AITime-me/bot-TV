@@ -389,7 +389,12 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
 
     spool_root = "/var/lib/bot-tv/attachment-spool"
     maintenance = compose["services"]["attachment-maintenance"]
-    assert maintenance["command"] == ["python", "-m", "app.attachment_maintenance"]
+    assert maintenance["command"] == [
+        "python",
+        "-B",
+        "-m",
+        "app.attachment_maintenance",
+    ]
     assert maintenance["profiles"] == ["attachment-maintenance"]
     assert maintenance["restart"] == "unless-stopped"
     assert maintenance["stop_grace_period"] == "60s"
