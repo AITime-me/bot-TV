@@ -1,20 +1,21 @@
-# ADR-015: Booking eligibility S2S contract (CURSOR-17)
+# ADR-015: Booking eligibility S2S contract (CURSOR-17) + consumer boundary (CURSOR-19)
 
 ## Status
 
-Accepted for CURSOR-17. Source of truth: `online-zapis-tv` PR A implementation
-(`POST /api/internal/bot/v1/eligibility`), not ecosystem backlog docs that still
-say `NOT DONE`.
+Accepted for CURSOR-17 (S2S contract) and extended by CURSOR-19 (application
+consumer boundary). Source of truth for the wire contract: `online-zapis-tv`
+PR A (`POST /api/internal/bot/v1/eligibility`), not ecosystem backlog docs that
+still say `NOT DONE`.
 
 ## Context
 
-`bot-TV` ships an HTTP adapter and config/DI for booking eligibility without
-wiring it into dialog/worker/outbound yet. The adapter must match the real
-backend contract before any call path is enabled.
+`bot-TV` ships an HTTP adapter, config/DI, an eligibility→policy orchestrator,
+and a booking consumer boundary without wiring that consumer into live
+channels, inbound, worker, or outbound yet.
 
 ## Decision
 
-Lock the client to this contract:
+### Wire contract (CURSOR-17)
 
 | Item | Value |
 |---|---|
@@ -30,8 +31,23 @@ Lock the client to this contract:
 | Retry / idempotency | No client retries; no `Idempotency-Key` (read/eval endpoint) |
 | Timeout | Client default 5s (local policy; backend does not prescribe) |
 
+### Application boundary (CURSOR-19)
+
+- `BookingFlowService` is the sole prepared application boundary for self-booking
+  decisions. It is composed in `create_app` and published only as
+  `application.state.booking_flow`.
+- Raw eligibility HTTP client and `BookingEligibilityFlowService` are built
+  locally inside `create_app` and are **not** exposed on `application.state`.
+- `create_app(..., booking_flow=None)` normalizes to
+  `BookingFlowService(None)` (fail-closed); `state.booking_flow` is never `None`.
+- Dialog policy (`decide_booking_dialog`) may be called only from
+  `BookingEligibilityFlowService`. Future application callers must not import
+  policy or eligibility flow in bypass of `BookingFlowService`.
+- Channel / inbound / worker / outbound wiring remains a **separate next gate**.
+
 ## Consequences
 
 - Changing reason codes, path, or auth on the backend requires a coordinated
   contract update and failing unit/contract tests here.
-- Enabling dialog/worker wiring is a separate gate after this contract lock.
+- Enabling live channel wiring must inject/use `BookingFlowService` (via DI),
+  not call dialog policy or eligibility flow directly.

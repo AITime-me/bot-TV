@@ -17,10 +17,12 @@ from app.core.outbound_policy import (
 )
 from app.db.session import create_engine, create_session_factory
 from app.services.booking_eligibility_flow import BookingEligibilityFlowService
+from app.services.booking_flow import BookingFlowService
 from app.services.worker_health import WorkerHealthService
 
 _BOOKING_ELIGIBILITY_CLIENT_UNSET: Final[object] = object()
 _BOOKING_ELIGIBILITY_FLOW_UNSET: Final[object] = object()
+_BOOKING_FLOW_UNSET: Final[object] = object()
 
 
 def create_app(
@@ -33,7 +35,16 @@ def create_app(
     booking_eligibility_flow: BookingEligibilityFlowService
     | None
     | object = _BOOKING_ELIGIBILITY_FLOW_UNSET,
+    booking_flow: BookingFlowService | None | object = _BOOKING_FLOW_UNSET,
 ) -> FastAPI:
+    """Compose the API app.
+
+    Lower booking dependencies (HTTP client, eligibility flow) are built locally
+    for ``BookingFlowService`` only. ``application.state`` exposes ``booking_flow``
+    alone — the prepared application boundary for a future channel-wiring gate.
+    Raw eligibility client/flow are not published on ``app.state``.
+    """
+
     loaded_settings = settings if settings is not None else Settings.from_env()
     engine: AsyncEngine | None = None
     health_service = worker_health_service
@@ -45,19 +56,29 @@ def create_app(
             tick_timeout_seconds=loaded_settings.worker_tick_timeout_seconds,
         )
 
-    if booking_eligibility_client is _BOOKING_ELIGIBILITY_CLIENT_UNSET:
-        resolved_eligibility_client = build_booking_eligibility_client(
-            loaded_settings
-        )
-    else:
-        resolved_eligibility_client = booking_eligibility_client
+    if booking_flow is _BOOKING_FLOW_UNSET:
+        if booking_eligibility_client is _BOOKING_ELIGIBILITY_CLIENT_UNSET:
+            resolved_eligibility_client = build_booking_eligibility_client(
+                loaded_settings
+            )
+        else:
+            resolved_eligibility_client = booking_eligibility_client
 
-    if booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET:
-        resolved_eligibility_flow = BookingEligibilityFlowService(
-            resolved_eligibility_client  # type: ignore[arg-type]
+        if booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET:
+            resolved_eligibility_flow = BookingEligibilityFlowService(
+                resolved_eligibility_client  # type: ignore[arg-type]
+            )
+        else:
+            resolved_eligibility_flow = booking_eligibility_flow
+
+        resolved_booking_flow = BookingFlowService(
+            resolved_eligibility_flow  # type: ignore[arg-type]
         )
+    elif booking_flow is None:
+        # Never publish None: fail-closed consumer with unset eligibility flow.
+        resolved_booking_flow = BookingFlowService(None)
     else:
-        resolved_eligibility_flow = booking_eligibility_flow
+        resolved_booking_flow = booking_flow
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -68,8 +89,7 @@ def create_app(
                 await engine.dispose()
 
     application = FastAPI(lifespan=lifespan)
-    application.state.booking_eligibility_client = resolved_eligibility_client
-    application.state.booking_eligibility_flow = resolved_eligibility_flow
+    application.state.booking_flow = resolved_booking_flow
 
     @application.get("/health")
     def health() -> dict[str, str]:

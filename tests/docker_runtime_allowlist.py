@@ -99,6 +99,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/attachment_spool_store.py",
     "!app/services/attachment_maintenance.py",
     "!app/services/booking_eligibility_flow.py",
+    "!app/services/booking_flow.py",
     "!app/services/handoff_expiry.py",
     "!app/services/inbound.py",
     "!app/services/ingress.py",
