@@ -18,7 +18,6 @@ from app.models.outbox import DestinationType, OutboxMessage
 from app.models.reply_plan import (
     BOT_RESPONSE_DELAY_MS,
     ReplyPlan,
-    ReplyPlanType,
 )
 from app.repositories import conversations as conversation_repo
 from app.repositories import messages as message_repo
@@ -26,6 +25,7 @@ from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.schemas.inbound import SyntheticInboundEvent
 from app.services.amocrm_mirror import enqueue_client_message_received
+from app.services.booking_synthetic import client_reply_plan_payload
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,10 @@ class InboundAcceptResult:
 class InboundService:
     """Persist synthetic inbound events and advance reply orchestration.
 
-    No AI, booking, or client send. INTERNAL_DRAFT remains a manager-hint
-    artifact; CLIENT_REPLY ReplyPlan is the orchestration unit for 01C.
+    Optional typed ``booking`` fixtures are copied into CLIENT_REPLY payloads
+    only (never inferred from text). No AI, live booking HTTP, or client send.
+    INTERNAL_DRAFT remains a manager-hint artifact; CLIENT_REPLY ReplyPlan is
+    the orchestration unit for 01C / CURSOR-20.
     """
 
     def __init__(
@@ -143,12 +145,10 @@ class InboundService:
                     delay_ms=BOT_RESPONSE_DELAY_MS,
                     manager_epoch=conversation.manager_epoch,
                     event_seq_hwm=conversation.current_event_seq,
-                    payload_json={
-                        "schema": "synthetic.reply_plan.v1",
-                        "plan_type": ReplyPlanType.CLIENT_REPLY.value,
-                        "synthetic_token": "SYNTHETIC_OK",
-                        "inbox_id": str(inbox.id),
-                    },
+                    payload_json=client_reply_plan_payload(
+                        inbox_id=str(inbox.id),
+                        booking=event.booking,
+                    ),
                 )
                 conversation.active_reply_plan_id = reply_plan.id
                 await self._session.flush()
@@ -182,13 +182,11 @@ class InboundService:
                     now=moment,
                     manager_epoch=conversation.manager_epoch,
                     event_seq_hwm=conversation.current_event_seq,
-                    payload_json={
-                        "schema": "synthetic.reply_plan.v1",
-                        "plan_type": ReplyPlanType.CLIENT_REPLY.value,
-                        "synthetic_token": "SYNTHETIC_OK",
-                        "inbox_id": str(inbox.id),
-                        "deferred_for_handoff": True,
-                    },
+                    payload_json=client_reply_plan_payload(
+                        inbox_id=str(inbox.id),
+                        booking=event.booking,
+                        deferred_for_handoff=True,
+                    ),
                 )
                 conversation.active_reply_plan_id = reply_plan.id
                 await self._session.flush()

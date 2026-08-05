@@ -362,6 +362,8 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/core/booking_eligibility_factory.py",
         "!app/services/booking_eligibility_flow.py",
         "!app/services/booking_flow.py",
+        "!app/services/booking_synthetic.py",
+        "!app/schemas/booking_input.py",
     ):
         assert required in EXPECTED_DOCKER_ALLOW_RULES
         assert required in allow_rules

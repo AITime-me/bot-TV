@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 from app.models.ingress import IngressEventType
+from app.schemas.booking_input import SyntheticBookingInput
 
 
 class SyntheticIngressEvent(BaseModel):
@@ -15,7 +16,8 @@ class SyntheticIngressEvent(BaseModel):
 
     extra="forbid" rejects PII-shaped fields (phone, email, token, signature).
     Text is kept only for downstream foundation persistence; it must never be
-    logged, repr'd, or placed in exception messages.
+    logged, repr'd, or placed in exception messages. Optional ``booking`` is a
+    typed fixture only — never derived from free-form text.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -26,6 +28,7 @@ class SyntheticIngressEvent(BaseModel):
     event_type: Literal["SYNTHETIC_MESSAGE"] = IngressEventType.SYNTHETIC_MESSAGE.value
     text: str = Field(min_length=1, max_length=2000, repr=False)
     correlation_id: uuid.UUID | None = None
+    booking: SyntheticBookingInput | None = None
 
     @field_validator("external_event_id", "external_conversation_id")
     @classmethod
@@ -52,11 +55,14 @@ class SyntheticIngressEvent(BaseModel):
 
         Never use for logs, repr, diagnostics, or exception messages.
         """
-        return {
+        envelope: dict[str, Any] = {
             "schema": "synthetic.ingress.v1",
             "event_type": self.event_type,
             "text": self.text,
         }
+        if self.booking is not None:
+            envelope["booking"] = self.booking.wire_dict()
+        return envelope
 
     def redacted_view(self) -> dict[str, Any]:
         """Safe projection for logs, repr, and assertion diagnostics."""
@@ -77,6 +83,7 @@ class SyntheticIngressEvent(BaseModel):
                 else None
             ),
             "text": "<redacted>",
+            "booking_present": self.booking is not None,
         }
 
     def __repr__(self) -> str:

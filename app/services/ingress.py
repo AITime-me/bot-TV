@@ -16,6 +16,7 @@ from app.repositories.ingress import (
     IngressClaim,
     StaleIngressLeaseError,
 )
+from app.schemas.booking_input import SyntheticBookingInput
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.ingress import SyntheticIngressEvent
 from app.services.inbound import InboundService
@@ -195,6 +196,13 @@ def _envelope_to_inbound(claim: IngressClaim) -> SyntheticInboundEvent:
     text = envelope.get("text")
     if not isinstance(text, str) or not text:
         raise ValueError("INGRESS_ENVELOPE_INVALID")
+    booking_raw = envelope.get("booking")
+    booking = None
+    if booking_raw is not None:
+        try:
+            booking = SyntheticBookingInput.model_validate(booking_raw)
+        except Exception as exc:
+            raise ValueError("INGRESS_BOOKING_INVALID") from exc
     # external_message_id reuses the durable provider event id so inbox
     # uniqueness aligns with ingress uniqueness for synthetic traffic.
     return SyntheticInboundEvent(
@@ -202,6 +210,7 @@ def _envelope_to_inbound(claim: IngressClaim) -> SyntheticInboundEvent:
         external_conversation_id=claim.external_conversation_id,
         external_message_id=claim.external_event_id,
         text=text,
+        booking=booking,
     )
 
 
