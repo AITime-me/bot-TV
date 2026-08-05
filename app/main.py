@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Final
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
+from app.core.booking_eligibility_factory import build_booking_eligibility_client
+from app.core.booking_eligibility_http import BookingEligibilityHttpClient
 from app.core.outbound_policy import (
     OutboundAction,
     is_automatic_outbound_allowed,
@@ -15,11 +18,16 @@ from app.core.outbound_policy import (
 from app.db.session import create_engine, create_session_factory
 from app.services.worker_health import WorkerHealthService
 
+_BOOKING_ELIGIBILITY_CLIENT_UNSET: Final[object] = object()
+
 
 def create_app(
     settings: Settings | None = None,
     *,
     worker_health_service: WorkerHealthService | None = None,
+    booking_eligibility_client: BookingEligibilityHttpClient
+    | None
+    | object = _BOOKING_ELIGIBILITY_CLIENT_UNSET,
 ) -> FastAPI:
     loaded_settings = settings if settings is not None else Settings.from_env()
     engine: AsyncEngine | None = None
@@ -32,6 +40,13 @@ def create_app(
             tick_timeout_seconds=loaded_settings.worker_tick_timeout_seconds,
         )
 
+    if booking_eligibility_client is _BOOKING_ELIGIBILITY_CLIENT_UNSET:
+        resolved_eligibility_client = build_booking_eligibility_client(
+            loaded_settings
+        )
+    else:
+        resolved_eligibility_client = booking_eligibility_client
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
@@ -41,6 +56,7 @@ def create_app(
                 await engine.dispose()
 
     application = FastAPI(lifespan=lifespan)
+    application.state.booking_eligibility_client = resolved_eligibility_client
 
     @application.get("/health")
     def health() -> dict[str, str]:
