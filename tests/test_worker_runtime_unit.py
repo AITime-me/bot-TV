@@ -360,6 +360,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/core/s2s_http_transport.py",
         "!app/core/s2s_http_stdlib.py",
         "!app/core/booking_eligibility_factory.py",
+        "!app/services/booking_eligibility_flow.py",
     ):
         assert required in EXPECTED_DOCKER_ALLOW_RULES
         assert required in allow_rules
