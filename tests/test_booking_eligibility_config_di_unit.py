@@ -36,6 +36,7 @@ from app.core.s2s_http_transport import (
 )
 from app.main import create_app
 from app.services.booking_eligibility_flow import BookingEligibilityFlowService
+from app.services.booking_flow import BookingFlowService
 
 _VALID_URL = "https://eligibility.example"
 _SECRET_URL = "https://internal-s2s.prod.example"
@@ -367,27 +368,44 @@ def test_factory_does_not_log_url_or_token(caplog: pytest.LogCaptureFixture) -> 
 
 
 # ---------------------------------------------------------------------------
-# Startup DI
+# Startup DI — only booking_flow is published on application.state
 # ---------------------------------------------------------------------------
 
 
-def test_create_app_auto_builds_eligibility_client() -> None:
+def test_create_app_auto_builds_booking_flow_only_on_state() -> None:
     settings = Settings.from_env(_full_env())
     application = create_app(settings)
-    client = application.state.booking_eligibility_client
-    assert isinstance(client, BookingEligibilityHttpClient)
-    assert isinstance(client._transport, S2sHttpStdlibTransport)  # noqa: SLF001
-    flow = application.state.booking_eligibility_flow
-    assert isinstance(flow, BookingEligibilityFlowService)
-    assert flow._client is client  # noqa: SLF001
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert not hasattr(application.state, "booking_eligibility_client")
+    assert not hasattr(application.state, "booking_eligibility_flow")
+    inner = booking._eligibility_flow  # noqa: SLF001
+    assert isinstance(inner, BookingEligibilityFlowService)
+    assert isinstance(inner._client, BookingEligibilityHttpClient)  # noqa: SLF001
+    assert isinstance(inner._client._transport, S2sHttpStdlibTransport)  # noqa: SLF001
 
 
-def test_create_app_absent_config_sets_none() -> None:
+def test_create_app_absent_config_fail_closed_via_booking_flow() -> None:
     application = create_app(Settings())
-    assert application.state.booking_eligibility_client is None
-    flow = application.state.booking_eligibility_flow
-    assert isinstance(flow, BookingEligibilityFlowService)
-    assert flow._client is None  # noqa: SLF001
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert booking._eligibility_flow is not None  # noqa: SLF001
+    assert booking._eligibility_flow._client is None  # noqa: SLF001
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    decision = booking.resolve(
+        service,
+        master,
+        (),
+        now=now,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, ServiceUnavailableDecision)
+    assert (
+        decision.internal_reason_code
+        == BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE.value
+    )
 
 
 def test_create_app_partial_config_fails_closed_via_settings() -> None:
@@ -425,18 +443,36 @@ def test_create_app_explicit_fake_client_skips_factory(
         _boom,
     )
     fake = _RecordingFakeClient()
+    fake.result = BookingEligibilityResult(
+        outcome=BookingEligibilityOutcome.MANAGER_HANDOFF,
+        selected_service=SelectedService("11111111-1111-4111-8111-111111111111"),
+        selected_master=SelectedMaster("22222222-2222-4222-8222-222222222222"),
+        other_online_master_ids=(),
+        internal_reason_code="MANAGER_ONLY",
+    )
     application = create_app(
         Settings.from_env(_full_env()),
         booking_eligibility_client=fake,  # type: ignore[arg-type]
     )
-    assert application.state.booking_eligibility_client is fake
     assert called["build"] == 0
-    flow = application.state.booking_eligibility_flow
-    assert isinstance(flow, BookingEligibilityFlowService)
-    assert flow._client is fake  # noqa: SLF001
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert booking._eligibility_flow._client is fake  # noqa: SLF001
+    assert not hasattr(application.state, "booking_eligibility_client")
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    decision = booking.resolve(
+        fake.result.selected_service,
+        fake.result.selected_master,
+        (),
+        now=now,
+        include_alternatives=False,
+    )
+    assert decision.action is BookingDialogAction.MANAGER_HANDOFF
+    assert decision.internal_reason_code == "MANAGER_ONLY"
+    assert len(fake.calls) == 1
 
 
-def test_create_app_explicit_none_skips_auto_factory(
+def test_create_app_explicit_none_client_fail_closed_through_booking_flow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = {"build": 0}
@@ -453,38 +489,14 @@ def test_create_app_explicit_none_skips_auto_factory(
         Settings.from_env(_full_env()),
         booking_eligibility_client=None,
     )
-    assert application.state.booking_eligibility_client is None
     assert called["build"] == 0
-    flow = application.state.booking_eligibility_flow
-    assert isinstance(flow, BookingEligibilityFlowService)
-    assert flow._client is None  # noqa: SLF001
-
-
-def test_create_app_flow_auto_client_resolves_via_service() -> None:
-    """Startup DI: auto-built HTTP client is wrapped by flow service."""
-
-    application = create_app(Settings.from_env(_full_env()))
-    client = application.state.booking_eligibility_client
-    flow = application.state.booking_eligibility_flow
-    assert isinstance(client, BookingEligibilityHttpClient)
-    assert isinstance(flow, BookingEligibilityFlowService)
-    assert flow._client is client  # noqa: SLF001
-
-
-def test_create_app_flow_explicit_none_fail_closed() -> None:
-    """Startup DI: explicit None client → fail-closed flow, zero eligibility calls."""
-
-    application = create_app(
-        Settings.from_env(_full_env()),
-        booking_eligibility_client=None,
-    )
-    flow = application.state.booking_eligibility_flow
-    assert isinstance(flow, BookingEligibilityFlowService)
-    assert flow._client is None  # noqa: SLF001
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert booking._eligibility_flow._client is None  # noqa: SLF001
     service = SelectedService("11111111-1111-4111-8111-111111111111")
     master = SelectedMaster("22222222-2222-4222-8222-222222222222")
     now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
-    decision = flow.resolve(
+    decision = booking.resolve(
         service,
         master,
         (),
@@ -492,16 +504,13 @@ def test_create_app_flow_explicit_none_fail_closed() -> None:
         include_alternatives=False,
     )
     assert isinstance(decision, ServiceUnavailableDecision)
-    assert decision.action is BookingDialogAction.SERVICE_UNAVAILABLE
     assert (
         decision.internal_reason_code
         == BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE.value
     )
 
 
-def test_create_app_injected_fake_flow_service_is_used() -> None:
-    """Startup DI: injected flow service is stored and used as-is."""
-
+def test_create_app_injected_eligibility_flow_wrapped_by_booking_flow() -> None:
     fake = _RecordingFakeClient()
     service = SelectedService("11111111-1111-4111-8111-111111111111")
     master = SelectedMaster("22222222-2222-4222-8222-222222222222")
@@ -518,8 +527,10 @@ def test_create_app_injected_fake_flow_service_is_used() -> None:
         booking_eligibility_client=None,
         booking_eligibility_flow=injected_flow,
     )
-    assert application.state.booking_eligibility_flow is injected_flow
-    assert application.state.booking_eligibility_client is None
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert booking._eligibility_flow is injected_flow  # noqa: SLF001
+    assert not hasattr(application.state, "booking_eligibility_flow")
     now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
     slot = AvailableSlot(
         slot_id="s1",
@@ -527,7 +538,7 @@ def test_create_app_injected_fake_flow_service_is_used() -> None:
         master_id=master.master_id,
         service_id=service.service_id,
     )
-    decision = application.state.booking_eligibility_flow.resolve(
+    decision = booking.resolve(
         service,
         master,
         (slot,),
@@ -536,39 +547,67 @@ def test_create_app_injected_fake_flow_service_is_used() -> None:
     )
     assert isinstance(decision, SlotOfferDecision)
     assert len(fake.calls) == 1
-    assert fake.calls[0]["service"] is service
 
 
-def test_create_app_injected_fake_client_used_by_auto_flow() -> None:
-    """Startup DI: injected fake client is the flow service dependency."""
-
-    fake = _RecordingFakeClient()
+def test_create_app_injected_booking_flow_is_used() -> None:
     service = SelectedService("11111111-1111-4111-8111-111111111111")
     master = SelectedMaster("22222222-2222-4222-8222-222222222222")
-    fake.result = BookingEligibilityResult(
-        outcome=BookingEligibilityOutcome.MANAGER_HANDOFF,
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    slot = AvailableSlot(
+        slot_id="s1",
+        starts_at=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+        master_id=master.master_id,
+        service_id=service.service_id,
+    )
+    fake_client = _RecordingFakeClient()
+    fake_client.result = BookingEligibilityResult(
+        outcome=BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
         selected_service=service,
         selected_master=master,
         other_online_master_ids=(),
-        internal_reason_code="MANAGER_ONLY",
+        internal_reason_code=None,
     )
+    injected = BookingFlowService(BookingEligibilityFlowService(fake_client))
     application = create_app(
         Settings(),
-        booking_eligibility_client=fake,  # type: ignore[arg-type]
+        booking_flow=injected,
     )
-    flow = application.state.booking_eligibility_flow
-    assert flow._client is fake  # noqa: SLF001
+    assert application.state.booking_flow is injected
+    decision = application.state.booking_flow.resolve(
+        service,
+        master,
+        (slot,),
+        now=now,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert len(fake_client.calls) == 1
+
+
+def test_create_app_explicit_none_booking_flow_normalized_fail_closed() -> None:
+    application = create_app(
+        Settings.from_env(_full_env()),
+        booking_flow=None,
+    )
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert booking is not None
+    assert booking._eligibility_flow is None  # noqa: SLF001
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
     now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
-    decision = flow.resolve(
+    decision = booking.resolve(
         service,
         master,
         (),
         now=now,
         include_alternatives=False,
     )
-    assert decision.action is BookingDialogAction.MANAGER_HANDOFF
-    assert decision.internal_reason_code == "MANAGER_ONLY"
-    assert len(fake.calls) == 1
+    assert isinstance(decision, ServiceUnavailableDecision)
+    assert (
+        decision.internal_reason_code
+        == BookingInternalReasonCode.BOOKING_FLOW_UNAVAILABLE.value
+    )
 
 
 def test_create_app_makes_no_http_request(
@@ -582,14 +621,9 @@ def test_create_app_makes_no_http_request(
     monkeypatch.setattr(http.client, "HTTPConnection", _deny)
 
     application = create_app(Settings.from_env(_full_env()))
-    assert isinstance(
-        application.state.booking_eligibility_client,
-        BookingEligibilityHttpClient,
-    )
-    assert isinstance(
-        application.state.booking_eligibility_flow,
-        BookingEligibilityFlowService,
-    )
+    assert isinstance(application.state.booking_flow, BookingFlowService)
+    assert not hasattr(application.state, "booking_eligibility_client")
+    assert not hasattr(application.state, "booking_eligibility_flow")
 
 
 def test_create_app_health_endpoints_unchanged() -> None:
@@ -604,6 +638,7 @@ def test_create_app_health_endpoints_unchanged() -> None:
     assert payload["emergency_lock"] is True
     assert "booking_eligibility" not in payload
     assert "eligibility" not in payload
+    assert "booking_flow" not in payload
 
 
 def test_create_app_preserves_fail_closed_mode_defaults() -> None:
