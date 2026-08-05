@@ -236,6 +236,7 @@ def decide_booking_dialog(
     - MANAGER_HANDOFF → no slot offers;
     - SERVICE_UNAVAILABLE → unavailable path (no closed-master claims);
     - other ONLINE master slots require explicit client consent;
+    - with consent, only masters listed in other_online_master_ids may be offered;
     - without consent → manager handoff;
     - handoff copy depends on manager working hours.
     """
@@ -298,14 +299,27 @@ def decide_booking_dialog(
             client_message_kind=BookingClientMessageKind.OFFER_SLOTS,
         )
 
-    # Only other-master slots remain.
+    # Only other-master slots remain. Consent alone is not enough: offer only
+    # masters that eligibility explicitly marked as ONLINE alternatives.
     if not alternate_master_consent:
         return _handoff_decision(
             now=now,
             internal_reason_code=BookingInternalReasonCode.ALTERNATE_MASTER_WITHOUT_CONSENT,
         )
 
-    offered = _select_nearest_slots(valid_slots)
+    allowed_alternate_ids = frozenset(eligibility.other_online_master_ids)
+    alternate_slots = tuple(
+        slot
+        for slot in valid_slots
+        if slot.master_id in allowed_alternate_ids and slot.master_id != selected_id
+    )
+    if not alternate_slots:
+        return _handoff_decision(
+            now=now,
+            internal_reason_code=BookingInternalReasonCode.NO_VALID_SLOTS,
+        )
+
+    offered = _select_nearest_slots(alternate_slots)
     return SlotOfferDecision(
         action=BookingDialogAction.OFFER_SLOTS,
         offered_slots=offered,

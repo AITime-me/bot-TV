@@ -428,6 +428,93 @@ def test_other_master_slots_with_consent_offers() -> None:
     ]
 
 
+def test_consent_alone_does_not_offer_unlisted_masters() -> None:
+    """consent=True must still restrict to other_online_master_ids."""
+
+    eligibility = normalize_eligibility_outcome(
+        BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
+        selected_master=SelectedMaster("master-a"),
+        other_online_master_ids=("master-b",),
+    )
+    slots = (
+        _slot(
+            slot_id="hidden1",
+            starts_at=_utc(2026, 8, 6, 4, 0),
+            master_id="master-hidden",
+        ),
+        _slot(
+            slot_id="b1",
+            starts_at=_utc(2026, 8, 6, 5, 0),
+            master_id="master-b",
+        ),
+        _slot(
+            slot_id="private1",
+            starts_at=_utc(2026, 8, 6, 6, 0),
+            master_id="master-private",
+        ),
+    )
+    decision = decide_booking_dialog(
+        eligibility,
+        slots,
+        now=_local_boundary(10, 0),
+        alternate_master_consent=True,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert [slot.slot_id for slot in decision.offered_slots] == ["b1"]
+    assert all(slot.master_id == "master-b" for slot in decision.offered_slots)
+
+
+def test_consent_with_empty_allowlist_does_not_offer_raw_slots() -> None:
+    eligibility = normalize_eligibility_outcome(
+        BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
+        selected_master=SelectedMaster("master-a"),
+        other_online_master_ids=(),
+    )
+    slots = (
+        _slot(
+            slot_id="b1",
+            starts_at=_utc(2026, 8, 6, 5, 0),
+            master_id="master-b",
+        ),
+    )
+    decision = decide_booking_dialog(
+        eligibility,
+        slots,
+        now=_local_boundary(10, 0),
+        alternate_master_consent=True,
+    )
+    assert isinstance(decision, ManagerHandoffDecision)
+    assert (
+        decision.internal_reason_code
+        == BookingInternalReasonCode.NO_VALID_SLOTS.value
+    )
+
+
+def test_selected_master_id_in_allowlist_is_not_treated_as_alternate() -> None:
+    """Selected master must not be reclassified as an ONLINE alternative."""
+
+    eligibility = normalize_eligibility_outcome(
+        BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
+        selected_master=SelectedMaster("master-a"),
+        other_online_master_ids=("master-a", "master-b"),
+    )
+    slots = (
+        _slot(
+            slot_id="b1",
+            starts_at=_utc(2026, 8, 6, 5, 0),
+            master_id="master-b",
+        ),
+    )
+    decision = decide_booking_dialog(
+        eligibility,
+        slots,
+        now=_local_boundary(10, 0),
+        alternate_master_consent=True,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert [slot.slot_id for slot in decision.offered_slots] == ["b1"]
+
+
 def test_selected_master_slots_preferred_without_needing_consent() -> None:
     eligibility = normalize_eligibility_outcome(
         BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
