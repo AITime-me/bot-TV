@@ -95,7 +95,15 @@ class S2sHttpResponse:
 
 
 class S2sHttpTransport(Protocol):
-    """Single-shot HTTP transport. Implementations must honour allow_redirects."""
+    """Single-shot HTTP transport. Implementations must honour allow_redirects.
+
+    Credentialed S2S callers set allow_redirects=False and must not follow
+    redirects that would retarget Authorization to another origin.
+
+    The response body is fully buffered bytes. Live implementations must enforce
+    max response size while reading and raise RESPONSE_TOO_LARGE before retaining
+    an oversized payload; this Protocol cannot provide streaming by itself.
+    """
 
     def request(self, request: S2sHttpRequest) -> S2sHttpResponse:
         """Perform exactly one HTTP exchange or raise S2sHttpTransportError."""

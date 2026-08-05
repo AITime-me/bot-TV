@@ -141,6 +141,10 @@ def test_config_accepts_http_and_https() -> None:
         "https://eligibility.example?x=1",
         "https://eligibility.example#frag",
         "https://eligibility.example/api",
+        "https://example.com:abc",
+        "https://example.com:65536",
+        r"https://example.com\@evil.com",
+        "https://example.com\n.evil.com",
         "not-a-url",
         "",
     ],
@@ -153,12 +157,22 @@ def test_config_rejects_invalid_base_url(base_url: str) -> None:
     assert "user:pass" not in str(exc_info.value)
 
 
-@pytest.mark.parametrize("token", ["", "short", " " * 32, "a" * 31])
+def test_config_accepts_ipv6_and_trailing_slash() -> None:
+    ipv6 = _config(base_url="https://[::1]:8443")
+    assert ipv6.eligibility_url == "https://[::1]:8443" + ELIGIBILITY_ROUTE_PATH
+    slash = _config(base_url="https://eligibility.example/")
+    assert slash.eligibility_url == "https://eligibility.example" + ELIGIBILITY_ROUTE_PATH
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["", "short", " " * 32, "a" * 31, ("a" * 31) + "\x00", ("b" * 31) + "\n"],
+)
 def test_config_rejects_invalid_token(token: str) -> None:
     with pytest.raises(BookingEligibilityHttpError) as exc_info:
         _config(bearer_token=token)
     assert exc_info.value.code == "CONFIG_INVALID"
-    assert token.strip() == "" or token not in str(exc_info.value) or len(token) < 32
+    assert "CONFIG_INVALID" == str(exc_info.value)
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), "3", None])
@@ -277,12 +291,62 @@ def test_success_manager_handoff() -> None:
     assert result.internal_reason_code == "MANAGER_ONLY"
 
 
-@pytest.mark.parametrize("selected_pair", [True, False, None])
-def test_selected_pair_allowed_variants(selected_pair: bool | None) -> None:
+@pytest.mark.parametrize("selected_pair", [True, False])
+def test_selected_pair_allowed_bool_with_master(selected_pair: bool) -> None:
     transport = FakeTransport(
-        response=_json_response(_success_payload(selectedPairAllowed=selected_pair))
+        response=_json_response(
+            _success_payload(
+                outcome="MANAGER_HANDOFF" if selected_pair is False else "SELF_BOOKING_ALLOWED",
+                reasonCode="ONLINE_DISABLED" if selected_pair is False else None,
+                selectedPairAllowed=selected_pair,
+            )
+        )
     )
     result = _client(transport).check_eligibility(_SERVICE, _MASTER)
+    if selected_pair:
+        assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
+    else:
+        assert result.outcome is BookingEligibilityOutcome.MANAGER_HANDOFF
+
+
+def test_self_booking_with_selected_pair_false_fails_closed() -> None:
+    transport = FakeTransport(
+        response=_json_response(
+            _success_payload(
+                outcome="SELF_BOOKING_ALLOWED",
+                selectedPairAllowed=False,
+            )
+        )
+    )
+    result = _client(transport).check_eligibility(_SERVICE, _MASTER)
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert (
+        result.internal_reason_code
+        == BookingEligibilityAdapterReasonCode.RESPONSE_INVALID.value
+    )
+
+
+def test_selected_pair_null_with_master_fails_closed() -> None:
+    transport = FakeTransport(
+        response=_json_response(_success_payload(selectedPairAllowed=None))
+    )
+    result = _client(transport).check_eligibility(_SERVICE, _MASTER)
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+
+
+def test_selected_pair_bool_without_master_fails_closed() -> None:
+    transport = FakeTransport(
+        response=_json_response(_success_payload(selectedPairAllowed=True))
+    )
+    result = _client(transport).check_eligibility(_SERVICE, None)
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+
+
+def test_selected_pair_null_without_master_ok() -> None:
+    transport = FakeTransport(
+        response=_json_response(_success_payload(selectedPairAllowed=None))
+    )
+    result = _client(transport).check_eligibility(_SERVICE, None)
     assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
 
 
@@ -356,13 +420,57 @@ def test_include_alternatives_false_ignores_list_and_count() -> None:
     assert result.other_online_master_ids == ()
 
 
-def test_unknown_reason_code_still_maps_known_outcome() -> None:
+def test_unknown_reason_code_fails_closed() -> None:
     transport = FakeTransport(
         response=_json_response(_success_payload(reasonCode="SOME_NEW_REASON"))
     )
     result = _client(transport).check_eligibility(_SERVICE, _MASTER)
-    assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
-    assert result.internal_reason_code == "SOME_NEW_REASON"
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert result.outcome is not BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
+    assert (
+        result.internal_reason_code
+        == BookingEligibilityAdapterReasonCode.RESPONSE_INVALID.value
+    )
+
+
+def test_known_reason_with_self_booking_fails_closed() -> None:
+    transport = FakeTransport(
+        response=_json_response(
+            _success_payload(
+                outcome="SELF_BOOKING_ALLOWED",
+                reasonCode="MANAGER_ONLY",
+            )
+        )
+    )
+    result = _client(transport).check_eligibility(_SERVICE, _MASTER)
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _success_payload(otherOnlineMasterCount=0, otherOnlineMasters=[{"id": "master-b", "publicName": "B"}]),
+        _success_payload(
+            otherOnlineMasterCount=1,
+            otherOnlineMasters=[
+                {"id": "master-b", "publicName": "B"},
+                {"id": "master-c", "publicName": "C"},
+            ],
+        ),
+        _success_payload(
+            otherOnlineMasterCount=5,
+            otherOnlineMasters=[{"id": "master-b", "publicName": "B"}],
+        ),
+    ],
+)
+def test_count_list_mismatch_fails_closed(payload: dict[str, Any]) -> None:
+    transport = FakeTransport(response=_json_response(payload))
+    result = _client(transport).check_eligibility(_SERVICE, _MASTER)
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert (
+        result.internal_reason_code
+        == BookingEligibilityAdapterReasonCode.RESPONSE_INVALID.value
+    )
 
 
 def test_unknown_outcome_fails_closed() -> None:
@@ -413,6 +521,13 @@ def test_invalid_json_wrong_content_type_empty_and_oversized() -> None:
             body=b"{not-json",
         )
     )
+    invalid_utf8 = FakeTransport(
+        response=S2sHttpResponse(
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            body=b"\xff\xfe{",
+        )
+    )
     wrong_type = FakeTransport(
         response=S2sHttpResponse(
             status_code=200,
@@ -427,27 +542,76 @@ def test_invalid_json_wrong_content_type_empty_and_oversized() -> None:
             body=b"",
         )
     )
-    oversized_body = b"{" + (b"a" * 5000) + b"}"
-    oversized = FakeTransport(
+    # Unicode body: character count below limit, byte length above.
+    unicode_payload = {"pad": "ы" * 3000}
+    unicode_body = json.dumps(unicode_payload, ensure_ascii=False).encode("utf-8")
+    assert len(unicode_body) > 4096
+    unicode_oversize = FakeTransport(
         response=S2sHttpResponse(
             status_code=200,
             headers={
                 "Content-Type": "application/json",
-                "Content-Length": str(len(oversized_body)),
+                "Content-Length": str(len(unicode_body)),
             },
-            body=oversized_body,
+            body=unicode_body,
+        )
+    )
+    # Lying Content-Length smaller than real body still blocked by body len.
+    real_oversize = b"{" + (b"a" * 5000) + b"}"
+    lying_cl = FakeTransport(
+        response=S2sHttpResponse(
+            status_code=200,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": "100",
+            },
+            body=real_oversize,
+        )
+    )
+    # Exact boundary accepted; +1 rejected.
+    valid_body = json.dumps(_success_payload(), ensure_ascii=False).encode("utf-8")
+    boundary_ok = FakeTransport(
+        response=S2sHttpResponse(
+            status_code=200,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(valid_body)),
+            },
+            body=valid_body,
+        )
+    )
+    boundary_plus = FakeTransport(
+        response=S2sHttpResponse(
+            status_code=200,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(valid_body) + 1),
+            },
+            body=valid_body + b"\n",
         )
     )
 
     for transport, code in (
         (invalid_json, "RESPONSE_INVALID"),
+        (invalid_utf8, "RESPONSE_INVALID"),
         (wrong_type, "RESPONSE_INVALID"),
         (empty, "RESPONSE_INVALID"),
-        (oversized, "RESPONSE_TOO_LARGE"),
+        (unicode_oversize, "RESPONSE_TOO_LARGE"),
+        (lying_cl, "RESPONSE_TOO_LARGE"),
     ):
         result = _client(transport, max_response_bytes=4096).check_eligibility(_SERVICE, _MASTER)
         assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
         assert result.internal_reason_code == code
+
+    ok = _client(boundary_ok, max_response_bytes=len(valid_body)).check_eligibility(
+        _SERVICE, _MASTER
+    )
+    assert ok.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
+    plus = _client(boundary_plus, max_response_bytes=len(valid_body)).check_eligibility(
+        _SERVICE, _MASTER
+    )
+    assert plus.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert plus.internal_reason_code == "RESPONSE_TOO_LARGE"
 
 
 # ---------------------------------------------------------------------------
@@ -577,11 +741,55 @@ def test_internal_reason_not_in_client_message() -> None:
     assert eligibility.internal_reason_code == "MANAGER_ONLY"
 
 
+def test_transport_exception_with_secret_does_not_leak(caplog: pytest.LogCaptureFixture) -> None:
+    secret = "leak-token-value-" + ("Z" * 32)
+    transport = FakeTransport(error=RuntimeError(f"Authorization Bearer {secret}"))
+    with caplog.at_level(logging.INFO):
+        result = _client(transport).check_eligibility(_SERVICE, _MASTER)
+    assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert result.internal_reason_code == "TRANSPORT_ERROR"
+    blob = "\n".join(record.getMessage() for record in caplog.records)
+    assert secret not in blob
+    assert "Authorization" not in blob
+
+
+def test_request_and_response_repr_omit_sensitive_material() -> None:
+    req = S2sHttpRequest(
+        method="POST",
+        url="https://eligibility.example/api/internal/bot/v1/eligibility",
+        headers={"Authorization": f"Bearer {_VALID_TOKEN}", "Content-Type": "application/json"},
+        body=b'{"serviceId":"service-1"}',
+        timeout_seconds=1.0,
+        allow_redirects=False,
+    )
+    resp = S2sHttpResponse(
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        body=b'{"ok":true,"publicName":"Hidden"}',
+    )
+    assert _VALID_TOKEN not in repr(req)
+    assert "Authorization" not in repr(req)
+    assert "service-1" not in repr(req)
+    assert "eligibility.example" not in repr(req)
+    assert "publicName" not in repr(resp)
+    assert "Hidden" not in repr(resp)
+    assert "ok" not in repr(resp)
+
+
 def test_all_failure_paths_never_self_booking() -> None:
     cases = [
         FakeTransport(error=S2sHttpTransportError("TIMEOUT")),
         FakeTransport(response=_json_response({"error": "x"}, status=401)),
         FakeTransport(response=_json_response(_success_payload(outcome="NOPE"))),
+        FakeTransport(response=_json_response(_success_payload(reasonCode="UNKNOWN_X"))),
+        FakeTransport(
+            response=_json_response(
+                _success_payload(
+                    outcome="SELF_BOOKING_ALLOWED",
+                    selectedPairAllowed=False,
+                )
+            )
+        ),
         FakeTransport(
             response=S2sHttpResponse(
                 status_code=200,
