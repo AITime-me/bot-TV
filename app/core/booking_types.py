@@ -50,23 +50,33 @@ class BookingInternalReasonCode(StrEnum):
 
     UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
     MALFORMED_ELIGIBILITY = "MALFORMED_ELIGIBILITY"
+    ELIGIBILITY_MASTER_MISMATCH = "ELIGIBILITY_MASTER_MISMATCH"
     NO_VALID_SLOTS = "NO_VALID_SLOTS"
+    NO_AVAILABLE_DAYS = "NO_AVAILABLE_DAYS"
     ALTERNATE_MASTER_WITHOUT_CONSENT = "ALTERNATE_MASTER_WITHOUT_CONSENT"
     ELIGIBILITY_MANAGER_HANDOFF = "ELIGIBILITY_MANAGER_HANDOFF"
     ELIGIBILITY_SERVICE_UNAVAILABLE = "ELIGIBILITY_SERVICE_UNAVAILABLE"
     ELIGIBILITY_CLIENT_UNAVAILABLE = "ELIGIBILITY_CLIENT_UNAVAILABLE"
+    AVAILABILITY_CLIENT_UNAVAILABLE = "AVAILABILITY_CLIENT_UNAVAILABLE"
+    AVAILABILITY_REQUEST_INVALID = "AVAILABILITY_REQUEST_INVALID"
+    AVAILABILITY_SERVICE_UNAVAILABLE = "AVAILABILITY_SERVICE_UNAVAILABLE"
     BOOKING_FLOW_UNAVAILABLE = "BOOKING_FLOW_UNAVAILABLE"
     BOOKING_RESOLUTION_INTERRUPTED = "BOOKING_RESOLUTION_INTERRUPTED"
 
 
 class BookingDialogAction(StrEnum):
     OFFER_SLOTS = "OFFER_SLOTS"
+    OFFER_DAYS = "OFFER_DAYS"
     MANAGER_HANDOFF = "MANAGER_HANDOFF"
     SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
 
 
 class BookingClientMessageKind(StrEnum):
-    """Stable client message kinds. Copy never embeds internal reason codes."""
+    """Stable client message kinds. Copy never embeds internal reason codes.
+
+    OFFER_DAYS is intentionally absent: AvailableDaysOfferDecision is
+    machine-only until a future copy gate (CURSOR-23).
+    """
 
     OFFER_SLOTS = "OFFER_SLOTS"
     HANDOFF_DURING_MANAGER_HOURS = "HANDOFF_DURING_MANAGER_HOURS"
@@ -227,6 +237,30 @@ class SlotOfferDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class AvailableDaysOfferDecision:
+    """Machine-only decision to offer backend-provided available days.
+
+    Never invents dates. Not renderable via ``client_message_for_decision``
+    until a future copy gate wires live-channel text.
+    """
+
+    action: BookingDialogAction
+    date_keys: tuple[str, ...]
+    studio_today: str
+
+    def __post_init__(self) -> None:
+        if self.action is not BookingDialogAction.OFFER_DAYS:
+            raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
+        if type(self.date_keys) is not tuple or not self.date_keys:
+            raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
+        for key in self.date_keys:
+            if type(key) is not str or not key:
+                raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
+        if type(self.studio_today) is not str or not self.studio_today:
+            raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
+
+
+@dataclass(frozen=True, slots=True)
 class ManagerHandoffDecision:
     """Decision to hand the dialog to a manager. No invented slots."""
 
@@ -283,7 +317,10 @@ class ServiceUnavailableDecision:
 
 
 BookingPolicyDecision = (
-    SlotOfferDecision | ManagerHandoffDecision | ServiceUnavailableDecision
+    SlotOfferDecision
+    | AvailableDaysOfferDecision
+    | ManagerHandoffDecision
+    | ServiceUnavailableDecision
 )
 
 
@@ -302,8 +339,13 @@ def render_client_message(kind: BookingClientMessageKind) -> str:
 
 
 def client_message_for_decision(decision: BookingPolicyDecision) -> str:
-    """Render the client-facing text for a policy decision."""
+    """Render the client-facing text for a policy decision.
 
+    ``AvailableDaysOfferDecision`` is machine-only and fail-closed here.
+    """
+
+    if type(decision) is AvailableDaysOfferDecision:
+        raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
     if type(decision) not in (
         SlotOfferDecision,
         ManagerHandoffDecision,

@@ -9,7 +9,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings
-from app.core.booking_eligibility_factory import build_booking_eligibility_client
+from app.core.booking_eligibility_factory import (
+    build_booking_flow_from_settings,
+    build_booking_s2s_clients,
+)
 from app.core.booking_eligibility_http import BookingEligibilityHttpClient
 from app.core.outbound_policy import (
     OutboundAction,
@@ -39,10 +42,11 @@ def create_app(
 ) -> FastAPI:
     """Compose the API app.
 
-    Lower booking dependencies (HTTP client, eligibility flow) are built locally
-    for ``BookingFlowService`` only. ``application.state`` exposes ``booking_flow``
-    alone — the prepared application boundary for a future channel-wiring gate.
-    Raw eligibility client/flow are not published on ``app.state``.
+    Lower booking dependencies (HTTP clients, eligibility flow) are built
+    locally for ``BookingFlowService`` only. ``application.state`` exposes
+    ``booking_flow`` alone — the prepared application boundary for a future
+    channel-wiring gate. Raw eligibility/availability clients/flows are not
+    published on ``app.state``.
     """
 
     loaded_settings = settings if settings is not None else Settings.from_env()
@@ -57,23 +61,31 @@ def create_app(
         )
 
     if booking_flow is _BOOKING_FLOW_UNSET:
-        if booking_eligibility_client is _BOOKING_ELIGIBILITY_CLIENT_UNSET:
-            resolved_eligibility_client = build_booking_eligibility_client(
-                loaded_settings
-            )
+        if (
+            booking_eligibility_client is _BOOKING_ELIGIBILITY_CLIENT_UNSET
+            and booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET
+        ):
+            resolved_booking_flow = build_booking_flow_from_settings(loaded_settings)
         else:
-            resolved_eligibility_client = booking_eligibility_client
+            if booking_eligibility_client is _BOOKING_ELIGIBILITY_CLIENT_UNSET:
+                clients = build_booking_s2s_clients(loaded_settings)
+                resolved_eligibility_client = clients.eligibility
+                resolved_availability_client = clients.availability
+            else:
+                resolved_eligibility_client = booking_eligibility_client
+                resolved_availability_client = None
 
-        if booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET:
-            resolved_eligibility_flow = BookingEligibilityFlowService(
-                resolved_eligibility_client  # type: ignore[arg-type]
+            if booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET:
+                resolved_eligibility_flow = BookingEligibilityFlowService(
+                    resolved_eligibility_client  # type: ignore[arg-type]
+                )
+            else:
+                resolved_eligibility_flow = booking_eligibility_flow
+
+            resolved_booking_flow = BookingFlowService(
+                resolved_eligibility_flow,  # type: ignore[arg-type]
+                resolved_availability_client,  # type: ignore[arg-type]
             )
-        else:
-            resolved_eligibility_flow = booking_eligibility_flow
-
-        resolved_booking_flow = BookingFlowService(
-            resolved_eligibility_flow  # type: ignore[arg-type]
-        )
     elif booking_flow is None:
         # Never publish None: fail-closed consumer with unset eligibility flow.
         resolved_booking_flow = BookingFlowService(None)

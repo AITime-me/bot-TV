@@ -432,16 +432,18 @@ def test_create_app_partial_config_fails_closed_in_factory_path() -> None:
 def test_create_app_explicit_fake_client_skips_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called = {"build": 0}
+    called = {"flow": 0, "s2s": 0}
 
-    def _boom(*_args: Any, **_kwargs: Any) -> Any:
-        called["build"] += 1
-        raise AssertionError("auto-factory must not run")
+    def _boom_flow(*_args: Any, **_kwargs: Any) -> Any:
+        called["flow"] += 1
+        raise AssertionError("auto build_booking_flow_from_settings must not run")
 
-    monkeypatch.setattr(
-        "app.main.build_booking_eligibility_client",
-        _boom,
-    )
+    def _boom_s2s(*_args: Any, **_kwargs: Any) -> Any:
+        called["s2s"] += 1
+        raise AssertionError("auto build_booking_s2s_clients must not run")
+
+    monkeypatch.setattr("app.main.build_booking_flow_from_settings", _boom_flow)
+    monkeypatch.setattr("app.main.build_booking_s2s_clients", _boom_s2s)
     fake = _RecordingFakeClient()
     fake.result = BookingEligibilityResult(
         outcome=BookingEligibilityOutcome.MANAGER_HANDOFF,
@@ -454,11 +456,13 @@ def test_create_app_explicit_fake_client_skips_factory(
         Settings.from_env(_full_env()),
         booking_eligibility_client=fake,  # type: ignore[arg-type]
     )
-    assert called["build"] == 0
+    assert called == {"flow": 0, "s2s": 0}
     booking = application.state.booking_flow
     assert isinstance(booking, BookingFlowService)
     assert booking._eligibility_flow._client is fake  # noqa: SLF001
+    assert booking._availability_client is None  # noqa: SLF001
     assert not hasattr(application.state, "booking_eligibility_client")
+    assert not hasattr(application.state, "booking_availability_client")
     now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
     decision = booking.resolve(
         fake.result.selected_service,
@@ -472,24 +476,104 @@ def test_create_app_explicit_fake_client_skips_factory(
     assert len(fake.calls) == 1
 
 
+def test_create_app_eligibility_only_injection_availability_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injected eligibility-only client must not invent an availability client."""
+
+    called = {"flow": 0, "s2s": 0}
+
+    def _boom_flow(*_args: Any, **_kwargs: Any) -> Any:
+        called["flow"] += 1
+        raise AssertionError("auto builder must not run for eligibility-only inject")
+
+    def _boom_s2s(*_args: Any, **_kwargs: Any) -> Any:
+        called["s2s"] += 1
+        raise AssertionError("shared S2S factory must not run for eligibility-only inject")
+
+    monkeypatch.setattr("app.main.build_booking_flow_from_settings", _boom_flow)
+    monkeypatch.setattr("app.main.build_booking_s2s_clients", _boom_s2s)
+    monkeypatch.setattr(
+        socket,
+        "socket",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("network must not be used")
+        ),
+    )
+    monkeypatch.setattr(
+        http.client,
+        "HTTPSConnection",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("network must not be used")
+        ),
+    )
+    monkeypatch.setattr(
+        http.client,
+        "HTTPConnection",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("network must not be used")
+        ),
+    )
+
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
+    fake = _RecordingFakeClient()
+    fake.result = BookingEligibilityResult(
+        outcome=BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
+        selected_service=service,
+        selected_master=master,
+        other_online_master_ids=(),
+        internal_reason_code=None,
+    )
+    application = create_app(
+        Settings.from_env(_full_env()),
+        booking_eligibility_client=fake,  # type: ignore[arg-type]
+    )
+    assert called == {"flow": 0, "s2s": 0}
+    booking = application.state.booking_flow
+    assert isinstance(booking, BookingFlowService)
+    assert application.state.booking_flow is booking
+    assert not hasattr(application.state, "booking_eligibility_client")
+    assert not hasattr(application.state, "booking_availability_client")
+    assert not hasattr(application.state, "booking_eligibility_flow")
+    assert booking._availability_client is None  # noqa: SLF001
+
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    decision = booking.resolve_available_days(
+        service,
+        master,
+        "2026-08",
+        now=now,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, ServiceUnavailableDecision)
+    assert (
+        decision.internal_reason_code
+        == BookingInternalReasonCode.AVAILABILITY_CLIENT_UNAVAILABLE.value
+    )
+    assert len(fake.calls) == 1
+
+
 def test_create_app_explicit_none_client_fail_closed_through_booking_flow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called = {"build": 0}
+    called = {"flow": 0, "s2s": 0}
 
-    def _boom(*_args: Any, **_kwargs: Any) -> Any:
-        called["build"] += 1
-        raise AssertionError("auto-factory must not run for explicit None")
+    def _boom_flow(*_args: Any, **_kwargs: Any) -> Any:
+        called["flow"] += 1
+        raise AssertionError("auto build_booking_flow_from_settings must not run")
 
-    monkeypatch.setattr(
-        "app.main.build_booking_eligibility_client",
-        _boom,
-    )
+    def _boom_s2s(*_args: Any, **_kwargs: Any) -> Any:
+        called["s2s"] += 1
+        raise AssertionError("auto build_booking_s2s_clients must not run")
+
+    monkeypatch.setattr("app.main.build_booking_flow_from_settings", _boom_flow)
+    monkeypatch.setattr("app.main.build_booking_s2s_clients", _boom_s2s)
     application = create_app(
         Settings.from_env(_full_env()),
         booking_eligibility_client=None,
     )
-    assert called["build"] == 0
+    assert called == {"flow": 0, "s2s": 0}
     booking = application.state.booking_flow
     assert isinstance(booking, BookingFlowService)
     assert booking._eligibility_flow._client is None  # noqa: SLF001
@@ -508,6 +592,65 @@ def test_create_app_explicit_none_client_fail_closed_through_booking_flow(
         decision.internal_reason_code
         == BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE.value
     )
+
+
+def test_create_app_auto_builder_called_once_without_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import booking_eligibility_factory as factory_mod
+
+    calls: list[Settings] = []
+
+    def _spy(settings: Settings, **kwargs: Any) -> BookingFlowService:
+        calls.append(settings)
+        return factory_mod.build_booking_flow_from_settings(settings, **kwargs)
+
+    monkeypatch.setattr("app.main.build_booking_flow_from_settings", _spy)
+    application = create_app(Settings.from_env(_full_env()))
+    assert len(calls) == 1
+    assert isinstance(application.state.booking_flow, BookingFlowService)
+
+
+def test_create_app_injected_booking_flow_skips_auto_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"flow": 0}
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        called["flow"] += 1
+        raise AssertionError("auto builder must not run when booking_flow injected")
+
+    monkeypatch.setattr("app.main.build_booking_flow_from_settings", _boom)
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    slot = AvailableSlot(
+        slot_id="s1",
+        starts_at=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+        master_id=master.master_id,
+        service_id=service.service_id,
+    )
+    fake_client = _RecordingFakeClient()
+    fake_client.result = BookingEligibilityResult(
+        outcome=BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
+        selected_service=service,
+        selected_master=master,
+        other_online_master_ids=(),
+        internal_reason_code=None,
+    )
+    injected = BookingFlowService(BookingEligibilityFlowService(fake_client))
+    application = create_app(Settings(), booking_flow=injected)
+    assert called["flow"] == 0
+    assert application.state.booking_flow is injected
+    decision = application.state.booking_flow.resolve(
+        service,
+        master,
+        (slot,),
+        now=now,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert len(fake_client.calls) == 1
 
 
 def test_create_app_injected_eligibility_flow_wrapped_by_booking_flow() -> None:
