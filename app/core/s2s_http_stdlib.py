@@ -2,11 +2,19 @@
 
 Uses only http.client + ssl.create_default_context. No redirects, no proxies,
 no retries, no insecure TLS, no third-party HTTP clients.
+
+Framing notes (CPython http.client):
+- HTTPResponse.read() returns at most Content-Length bytes; trailing bytes after a
+  truthful Content-Length are not part of the response body and are not measured
+  here. Connections are always closed after one exchange.
+- Ambiguous framing (duplicate CL/TE/CE/CT, Transfer-Encoding present, malformed
+  CL) is rejected fail closed via get_all inspection before body parse.
 """
 
 from __future__ import annotations
 
 import http.client
+import re
 import socket
 import ssl
 from typing import Final
@@ -18,6 +26,10 @@ from app.core.s2s_http_transport import (
     S2sHttpTransportError,
 )
 
+# RFC 9110 token (method and header-field names).
+_HTTP_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[!#$%&'*+\-.0-9A-Z^_`a-z|~]+$"
+)
 _FORBIDDEN_CALLER_HEADERS: Final[frozenset[str]] = frozenset(
     {
         "host",
@@ -25,13 +37,7 @@ _FORBIDDEN_CALLER_HEADERS: Final[frozenset[str]] = frozenset(
         "transfer-encoding",
         "connection",
         "proxy-authorization",
-    }
-)
-_ALLOWED_RESPONSE_HEADER_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "content-type",
-        "content-length",
-        "content-encoding",
+        "accept-encoding",
     }
 )
 _READ_CHUNK_SIZE: Final[int] = 8192
@@ -41,12 +47,6 @@ _MAX_RESPONSE_BYTES_CAP: Final[int] = 1_000_000
 
 def _contains_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
-
-
-def _is_safe_header_name(value: str) -> bool:
-    if not value or any(ch.isspace() for ch in value) or _contains_control_chars(value):
-        return False
-    return True
 
 
 def _validate_request_url(url: object) -> tuple[str, str, int | None, str]:
@@ -69,22 +69,37 @@ def _validate_request_url(url: object) -> tuple[str, str, int | None, str]:
     if any(ch.isspace() for ch in host) or _contains_control_chars(host):
         raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     try:
+        host = host.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    try:
         port = parts.port
     except ValueError:
         raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     if port is not None and (port <= 0 or port > 65535):
         raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     path = parts.path if parts.path else "/"
-    if not path.startswith("/") or _contains_control_chars(path) or any(
-        ch.isspace() for ch in path
+    # Origin-form only: reject scheme-relative //host/path forms.
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or _contains_control_chars(path)
+        or any(ch.isspace() for ch in path)
     ):
         raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     return parts.scheme, host, port, path
 
 
+def _validate_method(method: object) -> str:
+    if type(method) is not str or not method:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    if _HTTP_TOKEN_RE.fullmatch(method) is None:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    return method
+
+
 def _validate_headers(headers: object) -> dict[str, str]:
     if not isinstance(headers, dict):
-        # Mapping without being dict — copy via items.
         if not hasattr(headers, "items"):
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     try:
@@ -96,7 +111,7 @@ def _validate_headers(headers: object) -> dict[str, str]:
     for key, value in items:
         if type(key) is not str or type(value) is not str:
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-        if not _is_safe_header_name(key):
+        if _HTTP_TOKEN_RE.fullmatch(key) is None:
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
@@ -127,13 +142,32 @@ def _validate_max_response_bytes(raw: object) -> int:
     return raw
 
 
-def _header_get(headers: http.client.HTTPMessage, name: str) -> str | None:
-    value = headers.get(name)
-    if value is None:
+def _header_values(message: http.client.HTTPMessage, name: str) -> list[str] | None:
+    try:
+        values = message.get_all(name)
+    except Exception:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    if values is None:
         return None
-    if type(value) is not str:
-        return str(value)
-    return value
+    if type(values) is not list or not values:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    normalized: list[str] = []
+    for item in values:
+        if type(item) is not str:
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+        if _contains_control_chars(item):
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+        normalized.append(item)
+    return normalized
+
+
+def _require_single_header(message: http.client.HTTPMessage, name: str) -> str | None:
+    values = _header_values(message, name)
+    if values is None:
+        return None
+    if len(values) != 1:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    return values[0]
 
 
 def _parse_content_length(raw: str | None, *, max_bytes: int) -> int | None:
@@ -149,6 +183,42 @@ def _parse_content_length(raw: str | None, *, max_bytes: int) -> int | None:
     if length > max_bytes:
         raise S2sHttpTransportError("RESPONSE_TOO_LARGE") from None
     return length
+
+
+def _inspect_response_framing(
+    message: http.client.HTTPMessage,
+    *,
+    max_bytes: int,
+) -> tuple[int | None, str | None, str | None]:
+    """Return (declared_length, content_type, content_length_header)."""
+
+    if _header_values(message, "Transfer-Encoding") is not None:
+        # Reject chunked / ambiguous TE; S2S JSON uses identity + Content-Length.
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+
+    encoding_values = _header_values(message, "Content-Encoding")
+    if encoding_values is not None:
+        if len(encoding_values) != 1:
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+        normalized = encoding_values[0].strip().lower()
+        if normalized not in ("", "identity"):
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+
+    content_type_values = _header_values(message, "Content-Type")
+    if content_type_values is None:
+        content_type = None
+    else:
+        if len(content_type_values) != 1:
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+        content_type = content_type_values[0]
+
+    cl_values = _header_values(message, "Content-Length")
+    if cl_values is None:
+        return None, content_type, None
+    if len(cl_values) != 1:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    declared = _parse_content_length(cl_values[0], max_bytes=max_bytes)
+    return declared, content_type, cl_values[0]
 
 
 def _read_body_bounded(
@@ -179,23 +249,30 @@ def _read_body_bounded(
             raise S2sHttpTransportError("RESPONSE_TOO_LARGE") from None
         chunks.append(chunk)
     body = b"".join(chunks)
+    # Under-read vs declared CL (early close) is a framing failure.
+    # CPython HTTPResponse.read() does not return bytes beyond Content-Length;
+    # trailing socket bytes are not treated as body and are discarded on close.
     if declared_length is not None and len(body) != declared_length:
         raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     return body
 
 
-def _select_response_headers(message: http.client.HTTPMessage) -> dict[str, str]:
+def _select_response_headers(
+    *,
+    content_type: str | None,
+    content_length: str | None,
+    content_encoding: str | None,
+) -> dict[str, str]:
     selected: dict[str, str] = {}
-    for key, value in message.items():
-        if type(key) is not str or type(value) is not str:
-            continue
-        lower = key.lower()
-        if lower in _ALLOWED_RESPONSE_HEADER_NAMES and lower not in {
-            k.lower() for k in selected
-        }:
-            if _contains_control_chars(key) or _contains_control_chars(value):
-                raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-            selected[key] = value
+    if content_type is not None:
+        selected["Content-Type"] = content_type
+    if content_length is not None:
+        selected["Content-Length"] = content_length
+    if content_encoding is not None:
+        selected["Content-Encoding"] = content_encoding
+    for key, value in selected.items():
+        if _contains_control_chars(key) or _contains_control_chars(value):
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
     return selected
 
 
@@ -217,23 +294,19 @@ class S2sHttpStdlibTransport:
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
         if request.allow_redirects is not False:
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-        if type(request.method) is not str or not request.method:
-            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-        if any(ch.isspace() for ch in request.method) or _contains_control_chars(
-            request.method
-        ):
-            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
         if type(request.body) is not bytes:
             raise S2sHttpTransportError("TRANSPORT_ERROR") from None
 
+        method = _validate_method(request.method)
         scheme, host, port, path = _validate_request_url(request.url)
         timeout = _validate_timeout(request.timeout_seconds)
         max_bytes = _validate_max_response_bytes(request.max_response_bytes)
         caller_headers = _validate_headers(request.headers)
 
         outbound: dict[str, str] = dict(caller_headers)
-        if not any(k.lower() == "accept-encoding" for k in outbound):
-            outbound["Accept-Encoding"] = "identity"
+        # Transport-owned framing/safety headers (caller cannot set these).
+        outbound["Accept-Encoding"] = "identity"
+        outbound["Connection"] = "close"
         outbound["Content-Length"] = str(len(request.body))
 
         connection: http.client.HTTPConnection | None = None
@@ -242,7 +315,7 @@ class S2sHttpStdlibTransport:
             connection = self._open_connection(scheme, host, port, timeout)
             try:
                 connection.request(
-                    request.method,
+                    method,
                     path,
                     body=request.body,
                     headers=outbound,
@@ -259,23 +332,25 @@ class S2sHttpStdlibTransport:
             except Exception:
                 raise S2sHttpTransportError("TRANSPORT_ERROR") from None
 
-            encoding = _header_get(response.headers, "Content-Encoding")
-            if encoding is not None:
-                normalized = encoding.strip().lower()
-                if normalized not in ("", "identity"):
-                    raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+            status = response.status
+            if type(status) is not int or status < 100 or status > 599:
+                raise S2sHttpTransportError("TRANSPORT_ERROR") from None
 
-            declared = _parse_content_length(
-                _header_get(response.headers, "Content-Length"),
+            declared, content_type, cl_header = _inspect_response_framing(
+                response.headers,
                 max_bytes=max_bytes,
             )
+            encoding = _require_single_header(response.headers, "Content-Encoding")
             body = _read_body_bounded(
                 response,
                 max_bytes=max_bytes,
                 declared_length=declared,
             )
-            status = int(response.status)
-            headers = _select_response_headers(response.headers)
+            headers = _select_response_headers(
+                content_type=content_type,
+                content_length=cl_header,
+                content_encoding=encoding,
+            )
             return S2sHttpResponse(status_code=status, headers=headers, body=body)
         finally:
             if response is not None:

@@ -24,16 +24,32 @@ _URL = "https://eligibility.example/api/internal/bot/v1/eligibility"
 _PATH = "/api/internal/bot/v1/eligibility"
 
 
-class FakeHeaders(dict):
-    def get(self, name: str, default: Any = None) -> Any:  # noqa: ANN401
-        target = name.lower()
-        for key, value in self.items():
-            if str(key).lower() == target:
-                return value
-        return default
+class FakeHeaders:
+    """Minimal header map supporting get/get_all/items like HTTPMessage."""
 
-    def items(self):  # type: ignore[override]
-        return super().items()
+    def __init__(self, headers: dict[str, str] | list[tuple[str, str]] | None = None) -> None:
+        if headers is None:
+            self._items: list[tuple[str, str]] = []
+        elif isinstance(headers, dict):
+            self._items = list(headers.items())
+        else:
+            self._items = list(headers)
+
+    def get(self, name: str, default: Any = None) -> Any:  # noqa: ANN401
+        values = self.get_all(name)
+        if not values:
+            return default
+        return values[0]
+
+    def get_all(self, name: str, failobj: Any = None) -> Any:  # noqa: ANN401
+        target = name.lower()
+        values = [value for key, value in self._items if str(key).lower() == target]
+        if not values:
+            return failobj
+        return values
+
+    def items(self):
+        return list(self._items)
 
 
 class FakeHTTPResponse:
@@ -41,13 +57,13 @@ class FakeHTTPResponse:
         self,
         *,
         status: int = 200,
-        headers: dict[str, str] | None = None,
+        headers: dict[str, str] | list[tuple[str, str]] | None = None,
         body: bytes = b"",
         chunk_size: int = 8,
         read_error: BaseException | None = None,
     ) -> None:
         self.status = status
-        self.headers = FakeHeaders(headers or {})
+        self.headers = FakeHeaders(headers)
         self._body = body
         self._offset = 0
         self._chunk_size = chunk_size
@@ -326,6 +342,7 @@ def test_request_uses_path_not_absolute_url_and_sets_headers() -> None:
     assert headers["Authorization"] == f"Bearer {_TOKEN}"
     assert headers["Content-Length"] == str(len(body))
     assert headers["Accept-Encoding"] == "identity"
+    assert headers["Connection"] == "close"
     assert _TOKEN not in repr(result)
 
 
@@ -337,9 +354,12 @@ def test_request_uses_path_not_absolute_url_and_sets_headers() -> None:
         {"Transfer-Encoding": "chunked"},
         {"Connection": "keep-alive"},
         {"Proxy-Authorization": "Basic xxx"},
+        {"Accept-Encoding": "gzip"},
         {"X-Test": "a\r\nb"},
         {"X-Test": "a\x00b"},
         {"Bad\nName": "value"},
+        {"X(Test)": "value"},
+        {"X:Test": "value"},
     ],
 )
 def test_forbidden_or_unsafe_headers_rejected_before_network(headers: dict[str, str]) -> None:
@@ -352,6 +372,29 @@ def test_forbidden_or_unsafe_headers_rejected_before_network(headers: dict[str, 
     with pytest.raises(S2sHttpTransportError) as exc_info:
         transport.request(_request(headers=merged))
     assert exc_info.value.code == "TRANSPORT_ERROR"
+    assert FakeHTTPConnection.instances == []
+
+
+@pytest.mark.parametrize("method", ["POST:", "POST/1", "POST\t", "PÖST", "POST,"])
+def test_invalid_methods_rejected_before_network(method: str) -> None:
+    transport = S2sHttpStdlibTransport()
+    with pytest.raises(S2sHttpTransportError):
+        transport.request(_request(method=method))
+    assert FakeHTTPConnection.instances == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://eligibility.example//evil.example/api",
+        "https://eligibility.example/api?x=1",
+        "https://user:pass@eligibility.example/api",
+    ],
+)
+def test_unsafe_urls_rejected_before_network(url: str) -> None:
+    transport = S2sHttpStdlibTransport()
+    with pytest.raises(S2sHttpTransportError):
+        transport.request(_request(url=url))
     assert FakeHTTPConnection.instances == []
 
 
@@ -419,17 +462,81 @@ def test_malformed_content_length_rejected(raw_cl: str) -> None:
     assert exc_info.value.code == "TRANSPORT_ERROR"
 
 
-def test_lying_small_content_length_with_larger_body_fails() -> None:
-    # Fake ignores CL while reading; transport compares final length to declared CL.
-    body = b"x" * 30
+def test_short_body_vs_declared_content_length_fails() -> None:
+    """Early close / under-read vs Content-Length is a framing failure."""
+
     response = FakeHTTPResponse(
         headers={"Content-Type": "application/json", "Content-Length": "10"},
-        body=body,
+        body=b"short",
         chunk_size=8,
     )
     with pytest.raises(S2sHttpTransportError) as exc_info:
         _transport_with_response(response).request(_request(max_response_bytes=64))
     assert exc_info.value.code == "TRANSPORT_ERROR"
+
+
+def test_duplicate_content_length_rejected() -> None:
+    response = FakeHTTPResponse(
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+            ("Content-Length", "3"),
+        ],
+        body=b"{}",
+    )
+    with pytest.raises(S2sHttpTransportError) as exc_info:
+        _transport_with_response(response).request(_request())
+    assert exc_info.value.code == "TRANSPORT_ERROR"
+
+
+def test_transfer_encoding_rejected() -> None:
+    response = FakeHTTPResponse(
+        headers={
+            "Content-Type": "application/json",
+            "Transfer-Encoding": "chunked",
+            "Content-Length": "2",
+        },
+        body=b"{}",
+    )
+    with pytest.raises(S2sHttpTransportError) as exc_info:
+        _transport_with_response(response).request(_request())
+    assert exc_info.value.code == "TRANSPORT_ERROR"
+
+
+def test_duplicate_content_encoding_rejected() -> None:
+    response = FakeHTTPResponse(
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+            ("Content-Encoding", "identity"),
+            ("Content-Encoding", "gzip"),
+        ],
+        body=b"{}",
+    )
+    with pytest.raises(S2sHttpTransportError) as exc_info:
+        _transport_with_response(response).request(_request())
+    assert exc_info.value.code == "TRANSPORT_ERROR"
+
+
+def test_real_http_response_truncates_to_content_length() -> None:
+    """Document CPython behavior: trailing bytes after CL are not body."""
+
+    import io
+    from http.client import HTTPResponse
+
+    class _Sock:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def makefile(self, *args: object, **kwargs: object):
+            return io.BytesIO(self._data)
+
+    raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHELLOWORLD"
+    resp = HTTPResponse(_Sock(raw))  # type: ignore[arg-type]
+    resp.begin()
+    assert resp.read() == b"HELLO"
+    # Transport closes the connection after one exchange; trailing bytes are not parsed as JSON.
+    resp.close()
 
 
 def test_unicode_body_limit_is_bytes() -> None:
