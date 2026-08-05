@@ -1,7 +1,7 @@
 """Minimal S2S HTTP transport Protocol for bot-TV adapters.
 
-No concrete live client lives here. Adapters inject a transport; unit tests use
-fakes. Redirects must be disabled by callers for credentialed S2S calls.
+Concrete live client: app.core.s2s_http_stdlib.S2sHttpStdlibTransport.
+Unit tests may inject fakes. Redirects must be disabled for credentialed S2S.
 """
 
 from __future__ import annotations
@@ -31,10 +31,16 @@ class S2sHttpTransportError(RuntimeError):
     def code(self) -> str:
         return str(self.args[0]) if self.args else "TRANSPORT_ERROR"
 
+    def __repr__(self) -> str:
+        return f"S2sHttpTransportError({self.code!r})"
+
+    def __str__(self) -> str:
+        return self.code
+
 
 @dataclass(frozen=True, slots=True, repr=False)
 class S2sHttpRequest:
-    """Outbound S2S request. Body and Authorization never appear in repr."""
+    """Outbound S2S request. Body, URL, and Authorization never appear in repr."""
 
     method: str
     url: str
@@ -42,6 +48,7 @@ class S2sHttpRequest:
     body: bytes
     timeout_seconds: float
     allow_redirects: bool
+    max_response_bytes: int
 
     def __post_init__(self) -> None:
         if type(self.method) is not str or not self.method:
@@ -56,6 +63,10 @@ class S2sHttpRequest:
             raise ValueError("timeout invalid") from None
         if type(self.allow_redirects) is not bool:
             raise ValueError("allow_redirects invalid") from None
+        if type(self.max_response_bytes) is not int or isinstance(self.max_response_bytes, bool):
+            raise ValueError("max_response_bytes invalid") from None
+        if self.max_response_bytes <= 0:
+            raise ValueError("max_response_bytes invalid") from None
         object.__setattr__(self, "headers", dict(self.headers))
 
     def __repr__(self) -> str:
@@ -65,7 +76,8 @@ class S2sHttpRequest:
             f"header_names={header_names!r}, "
             f"body_len={len(self.body)}, "
             f"timeout_seconds={float(self.timeout_seconds)!r}, "
-            f"allow_redirects={self.allow_redirects!r})"
+            f"allow_redirects={self.allow_redirects!r}, "
+            f"max_response_bytes={self.max_response_bytes!r})"
         )
 
 
@@ -100,9 +112,8 @@ class S2sHttpTransport(Protocol):
     Credentialed S2S callers set allow_redirects=False and must not follow
     redirects that would retarget Authorization to another origin.
 
-    The response body is fully buffered bytes. Live implementations must enforce
-    max response size while reading and raise RESPONSE_TOO_LARGE before retaining
-    an oversized payload; this Protocol cannot provide streaming by itself.
+    Live implementations must stream-read at most max_response_bytes and raise
+    RESPONSE_TOO_LARGE without retaining an oversized payload.
     """
 
     def request(self, request: S2sHttpRequest) -> S2sHttpResponse:

@@ -1,13 +1,15 @@
 """Booking eligibility HTTP adapter foundation (CURSOR-15).
 
 Typed client for POST /api/internal/bot/v1/eligibility only.
-No env loading, no live transport, no dialog/pipeline wiring.
+No env loading, no dialog/pipeline wiring. Backend IDs are canonical UUIDs.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Mapping
@@ -37,12 +39,14 @@ logger = logging.getLogger(__name__)
 
 ELIGIBILITY_ROUTE_PATH: Final[str] = "/api/internal/bot/v1/eligibility"
 _MIN_TOKEN_LENGTH: Final[int] = 32
-_MAX_ID_LENGTH: Final[int] = 128
 _MAX_PUBLIC_NAME_LENGTH: Final[int] = 256
 _MAX_REQUEST_BYTES: Final[int] = 4096
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 5.0
 _DEFAULT_MAX_RESPONSE_BYTES: Final[int] = 65_536
 _ABSENT: Final[object] = object()
+_CANONICAL_UUID_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 _KNOWN_BACKEND_REASON_CODES: Final[frozenset[str]] = frozenset(
     {
@@ -91,6 +95,12 @@ class BookingEligibilityHttpError(RuntimeError):
     def code(self) -> str:
         return str(self.args[0]) if self.args else "CONFIG_INVALID"
 
+    def __repr__(self) -> str:
+        return f"BookingEligibilityHttpError({self.code!r})"
+
+    def __str__(self) -> str:
+        return self.code
+
 
 def _log_adapter_event(event: str, code: str) -> None:
     if type(event) is not str or not event:
@@ -105,6 +115,40 @@ def _log_adapter_event(event: str, code: str) -> None:
 
 def _contains_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
+def require_canonical_backend_uuid(value: object) -> str:
+    """Normalize a backend service/master ID to canonical lowercase UUID.
+
+    Rejects braces, URN prefixes, missing hyphens, and non-UUID strings.
+    Raises BookingEligibilityHttpError(CONFIG_INVALID) without echoing the value.
+    """
+
+    if type(value) is not str or not value:
+        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+    if any(ch.isspace() for ch in value) or _contains_control_chars(value):
+        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+    if value.startswith("{") or value.lower().startswith("urn:"):
+        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+    lowered = value.lower()
+    if not _CANONICAL_UUID_RE.fullmatch(lowered):
+        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+    try:
+        parsed = uuid.UUID(lowered)
+    except ValueError:
+        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+    canonical = str(parsed)
+    if canonical != lowered:
+        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+    return canonical
+
+
+def _is_canonical_uuid(value: object) -> bool:
+    try:
+        require_canonical_backend_uuid(value)
+    except BookingEligibilityHttpError:
+        return False
+    return True
 
 
 def _validate_base_url(raw: object) -> str:
@@ -217,17 +261,7 @@ def _content_type_is_json(content_type: str | None) -> bool:
     return media == "application/json"
 
 
-def _is_valid_id(value: object) -> bool:
-    if type(value) is not str or not value or len(value) > _MAX_ID_LENGTH:
-        return False
-    if any(ch.isspace() for ch in value) or _contains_control_chars(value):
-        return False
-    return True
-
-
 def _parse_reason_code(value: object) -> str | None | object:
-    """Return None, a known backend reason code, or a sentinel for invalid."""
-
     if value is None:
         return None
     if type(value) is not str or value not in _KNOWN_BACKEND_REASON_CODES:
@@ -240,15 +274,17 @@ def _parse_alternative_master(raw: object) -> EligibilityRemoteAlternativeMaster
         return None
     master_id = raw.get("id")
     public_name = raw.get("publicName")
-    if not _is_valid_id(master_id):
+    if not _is_canonical_uuid(master_id):
         return None
+    assert type(master_id) is str
+    canonical_id = master_id.lower()
     if type(public_name) is not str or not public_name:
         return None
     if len(public_name) > _MAX_PUBLIC_NAME_LENGTH:
         return None
     if _contains_control_chars(public_name):
         return None
-    return EligibilityRemoteAlternativeMaster(id=master_id, public_name=public_name)
+    return EligibilityRemoteAlternativeMaster(id=canonical_id, public_name=public_name)
 
 
 def parse_eligibility_success_payload(raw: object) -> EligibilityRemoteSuccess | None:
@@ -269,9 +305,6 @@ def parse_eligibility_success_payload(raw: object) -> EligibilityRemoteSuccess |
 
     reason = _parse_reason_code(raw.get("reasonCode"))
     if type(reason) is not str and reason is not None:
-        return None
-    # Denial reason codes are incompatible with self-booking success.
-    if outcome is EligibilityRemoteOutcome.SELF_BOOKING_ALLOWED and reason is not None:
         return None
 
     selected_pair = raw.get("selectedPairAllowed")
@@ -296,13 +329,16 @@ def parse_eligibility_success_payload(raw: object) -> EligibilityRemoteSuccess |
         return None
     else:
         parsed: list[EligibilityRemoteAlternativeMaster] = []
+        seen_ids: set[str] = set()
         for item in alternatives_raw:
             master = _parse_alternative_master(item)
             if master is None:
                 return None
+            if master.id in seen_ids:
+                return None
+            seen_ids.add(master.id)
             parsed.append(master)
         alternatives = tuple(parsed)
-        # count must match the concrete list length; never invent from count alone.
         if count != len(alternatives):
             return None
 
@@ -314,17 +350,6 @@ def parse_eligibility_success_payload(raw: object) -> EligibilityRemoteSuccess |
         other_online_master_count=count,
         other_online_masters=alternatives,
     )
-
-
-def _dedupe_preserve_order(ids: list[str]) -> tuple[str, ...]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for item in ids:
-        if item in seen:
-            continue
-        seen.add(item)
-        ordered.append(item)
-    return tuple(ordered)
 
 
 def _unavailable(
@@ -350,45 +375,55 @@ def _map_success_to_domain(
     selected_master: SelectedMaster | None,
     include_alternatives: bool,
 ) -> BookingEligibilityResult:
-    # selectedPairAllowed must agree with whether a master was requested.
-    if selected_master is None:
-        if remote.selected_pair_allowed is not None:
+    master_present = selected_master is not None
+
+    if remote.outcome is EligibilityRemoteOutcome.SELF_BOOKING_ALLOWED:
+        if remote.reason_code is not None:
             return _unavailable(
                 selected_service=selected_service,
                 selected_master=selected_master,
                 reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
             )
-    elif remote.selected_pair_allowed is None:
-        return _unavailable(
-            selected_service=selected_service,
-            selected_master=selected_master,
-            reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
-        )
-
-    # Never grant self-booking when the selected pair is explicitly disallowed.
-    if (
-        remote.outcome is EligibilityRemoteOutcome.SELF_BOOKING_ALLOWED
-        and remote.selected_pair_allowed is False
-    ):
-        return _unavailable(
-            selected_service=selected_service,
-            selected_master=selected_master,
-            reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
-        )
-
-    alternative_ids: list[str] = []
-    if include_alternatives and remote.other_online_masters is not None:
-        selected_id = selected_master.master_id if selected_master is not None else None
-        for master in remote.other_online_masters:
-            if selected_id is not None and master.id == selected_id:
-                continue
-            alternative_ids.append(master.id)
-
-    other_ids = _dedupe_preserve_order(alternative_ids)
-
-    if remote.outcome is EligibilityRemoteOutcome.SELF_BOOKING_ALLOWED:
+        if remote.service_online_in_general is not True:
+            return _unavailable(
+                selected_service=selected_service,
+                selected_master=selected_master,
+                reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+            )
+        if master_present:
+            if remote.selected_pair_allowed is not True:
+                return _unavailable(
+                    selected_service=selected_service,
+                    selected_master=selected_master,
+                    reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+                )
+        elif remote.selected_pair_allowed is not None:
+            return _unavailable(
+                selected_service=selected_service,
+                selected_master=selected_master,
+                reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+            )
         domain_outcome: object = BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
     elif remote.outcome is EligibilityRemoteOutcome.MANAGER_HANDOFF:
+        if remote.reason_code is None:
+            return _unavailable(
+                selected_service=selected_service,
+                selected_master=selected_master,
+                reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+            )
+        if master_present:
+            if remote.selected_pair_allowed is not False:
+                return _unavailable(
+                    selected_service=selected_service,
+                    selected_master=selected_master,
+                    reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+                )
+        elif remote.selected_pair_allowed is not None:
+            return _unavailable(
+                selected_service=selected_service,
+                selected_master=selected_master,
+                reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+            )
         domain_outcome = BookingEligibilityOutcome.MANAGER_HANDOFF
     else:
         return _unavailable(
@@ -396,6 +431,42 @@ def _map_success_to_domain(
             selected_master=selected_master,
             reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
         )
+
+    if include_alternatives:
+        if remote.other_online_masters is None:
+            return _unavailable(
+                selected_service=selected_service,
+                selected_master=selected_master,
+                reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+            )
+        selected_id = None
+        if selected_master is not None:
+            try:
+                selected_id = require_canonical_backend_uuid(selected_master.master_id)
+            except BookingEligibilityHttpError:
+                return _unavailable(
+                    selected_service=selected_service,
+                    selected_master=selected_master,
+                    reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+                )
+        alternative_ids: list[str] = []
+        for master in remote.other_online_masters:
+            if selected_id is not None and master.id == selected_id:
+                return _unavailable(
+                    selected_service=selected_service,
+                    selected_master=selected_master,
+                    reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+                )
+            alternative_ids.append(master.id)
+        other_ids = tuple(alternative_ids)
+    else:
+        if remote.other_online_masters is not None:
+            return _unavailable(
+                selected_service=selected_service,
+                selected_master=selected_master,
+                reason=BookingEligibilityAdapterReasonCode.RESPONSE_INVALID,
+            )
+        other_ids = ()
 
     return normalize_eligibility_outcome(
         domain_outcome,
@@ -435,6 +506,12 @@ class BookingEligibilityHttpClient:
         if type(include_alternatives) is not bool:
             raise BookingEligibilityHttpError("CONFIG_INVALID") from None
 
+        # Backend-specific UUID boundary — raise before any network I/O.
+        service_id = require_canonical_backend_uuid(service.service_id)
+        master_id = (
+            require_canonical_backend_uuid(master.master_id) if master is not None else None
+        )
+
         try:
             token = _validate_bearer_token(self._config.bearer_token)
             timeout = _validate_timeout(self._config.timeout_seconds)
@@ -452,8 +529,8 @@ class BookingEligibilityHttpClient:
             )
 
         remote_request = EligibilityRemoteRequest(
-            service_id=service.service_id,
-            master_id=master.master_id if master is not None else None,
+            service_id=service_id,
+            master_id=master_id,
             include_alternatives=include_alternatives,
         )
         try:
@@ -486,6 +563,7 @@ class BookingEligibilityHttpClient:
             body=body,
             timeout_seconds=timeout,
             allow_redirects=False,
+            max_response_bytes=max_bytes,
         )
 
         try:
@@ -534,14 +612,6 @@ class BookingEligibilityHttpClient:
                 reason=BookingEligibilityAdapterReasonCode.TRANSPORT_ERROR,
             )
 
-        content_length = _header_value(response.headers, "Content-Length")
-        if content_length is not None:
-            if not content_length.isdigit() or int(content_length) > max_bytes:
-                return _unavailable(
-                    selected_service=selected_service,
-                    selected_master=selected_master,
-                    reason=BookingEligibilityAdapterReasonCode.RESPONSE_TOO_LARGE,
-                )
         if len(response.body) > max_bytes:
             return _unavailable(
                 selected_service=selected_service,
