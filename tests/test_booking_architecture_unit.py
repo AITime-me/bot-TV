@@ -180,3 +180,69 @@ def test_worker_runtime_composes_booking_flow_without_app_state() -> None:
                 pytest.fail("worker_runtime must not access app.state")
             if isinstance(value, ast.Attribute) and value.attr in {"app", "application"}:
                 pytest.fail("worker_runtime must not access app.state")
+
+
+_AVAILABILITY_MODULES = (
+    Path("app/core/booking_availability_remote.py"),
+    Path("app/core/booking_availability_http.py"),
+)
+
+_BANNED_HTTP_LIBS = ("httpx", "requests", "aiohttp", "urllib3")
+_BANNED_DB_TOKENS = (
+    "prisma",
+    "create_engine",
+    "sessionmaker",
+    "async_sessionmaker",
+    "sqlalchemy.orm",
+)
+
+
+def test_availability_client_uses_stdlib_s2s_only() -> None:
+    for rel in _AVAILABILITY_MODULES:
+        text = _source(_REPO_ROOT / rel)
+        for banned in _BANNED_HTTP_LIBS:
+            assert banned not in text, f"{rel}: banned HTTP lib {banned}"
+        assert "S2sHttpTransport" in text or rel.name.endswith("_remote.py")
+        for banned in _BANNED_DB_TOKENS:
+            assert banned not in text, f"{rel}: banned DB token {banned}"
+
+
+def test_availability_not_wired_to_live_channels_or_synthetic_flow() -> None:
+    """CURSOR-22 is transport-only; no inbound/outbound/synthetic semantic changes."""
+
+    for rel in (
+        _INBOUND,
+        _REPLY_OUTBOUND,
+        _BOOKING_SYNTHETIC,
+        _BOOKING_FLOW,
+        _ELIGIBILITY_FLOW,
+        _MAIN,
+        _WORKER_RUNTIME,
+    ):
+        text = _source(_REPO_ROOT / rel)
+        assert "get_available_days" not in text, rel.as_posix()
+        assert "get_available_slots" not in text, rel.as_posix()
+        assert "BookingAvailabilityHttpClient" not in text, rel.as_posix()
+        assert "booking_availability_http" not in text, rel.as_posix()
+
+
+def test_availability_modules_have_no_booking_writes() -> None:
+    write_markers = (
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "/api/booking/",
+        "hold",
+        "create_booking",
+        "booking_create",
+    )
+    for rel in _AVAILABILITY_MODULES:
+        text = _source(_REPO_ROOT / rel)
+        lower = text.lower()
+        for marker in write_markers:
+            if marker.lower() == "hold":
+                # allow words like threshold; ban booking hold semantics only.
+                assert "booking_hold" not in lower
+                assert "create_hold" not in lower
+                continue
+            assert marker.lower() not in lower, f"{rel}: write marker {marker}"

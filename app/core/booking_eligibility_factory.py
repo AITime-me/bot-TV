@@ -1,12 +1,18 @@
-"""Factory for booking eligibility S2S client (CURSOR-16).
+"""Factory for booking S2S clients (CURSOR-16/22).
 
-Builds BookingEligibilityHttpClient from Settings without env reads or
-network probes. Returns None when the integration is fully unconfigured.
+Builds eligibility and availability HTTP clients from Settings without env
+reads or network probes. Returns None when the integration is fully
+unconfigured. Both clients share BOOKING_ELIGIBILITY_* settings and the
+same stdlib transport defaults.
 """
 
 from __future__ import annotations
 
 from app.config import Settings
+from app.core.booking_availability_http import (
+    BookingAvailabilityHttpClient,
+    BookingAvailabilityHttpError,
+)
 from app.core.booking_eligibility_http import (
     BookingEligibilityHttpClient,
     BookingEligibilityHttpConfig,
@@ -16,12 +22,8 @@ from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.core.s2s_http_transport import S2sHttpTransport
 
 
-def build_booking_eligibility_client(
-    settings: Settings,
-    *,
-    transport: S2sHttpTransport | None = None,
-) -> BookingEligibilityHttpClient | None:
-    """Create the eligibility client or return None when unset.
+def build_booking_s2s_config(settings: Settings) -> BookingEligibilityHttpConfig | None:
+    """Resolve shared booking S2S config or return None when unset.
 
     Partial or invalid configuration fails closed. Never performs HTTP I/O.
     """
@@ -37,7 +39,7 @@ def build_booking_eligibility_client(
         raise ValueError("BOOKING_ELIGIBILITY configuration is incomplete") from None
 
     try:
-        config = BookingEligibilityHttpConfig(
+        return BookingEligibilityHttpConfig(
             base_url=base_url,
             bearer_token=token,
             timeout_seconds=settings.booking_eligibility_timeout_seconds,
@@ -46,13 +48,49 @@ def build_booking_eligibility_client(
     except BookingEligibilityHttpError:
         raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
 
-    selected_transport: S2sHttpTransport
+
+def _select_transport(transport: S2sHttpTransport | None) -> S2sHttpTransport:
     if transport is None:
-        selected_transport = S2sHttpStdlibTransport()
-    else:
-        selected_transport = transport
+        return S2sHttpStdlibTransport()
+    return transport
+
+
+def build_booking_eligibility_client(
+    settings: Settings,
+    *,
+    transport: S2sHttpTransport | None = None,
+) -> BookingEligibilityHttpClient | None:
+    """Create the eligibility client or return None when unset.
+
+    Partial or invalid configuration fails closed. Never performs HTTP I/O.
+    """
+
+    config = build_booking_s2s_config(settings)
+    if config is None:
+        return None
 
     try:
-        return BookingEligibilityHttpClient(config, selected_transport)
+        return BookingEligibilityHttpClient(config, _select_transport(transport))
     except BookingEligibilityHttpError:
+        raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
+
+
+def build_booking_availability_client(
+    settings: Settings,
+    *,
+    transport: S2sHttpTransport | None = None,
+) -> BookingAvailabilityHttpClient | None:
+    """Create the availability read client or return None when unset.
+
+    Uses the same BOOKING_ELIGIBILITY_* settings as eligibility. Never
+    performs HTTP I/O during construction.
+    """
+
+    config = build_booking_s2s_config(settings)
+    if config is None:
+        return None
+
+    try:
+        return BookingAvailabilityHttpClient(config, _select_transport(transport))
+    except BookingAvailabilityHttpError:
         raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None

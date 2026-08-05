@@ -1,11 +1,13 @@
-"""Booking eligibility HTTP adapter (CURSOR-15/17).
+"""Booking S2S HTTP adapter config + eligibility client (CURSOR-15/17/22).
 
-Confirmed S2S contract against online-zapis-tv
-``POST /api/internal/bot/v1/eligibility`` (PR A):
+Shared constructor config (base URL, Bearer token, timeout, max response)
+is reused by eligibility and availability read clients against online-zapis-tv.
+
+Eligibility contract ``POST /api/internal/bot/v1/eligibility`` (PR A):
 
 - Auth: ``Authorization: Bearer <token>`` only (no HMAC/query token).
   Token is 32..512 printable ASCII (``\\x21-\\x7E``); maps to backend
-  ``BOT_INTERNAL_API_TOKEN``.
+  ``BOT_INTERNAL_API_TOKEN``. Env remains ``BOOKING_ELIGIBILITY_BEARER_TOKEN``.
 - Request JSON (max 4096 bytes): required ``serviceId`` (canonical UUID),
   optional ``masterId``, optional ``includeAlternatives`` (backend default
   false; this client default matches and always sends the boolean).
@@ -17,7 +19,8 @@ Confirmed S2S contract against online-zapis-tv
 - No client PII, channel/conversation ids, or service display names on the
   wire. ``publicName`` is remote-only and never mapped into dialog DTOs.
 
-No env loading and no dialog/pipeline/worker wiring in this module.
+Availability reads live in ``booking_availability_http`` and share this config.
+No env loading and no dialog/pipeline/worker/live-channel wiring here.
 """
 
 from __future__ import annotations
@@ -236,7 +239,11 @@ def _validate_max_response_bytes(raw: object) -> int:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class BookingEligibilityHttpConfig:
-    """Explicit constructor config. No env reading."""
+    """Shared booking S2S constructor config. No env reading.
+
+    Historically named for eligibility; also used by availability reads.
+    Env contract stays ``BOOKING_ELIGIBILITY_*``.
+    """
 
     base_url: str
     bearer_token: str
@@ -259,6 +266,18 @@ class BookingEligibilityHttpConfig:
     def eligibility_url(self) -> str:
         return f"{self.base_url}{ELIGIBILITY_ROUTE_PATH}"
 
+    @property
+    def available_days_url(self) -> str:
+        from app.core.booking_availability_remote import AVAILABLE_DAYS_ROUTE_PATH
+
+        return f"{self.base_url}{AVAILABLE_DAYS_ROUTE_PATH}"
+
+    @property
+    def available_slots_url(self) -> str:
+        from app.core.booking_availability_remote import SLOTS_ROUTE_PATH
+
+        return f"{self.base_url}{SLOTS_ROUTE_PATH}"
+
     def __repr__(self) -> str:
         return (
             "BookingEligibilityHttpConfig("
@@ -267,6 +286,10 @@ class BookingEligibilityHttpConfig:
             f"timeout_seconds={self.timeout_seconds!r}, "
             f"max_response_bytes={self.max_response_bytes!r})"
         )
+
+
+# Compatibility alias: shared S2S settings object for eligibility + availability.
+BookingS2sHttpConfig = BookingEligibilityHttpConfig
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
@@ -685,4 +708,42 @@ class BookingEligibilityHttpClient:
             selected_service=selected_service,
             selected_master=selected_master,
             include_alternatives=include_alternatives,
+        )
+
+    def get_available_days(
+        self,
+        *,
+        service_id: object,
+        master_id: object,
+        month: object,
+    ):
+        """Read available days via shared S2S config/transport (CURSOR-22)."""
+
+        from app.core.booking_availability_http import BookingAvailabilityHttpClient
+
+        return BookingAvailabilityHttpClient(
+            self._config, self._transport
+        ).get_available_days(
+            service_id=service_id,
+            master_id=master_id,
+            month=month,
+        )
+
+    def get_available_slots(
+        self,
+        *,
+        service_id: object,
+        master_id: object,
+        date: object,
+    ):
+        """Read available slots via shared S2S config/transport (CURSOR-22)."""
+
+        from app.core.booking_availability_http import BookingAvailabilityHttpClient
+
+        return BookingAvailabilityHttpClient(
+            self._config, self._transport
+        ).get_available_slots(
+            service_id=service_id,
+            master_id=master_id,
+            date=date,
         )

@@ -3,29 +3,41 @@
 ## Status
 
 Accepted for CURSOR-17 (S2S contract), CURSOR-19 (application consumer
-boundary), and CURSOR-20 (synthetic inbound → two-phase durable reply-plan
-booking). Source of truth for the wire contract: `online-zapis-tv` PR A
-(`POST /api/internal/bot/v1/eligibility`).
+boundary), CURSOR-20 (synthetic inbound → two-phase durable reply-plan
+booking), and CURSOR-22 (typed read-only availability S2S client). Source of
+truth for wire contracts: `online-zapis-tv` internal bot API
+(`POST /api/internal/bot/v1/eligibility`, `.../available-days`, `.../slots`).
 
 ## Context
 
 `bot-TV` ships an HTTP adapter, eligibility→policy orchestrator,
 `BookingFlowService` consumer, and a **synthetic-only** durable path that can
 carry typed booking fixtures into CLIENT_REPLY reply plans. Live VK/MAX/Telegram
-channels and real client sends remain unwired.
+channels and real client sends remain unwired. CURSOR-22 adds a typed
+read-only availability client on the same authenticated S2S boundary; it is
+not yet wired into booking flow or live channels.
 
 ## Decision
 
-### Wire contract (CURSOR-17)
+### Wire contract (CURSOR-17 + CURSOR-22)
+
+Authenticated booking S2S boundary (one base URL, one Bearer token
+`BOOKING_ELIGIBILITY_BEARER_TOKEN` ↔ backend `BOT_INTERNAL_API_TOKEN`):
 
 | Item | Value |
 |---|---|
-| Method / path | `POST /api/internal/bot/v1/eligibility` |
+| Eligibility | `POST /api/internal/bot/v1/eligibility` |
+| Available days (read-only) | `POST /api/internal/bot/v1/available-days` |
+| Slots (read-only) | `POST /api/internal/bot/v1/slots` |
 | Auth | `Authorization: Bearer <token>` only (no HMAC, no query token) |
-| Token | 32..512 printable ASCII (`\x21-\x7E`); bot env `BOOKING_ELIGIBILITY_BEARER_TOKEN` ↔ backend `BOT_INTERNAL_API_TOKEN` |
-| Request body | `{ serviceId, masterId?, includeAlternatives }` JSON, max 4096 bytes; IDs only |
-| Success | HTTP **200** for `SELF_BOOKING_ALLOWED` and `MANAGER_HANDOFF` |
-| Fail-closed | non-200 / transport / parse → `SERVICE_UNAVAILABLE` (no client retries) |
+| Token | 32..512 printable ASCII (`\x21-\x7E`) |
+| Eligibility request | `{ serviceId, masterId?, includeAlternatives }` JSON, max 4096 bytes; IDs only |
+| Eligibility success | HTTP **200** for `SELF_BOOKING_ALLOWED` and `MANAGER_HANDOFF` |
+| Availability | read-only; bot never talks to booking DB / public `/api/booking/*` |
+| Canonical availability adapter | `BookingAvailabilityHttpClient` |
+| Eligibility façade | `BookingEligibilityHttpClient.get_available_days/slots` reuses the same config+transport (not a second stack) |
+| Out of this stage | booking create, holds, live-channel wiring, flow integration of availability |
+| Fail-closed | non-200 / transport / parse → typed adapter failure / eligibility `SERVICE_UNAVAILABLE` (no client retries) |
 
 ### Application boundary (CURSOR-19)
 
