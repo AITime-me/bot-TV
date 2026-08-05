@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import logging
 import socket
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -17,12 +18,24 @@ from app.core.booking_eligibility_http import (
     DEFAULT_TIMEOUT_SECONDS,
     BookingEligibilityHttpClient,
 )
+from app.core.booking_types import (
+    AvailableSlot,
+    BookingDialogAction,
+    BookingEligibilityOutcome,
+    BookingEligibilityResult,
+    BookingInternalReasonCode,
+    SelectedMaster,
+    SelectedService,
+    ServiceUnavailableDecision,
+    SlotOfferDecision,
+)
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.core.s2s_http_transport import (
     S2sHttpRequest,
     S2sHttpResponse,
 )
 from app.main import create_app
+from app.services.booking_eligibility_flow import BookingEligibilityFlowService
 
 _VALID_URL = "https://eligibility.example"
 _SECRET_URL = "https://internal-s2s.prod.example"
@@ -58,6 +71,28 @@ class _RecordingFakeClient:
     """Stand-in injected into create_app; not a real HTTP client."""
 
     marker = "fake-eligibility-client"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.result: BookingEligibilityResult | None = None
+
+    def check_eligibility(
+        self,
+        service: SelectedService,
+        master: SelectedMaster | None = None,
+        *,
+        include_alternatives: bool = False,
+    ) -> BookingEligibilityResult:
+        self.calls.append(
+            {
+                "service": service,
+                "master": master,
+                "include_alternatives": include_alternatives,
+            }
+        )
+        if self.result is None:
+            raise AssertionError("RecordingFakeClient result not configured")
+        return self.result
 
 
 # ---------------------------------------------------------------------------
@@ -342,11 +377,17 @@ def test_create_app_auto_builds_eligibility_client() -> None:
     client = application.state.booking_eligibility_client
     assert isinstance(client, BookingEligibilityHttpClient)
     assert isinstance(client._transport, S2sHttpStdlibTransport)  # noqa: SLF001
+    flow = application.state.booking_eligibility_flow
+    assert isinstance(flow, BookingEligibilityFlowService)
+    assert flow._client is client  # noqa: SLF001
 
 
 def test_create_app_absent_config_sets_none() -> None:
     application = create_app(Settings())
     assert application.state.booking_eligibility_client is None
+    flow = application.state.booking_eligibility_flow
+    assert isinstance(flow, BookingEligibilityFlowService)
+    assert flow._client is None  # noqa: SLF001
 
 
 def test_create_app_partial_config_fails_closed_via_settings() -> None:
@@ -390,6 +431,9 @@ def test_create_app_explicit_fake_client_skips_factory(
     )
     assert application.state.booking_eligibility_client is fake
     assert called["build"] == 0
+    flow = application.state.booking_eligibility_flow
+    assert isinstance(flow, BookingEligibilityFlowService)
+    assert flow._client is fake  # noqa: SLF001
 
 
 def test_create_app_explicit_none_skips_auto_factory(
@@ -411,6 +455,120 @@ def test_create_app_explicit_none_skips_auto_factory(
     )
     assert application.state.booking_eligibility_client is None
     assert called["build"] == 0
+    flow = application.state.booking_eligibility_flow
+    assert isinstance(flow, BookingEligibilityFlowService)
+    assert flow._client is None  # noqa: SLF001
+
+
+def test_create_app_flow_auto_client_resolves_via_service() -> None:
+    """Startup DI: auto-built HTTP client is wrapped by flow service."""
+
+    application = create_app(Settings.from_env(_full_env()))
+    client = application.state.booking_eligibility_client
+    flow = application.state.booking_eligibility_flow
+    assert isinstance(client, BookingEligibilityHttpClient)
+    assert isinstance(flow, BookingEligibilityFlowService)
+    assert flow._client is client  # noqa: SLF001
+
+
+def test_create_app_flow_explicit_none_fail_closed() -> None:
+    """Startup DI: explicit None client → fail-closed flow, zero eligibility calls."""
+
+    application = create_app(
+        Settings.from_env(_full_env()),
+        booking_eligibility_client=None,
+    )
+    flow = application.state.booking_eligibility_flow
+    assert isinstance(flow, BookingEligibilityFlowService)
+    assert flow._client is None  # noqa: SLF001
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    decision = flow.resolve(
+        service,
+        master,
+        (),
+        now=now,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, ServiceUnavailableDecision)
+    assert decision.action is BookingDialogAction.SERVICE_UNAVAILABLE
+    assert (
+        decision.internal_reason_code
+        == BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE.value
+    )
+
+
+def test_create_app_injected_fake_flow_service_is_used() -> None:
+    """Startup DI: injected flow service is stored and used as-is."""
+
+    fake = _RecordingFakeClient()
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
+    fake.result = BookingEligibilityResult(
+        outcome=BookingEligibilityOutcome.SELF_BOOKING_ALLOWED,
+        selected_service=service,
+        selected_master=master,
+        other_online_master_ids=(),
+        internal_reason_code=None,
+    )
+    injected_flow = BookingEligibilityFlowService(fake)
+    application = create_app(
+        Settings(),
+        booking_eligibility_client=None,
+        booking_eligibility_flow=injected_flow,
+    )
+    assert application.state.booking_eligibility_flow is injected_flow
+    assert application.state.booking_eligibility_client is None
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    slot = AvailableSlot(
+        slot_id="s1",
+        starts_at=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+        master_id=master.master_id,
+        service_id=service.service_id,
+    )
+    decision = application.state.booking_eligibility_flow.resolve(
+        service,
+        master,
+        (slot,),
+        now=now,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["service"] is service
+
+
+def test_create_app_injected_fake_client_used_by_auto_flow() -> None:
+    """Startup DI: injected fake client is the flow service dependency."""
+
+    fake = _RecordingFakeClient()
+    service = SelectedService("11111111-1111-4111-8111-111111111111")
+    master = SelectedMaster("22222222-2222-4222-8222-222222222222")
+    fake.result = BookingEligibilityResult(
+        outcome=BookingEligibilityOutcome.MANAGER_HANDOFF,
+        selected_service=service,
+        selected_master=master,
+        other_online_master_ids=(),
+        internal_reason_code="MANAGER_ONLY",
+    )
+    application = create_app(
+        Settings(),
+        booking_eligibility_client=fake,  # type: ignore[arg-type]
+    )
+    flow = application.state.booking_eligibility_flow
+    assert flow._client is fake  # noqa: SLF001
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    decision = flow.resolve(
+        service,
+        master,
+        (),
+        now=now,
+        include_alternatives=False,
+    )
+    assert decision.action is BookingDialogAction.MANAGER_HANDOFF
+    assert decision.internal_reason_code == "MANAGER_ONLY"
+    assert len(fake.calls) == 1
 
 
 def test_create_app_makes_no_http_request(
@@ -427,6 +585,10 @@ def test_create_app_makes_no_http_request(
     assert isinstance(
         application.state.booking_eligibility_client,
         BookingEligibilityHttpClient,
+    )
+    assert isinstance(
+        application.state.booking_eligibility_flow,
+        BookingEligibilityFlowService,
     )
 
 

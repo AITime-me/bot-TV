@@ -16,9 +16,11 @@ from app.core.outbound_policy import (
     is_automatic_outbound_allowed,
 )
 from app.db.session import create_engine, create_session_factory
+from app.services.booking_eligibility_flow import BookingEligibilityFlowService
 from app.services.worker_health import WorkerHealthService
 
 _BOOKING_ELIGIBILITY_CLIENT_UNSET: Final[object] = object()
+_BOOKING_ELIGIBILITY_FLOW_UNSET: Final[object] = object()
 
 
 def create_app(
@@ -28,6 +30,9 @@ def create_app(
     booking_eligibility_client: BookingEligibilityHttpClient
     | None
     | object = _BOOKING_ELIGIBILITY_CLIENT_UNSET,
+    booking_eligibility_flow: BookingEligibilityFlowService
+    | None
+    | object = _BOOKING_ELIGIBILITY_FLOW_UNSET,
 ) -> FastAPI:
     loaded_settings = settings if settings is not None else Settings.from_env()
     engine: AsyncEngine | None = None
@@ -47,6 +52,13 @@ def create_app(
     else:
         resolved_eligibility_client = booking_eligibility_client
 
+    if booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET:
+        resolved_eligibility_flow = BookingEligibilityFlowService(
+            resolved_eligibility_client  # type: ignore[arg-type]
+        )
+    else:
+        resolved_eligibility_flow = booking_eligibility_flow
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
@@ -57,6 +69,7 @@ def create_app(
 
     application = FastAPI(lifespan=lifespan)
     application.state.booking_eligibility_client = resolved_eligibility_client
+    application.state.booking_eligibility_flow = resolved_eligibility_flow
 
     @application.get("/health")
     def health() -> dict[str, str]:
