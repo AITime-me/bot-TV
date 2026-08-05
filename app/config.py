@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
+from app.core.booking_eligibility_http import (
+    DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_TIMEOUT_SECONDS,
+    BookingEligibilityHttpConfig,
+    BookingEligibilityHttpError,
+)
+
 # Mode values stay local to bot-TV. Do not map to online-zapis-tv control-plane
 # enums (TEST/AUTO) until CONTRACT-MODE-01 — see docs/adr/001-mode-contract-deferred.md.
 
@@ -42,6 +49,38 @@ def _parse_int_range(name: str, value: str, *, minimum: int, maximum: int) -> in
     if not minimum <= parsed <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return parsed
+
+
+def _parse_float_range(name: str, value: str, *, minimum: float, maximum: float) -> float:
+    # Reject boolean-looking strings before float() can mis-parse.
+    if value in {"true", "false", "True", "False"}:
+        raise ValueError(f"{name} must be a number") from None
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a number") from error
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        raise ValueError(f"{name} must be a finite number") from None
+    if not minimum < parsed <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}") from None
+    return parsed
+
+
+def _parse_optional_eligibility_secret_pair(
+    *,
+    base_url: str | None,
+    bearer_token: str | None,
+) -> tuple[str | None, str | None]:
+    """Return (url, token) or (None, None). Partial presence fails closed."""
+
+    url_present = base_url is not None and base_url != ""
+    token_present = bearer_token is not None and bearer_token != ""
+    if not url_present and not token_present:
+        return None, None
+    if url_present != token_present:
+        raise ValueError("BOOKING_ELIGIBILITY configuration is incomplete") from None
+    assert base_url is not None and bearer_token is not None
+    return base_url, bearer_token
 
 
 def _parse_optional_database_url(value: str | None) -> str | None:
@@ -115,12 +154,26 @@ class Settings:
     attachment_maintenance_initial_delay_seconds: int = 0
     attachment_reconcile_batch_limit: int = 100
     attachment_purge_batch_limit: int = 100
+    booking_eligibility_base_url: str | None = None
+    booking_eligibility_bearer_token: str | None = None
+    booking_eligibility_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    booking_eligibility_max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
 
     def __repr__(self) -> str:
         if self.database_url is None:
             rendered = "None"
         else:
             rendered = repr(redact_database_url(self.database_url))
+        eligibility_url_repr = (
+            "None"
+            if self.booking_eligibility_base_url is None
+            else "<redacted>"
+        )
+        token_repr = (
+            "None"
+            if self.booking_eligibility_bearer_token is None
+            else "<redacted>"
+        )
         return (
             f"Settings(bot_mode={self.bot_mode!r}, "
             f"emergency_lock={self.emergency_lock!r}, "
@@ -146,7 +199,13 @@ class Settings:
             "attachment_reconcile_batch_limit="
             f"{self.attachment_reconcile_batch_limit!r}, "
             "attachment_purge_batch_limit="
-            f"{self.attachment_purge_batch_limit!r})"
+            f"{self.attachment_purge_batch_limit!r}, "
+            f"booking_eligibility_base_url={eligibility_url_repr}, "
+            f"booking_eligibility_bearer_token={token_repr}, "
+            "booking_eligibility_timeout_seconds="
+            f"{self.booking_eligibility_timeout_seconds!r}, "
+            "booking_eligibility_max_response_bytes="
+            f"{self.booking_eligibility_max_response_bytes!r})"
         )
 
     def __post_init__(self) -> None:
@@ -236,6 +295,89 @@ class Settings:
             raise ValueError(
                 "attachment_purge_batch_limit must be between 1 and 1000"
             )
+        self._validate_booking_eligibility_fields()
+
+    def _validate_booking_eligibility_fields(self) -> None:
+        base_url = self.booking_eligibility_base_url
+        bearer_token = self.booking_eligibility_bearer_token
+        if base_url is not None and type(base_url) is not str:
+            raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
+        if bearer_token is not None and type(bearer_token) is not str:
+            raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
+        if base_url == "":
+            object.__setattr__(self, "booking_eligibility_base_url", None)
+            base_url = None
+        if bearer_token == "":
+            object.__setattr__(self, "booking_eligibility_bearer_token", None)
+            bearer_token = None
+
+        timeout = self.booking_eligibility_timeout_seconds
+        max_bytes = self.booking_eligibility_max_response_bytes
+        if type(timeout) is bool or (
+            type(timeout) is not float and type(timeout) is not int
+        ):
+            raise ValueError(
+                "booking_eligibility_timeout_seconds must be a number"
+            ) from None
+        if type(max_bytes) is not int or type(max_bytes) is bool:
+            raise ValueError(
+                "booking_eligibility_max_response_bytes must be an integer"
+            ) from None
+
+        if base_url is None and bearer_token is None:
+            timeout_value = float(timeout)
+            if (
+                timeout_value != timeout_value
+                or timeout_value <= 0.0
+                or timeout_value > 120.0
+            ):
+                raise ValueError(
+                    "booking_eligibility_timeout_seconds must be between "
+                    "0 and 120"
+                ) from None
+            if max_bytes <= 0 or max_bytes > 1_000_000:
+                raise ValueError(
+                    "booking_eligibility_max_response_bytes must be between "
+                    "1 and 1000000"
+                ) from None
+            object.__setattr__(
+                self, "booking_eligibility_timeout_seconds", timeout_value
+            )
+            return
+
+        if base_url is None or bearer_token is None:
+            raise ValueError(
+                "BOOKING_ELIGIBILITY configuration is incomplete"
+            ) from None
+
+        try:
+            validated = BookingEligibilityHttpConfig(
+                base_url=base_url,
+                bearer_token=bearer_token,
+                timeout_seconds=timeout,
+                max_response_bytes=max_bytes,
+            )
+        except BookingEligibilityHttpError:
+            raise ValueError(
+                "BOOKING_ELIGIBILITY configuration is invalid"
+            ) from None
+
+        object.__setattr__(
+            self, "booking_eligibility_base_url", validated.base_url
+        )
+        object.__setattr__(
+            self, "booking_eligibility_bearer_token", validated.bearer_token
+        )
+        object.__setattr__(
+            self,
+            "booking_eligibility_timeout_seconds",
+            validated.timeout_seconds,
+        )
+        object.__setattr__(
+            self,
+            "booking_eligibility_max_response_bytes",
+            validated.max_response_bytes,
+        )
 
     def validate_worker_runtime(self) -> None:
         """Validate cross-field constraints used only by the worker process."""
@@ -362,4 +504,41 @@ class Settings:
                 minimum=1,
                 maximum=1000,
             ),
+            **cls._eligibility_kwargs_from_env(source),
         )
+
+    @classmethod
+    def _eligibility_kwargs_from_env(
+        cls,
+        source: Mapping[str, str],
+    ) -> dict[str, object]:
+        base_url, bearer_token = _parse_optional_eligibility_secret_pair(
+            base_url=source.get("BOOKING_ELIGIBILITY_BASE_URL"),
+            bearer_token=source.get("BOOKING_ELIGIBILITY_BEARER_TOKEN"),
+        )
+        timeout_raw = source.get("BOOKING_ELIGIBILITY_TIMEOUT_SECONDS")
+        if timeout_raw is None:
+            timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+        else:
+            timeout_seconds = _parse_float_range(
+                "BOOKING_ELIGIBILITY_TIMEOUT_SECONDS",
+                timeout_raw,
+                minimum=0.0,
+                maximum=120.0,
+            )
+        max_raw = source.get("BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES")
+        if max_raw is None:
+            max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+        else:
+            max_response_bytes = _parse_int_range(
+                "BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES",
+                max_raw,
+                minimum=1,
+                maximum=1_000_000,
+            )
+        return {
+            "booking_eligibility_base_url": base_url,
+            "booking_eligibility_bearer_token": bearer_token,
+            "booking_eligibility_timeout_seconds": timeout_seconds,
+            "booking_eligibility_max_response_bytes": max_response_bytes,
+        }

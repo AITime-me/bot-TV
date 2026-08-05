@@ -351,6 +351,18 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
     assert "!app/attachment_maintenance.py" in allow_rules
     assert "!app/attachment_maintenance_healthcheck.py" in EXPECTED_DOCKER_ALLOW_RULES
     assert "!app/core/attachment_maintenance_heartbeat.py" in EXPECTED_DOCKER_ALLOW_RULES
+    for required in (
+        "!app/core/booking_types.py",
+        "!app/core/manager_working_hours.py",
+        "!app/core/booking_dialog_policy.py",
+        "!app/core/booking_eligibility_remote.py",
+        "!app/core/booking_eligibility_http.py",
+        "!app/core/s2s_http_transport.py",
+        "!app/core/s2s_http_stdlib.py",
+        "!app/core/booking_eligibility_factory.py",
+    ):
+        assert required in EXPECTED_DOCKER_ALLOW_RULES
+        assert required in allow_rules
 
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "USER bot-tv" in dockerfile

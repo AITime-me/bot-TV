@@ -65,6 +65,14 @@ Thumbs.db
 !app/core/attachment_fs.py
 !app/core/attachment_maintenance_types.py
 !app/core/attachment_maintenance_heartbeat.py
+!app/core/booking_types.py
+!app/core/manager_working_hours.py
+!app/core/booking_dialog_policy.py
+!app/core/booking_eligibility_remote.py
+!app/core/booking_eligibility_http.py
+!app/core/s2s_http_transport.py
+!app/core/s2s_http_stdlib.py
+!app/core/booking_eligibility_factory.py
 !app/db/
 !app/db/__init__.py
 !app/db/base.py

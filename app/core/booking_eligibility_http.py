@@ -43,6 +43,8 @@ _MAX_PUBLIC_NAME_LENGTH: Final[int] = 256
 _MAX_REQUEST_BYTES: Final[int] = 4096
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 5.0
 _DEFAULT_MAX_RESPONSE_BYTES: Final[int] = 65_536
+DEFAULT_TIMEOUT_SECONDS: Final[float] = _DEFAULT_TIMEOUT_SECONDS
+DEFAULT_MAX_RESPONSE_BYTES: Final[int] = _DEFAULT_MAX_RESPONSE_BYTES
 _ABSENT: Final[object] = object()
 _CANONICAL_UUID_RE: Final[re.Pattern[str]] = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -239,7 +241,7 @@ class BookingEligibilityHttpConfig:
     def __repr__(self) -> str:
         return (
             "BookingEligibilityHttpConfig("
-            f"base_url={self.base_url!r}, "
+            "base_url=<redacted>, "
             "bearer_token=<redacted>, "
             f"timeout_seconds={self.timeout_seconds!r}, "
             f"max_response_bytes={self.max_response_bytes!r})"

@@ -142,6 +142,20 @@ def test_config_accepts_http_and_https() -> None:
     assert https_cfg.eligibility_url.endswith(ELIGIBILITY_ROUTE_PATH)
 
 
+def test_config_repr_redacts_base_url_and_bearer_token() -> None:
+    secret_url = "https://internal-s2s.prod.example"
+    secret_token = "secret-token-value-must-not-leak!!"
+    cfg = _config(base_url=secret_url, bearer_token=secret_token)
+    rendered = repr(cfg)
+    assert secret_url not in rendered
+    assert secret_token not in rendered
+    assert "Authorization" not in rendered
+    assert "base_url=<redacted>" in rendered
+    assert "bearer_token=<redacted>" in rendered
+    assert cfg.base_url == secret_url
+    assert cfg.bearer_token == secret_token
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
