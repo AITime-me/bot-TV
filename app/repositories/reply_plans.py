@@ -461,3 +461,96 @@ async def fail_with_lease(
     if refreshed is None:
         raise RuntimeError("REPLY_PLAN_LOOKUP_FAILED")
     return refreshed
+
+
+async def try_mark_booking_resolution_started(
+    session: AsyncSession,
+    *,
+    plan_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_version: int,
+) -> bool:
+    """Atomically set booking_resolution_started when absent.
+
+    Returns True only for the first successful writer under the active lease.
+    Uses PostgreSQL JSONB key absence checks so a crash/retry cannot start a
+    second remote attempt.
+
+    Identity-map sync uses RETURNING + ``set_committed_value`` so the session
+    observes the merged payload without a dirty ORM write-back that could wipe
+    the CAS marker.
+    """
+
+    from sqlalchemy import cast
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    marker = {"booking_resolution_started": True}
+    stmt = (
+        update(ReplyPlan)
+        .where(
+            ReplyPlan.id == plan_id,
+            ReplyPlan.status == ReplyPlanStatus.PROCESSING.value,
+            ReplyPlan.lease_token == lease_token,
+            ReplyPlan.lease_version == lease_version,
+            text("NOT (payload_json ? 'booking_resolution_started')"),
+            text("NOT (payload_json ? 'booking_resolution_result')"),
+        )
+        .values(
+            payload_json=ReplyPlan.payload_json.op("||")(cast(marker, JSONB)),
+            updated_at=func.now(),
+        )
+        .returning(ReplyPlan.payload_json)
+    )
+    new_payload = await session.scalar(stmt)
+    if new_payload is None:
+        return False
+
+    plan = await get_by_id(session, plan_id=plan_id)
+    if plan is not None:
+        # Committed-value sync: no UnitOfWork UPDATE on commit.
+        set_committed_value(plan, "payload_json", dict(new_payload))
+    return True
+
+
+async def persist_booking_resolution_result(
+    session: AsyncSession,
+    *,
+    plan_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_version: int,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist a pre-sanitized booking result under the active lease.
+
+    If a result is already stored, returns the existing payload without overwrite.
+    Caller must pass allowlisted fields only (no PII/text).
+    """
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    plan = await get_by_id(session, plan_id=plan_id)
+    if plan is None:
+        raise RuntimeError("REPLY_PLAN_LOOKUP_FAILED")
+    if (
+        plan.status != ReplyPlanStatus.PROCESSING.value
+        or plan.lease_token != lease_token
+        or plan.lease_version != lease_version
+    ):
+        raise StaleReplyPlanLeaseError("REPLY_PLAN_STALE_LEASE")
+
+    payload = dict(plan.payload_json)
+    existing = payload.get("booking_resolution_result")
+    if isinstance(existing, dict):
+        return payload
+
+    if type(result) is not dict:
+        raise ValueError("BOOKING_RESOLUTION_RESULT_INVALID")
+
+    updated = dict(payload)
+    updated["booking_resolution_started"] = True
+    updated["booking_resolution_result"] = dict(result)
+    plan.payload_json = updated
+    flag_modified(plan, "payload_json")
+    await session.flush()
+    return updated

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
+from app.schemas.booking_input import SyntheticBookingInput
 
 
 class SyntheticInboundEvent(BaseModel):
@@ -14,7 +15,9 @@ class SyntheticInboundEvent(BaseModel):
 
     Only synthetic fixture data is accepted. extra="forbid" rejects accidental
     PII-shaped fields (phone, email, tokens, etc.) at the schema boundary.
-    This stage does not claim full PII filtering of free-form text.
+    Optional ``booking`` is a typed fixture for CLIENT_REPLY wiring — never
+    inferred from free-form text. This stage does not claim full PII filtering
+    of free-form text.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -24,6 +27,7 @@ class SyntheticInboundEvent(BaseModel):
     external_message_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=2000, repr=False)
     received_at: datetime | None = None
+    booking: SyntheticBookingInput | None = None
 
     @field_validator("external_conversation_id", "external_message_id")
     @classmethod
@@ -72,6 +76,7 @@ class SyntheticInboundEvent(BaseModel):
                 purpose="external_conversation_id",
             ),
             "text": "<redacted>",
+            "booking_present": self.booking is not None,
         }
 
     def __repr__(self) -> str:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.core.booking_eligibility_factory import build_booking_eligibility_client
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     AMOCRM_MIRROR_LOOP,
@@ -24,6 +25,8 @@ from app.repositories.ingress import StaleIngressLeaseError
 from app.repositories.outbound import StaleOutboundLeaseError
 from app.repositories.reply_plans import StaleReplyPlanLeaseError
 from app.services.amocrm_mirror import AmoCrmMirrorWorker
+from app.services.booking_eligibility_flow import BookingEligibilityFlowService
+from app.services.booking_flow import BookingFlowService
 from app.services.handoff_expiry import HandoffExpiryWorker
 from app.services.ingress import IngressWorker
 from app.services.outbound_arbiter import OutboundArbiter
@@ -249,12 +252,25 @@ class WorkerRuntime:
                 pass
 
 
+def build_booking_flow_for_worker(settings: Settings) -> BookingFlowService:
+    """Compose BookingFlowService for the worker process (no app.state)."""
+
+    client = build_booking_eligibility_client(settings)
+    return BookingFlowService(BookingEligibilityFlowService(client))
+
+
 def build_default_loop_specs(
     *,
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
     worker_id: str,
+    booking_flow: BookingFlowService | None = None,
 ) -> tuple[WorkerLoopSpec, ...]:
+    resolved_booking_flow = (
+        booking_flow
+        if booking_flow is not None
+        else build_booking_flow_for_worker(settings)
+    )
     ingress = IngressWorker(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "ingress"),
@@ -264,6 +280,7 @@ def build_default_loop_specs(
     reply_plan = ReplyPlanWorker(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "reply"),
+        booking_flow=resolved_booking_flow,
     )
     arbiter = OutboundArbiter(session_factory, settings=settings)
     outbound = OutboundWorker(

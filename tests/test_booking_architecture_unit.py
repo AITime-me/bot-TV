@@ -1,11 +1,12 @@
-"""Architectural boundaries for booking self-booking (CURSOR-19).
+"""Architectural boundaries for booking self-booking (CURSOR-19/20).
 
 Scans production ``app/`` sources only (not tests):
 - ``decide_booking_dialog`` may be defined in booking_dialog_policy and called
   only from booking_eligibility_flow;
 - ``BookingEligibilityFlowService`` may be defined in booking_eligibility_flow
-  and composed only in ``app/main.py`` — not used by other application modules
-  in bypass of ``BookingFlowService``;
+  and composed only in ``app/main.py`` / ``app/services/worker_runtime.py``;
+- application callers (inbound/reply) must use ``BookingFlowService``, not
+  eligibility flow or dialog policy;
 - ``application.state`` must not publish raw eligibility client/flow attributes.
 """
 
@@ -22,10 +23,14 @@ _APP_ROOT = _REPO_ROOT / "app"
 _POLICY_DEF = Path("app/core/booking_dialog_policy.py")
 _ELIGIBILITY_FLOW = Path("app/services/booking_eligibility_flow.py")
 _BOOKING_FLOW = Path("app/services/booking_flow.py")
+_BOOKING_SYNTHETIC = Path("app/services/booking_synthetic.py")
 _MAIN = Path("app/main.py")
+_WORKER_RUNTIME = Path("app/services/worker_runtime.py")
+_REPLY_OUTBOUND = Path("app/services/reply_outbound.py")
+_INBOUND = Path("app/services/inbound.py")
 
 _DECIDE_ALLOWED = {_POLICY_DEF, _ELIGIBILITY_FLOW}
-_ELIGIBILITY_FLOW_SERVICE_ALLOWED = {_ELIGIBILITY_FLOW, _MAIN}
+_ELIGIBILITY_FLOW_SERVICE_ALLOWED = {_ELIGIBILITY_FLOW, _MAIN, _WORKER_RUNTIME}
 
 
 def _app_python_files() -> list[Path]:
@@ -71,7 +76,7 @@ def test_decide_booking_dialog_only_from_eligibility_flow() -> None:
 
 
 def test_booking_eligibility_flow_service_not_used_by_app_callers() -> None:
-    """Only definition + create_app composition may name BookingEligibilityFlowService."""
+    """Only definition + composition roots may name BookingEligibilityFlowService."""
 
     offenders: list[str] = []
     for path in _app_python_files():
@@ -94,6 +99,28 @@ def test_booking_flow_consumer_does_not_import_eligibility_flow_class() -> None:
     assert "import app.services.booking_eligibility_flow" not in text
     assert "decide_booking_dialog" not in text
     assert "booking_dialog_policy" not in text
+
+
+def test_inbound_and_reply_use_booking_flow_not_policy() -> None:
+    inbound = _source(_REPO_ROOT / _INBOUND)
+    reply = _source(_REPO_ROOT / _REPLY_OUTBOUND)
+    bridge = _source(_REPO_ROOT / _BOOKING_SYNTHETIC)
+    for label, text in (
+        ("inbound", inbound),
+        ("reply_outbound", reply),
+        ("booking_synthetic", bridge),
+    ):
+        assert "decide_booking_dialog" not in text, label
+        assert "BookingEligibilityFlowService" not in text, label
+        assert "booking_dialog_policy" not in text, label
+    assert "BookingFlowService" in reply
+    assert "build_synthetic_outbound_payload" in reply
+    assert "asyncio.to_thread" in reply
+    assert "_booking_phase1_prepare" in reply
+    assert "_booking_phase2_finalize" in reply
+    assert "client_reply_plan_payload" in inbound
+    assert "resolve_booking_outbound_fields" in bridge
+
 
 
 def test_app_state_publishes_only_booking_flow_not_raw_eligibility() -> None:
@@ -123,7 +150,6 @@ def test_create_app_never_assigns_none_booking_flow() -> None:
     main_text = _source(_REPO_ROOT / _MAIN)
     assert "BookingFlowService(None)" in main_text
     assert "application.state.booking_flow = resolved_booking_flow" in main_text
-    # Explicit None kwarg must normalize, not assign None literally to state.
     tree = ast.parse(main_text, filename="app/main.py")
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -136,3 +162,21 @@ def test_create_app_never_assigns_none_booking_flow() -> None:
                 and node.value.value is None
             ):
                 pytest.fail("application.state.booking_flow must not be assigned None")
+
+
+def test_worker_runtime_composes_booking_flow_without_app_state() -> None:
+    text = _source(_REPO_ROOT / _WORKER_RUNTIME)
+    assert "build_booking_flow_for_worker" in text
+    assert "BookingFlowService" in text
+    assert "application.state" not in text
+    assert "ReplyPlanWorker(" in text
+    assert "booking_flow=" in text
+    # Do not read FastAPI app.state; docstring may mention the phrase.
+    tree = ast.parse(text, filename="app/services/worker_runtime.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "state":
+            value = node.value
+            if isinstance(value, ast.Name) and value.id in {"app", "application"}:
+                pytest.fail("worker_runtime must not access app.state")
+            if isinstance(value, ast.Attribute) and value.attr in {"app", "application"}:
+                pytest.fail("worker_runtime must not access app.state")

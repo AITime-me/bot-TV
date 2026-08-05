@@ -1,12 +1,13 @@
-"""Booking self-booking consumer (CURSOR-19).
+"""Booking self-booking consumer (CURSOR-19/20).
 
-Prepared application boundary for the next channel-wiring gate. Not yet invoked
-from live channels, inbound, worker, or outbound. Callers that form a
-self-booking decision must use this service (via DI), which always goes through
-an injected eligibility flow — never dialog policy directly and never FastAPI
-application state.
+Sole application boundary for self-booking decisions. Synthetic reply-plan
+workers call ``resolve`` via DI; live VK/MAX/Telegram channels remain unwired.
+Callers must use this service (composition root / injection), which always goes
+through an injected eligibility flow — never dialog policy directly and never
+FastAPI request state from the worker process.
 
-No channel adapters, outbound, worker loops, DB writes, or live HTTP.
+No live channel adapters, client sends, DB writes, or production HTTP here;
+eligibility HTTP is owned by the injected flow/client when configured.
 """
 
 from __future__ import annotations
