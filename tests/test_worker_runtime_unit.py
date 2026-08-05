@@ -357,6 +357,8 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/core/booking_dialog_policy.py",
         "!app/core/booking_eligibility_remote.py",
         "!app/core/booking_eligibility_http.py",
+        "!app/core/booking_availability_remote.py",
+        "!app/core/booking_availability_http.py",
         "!app/core/s2s_http_transport.py",
         "!app/core/s2s_http_stdlib.py",
         "!app/core/booking_eligibility_factory.py",
