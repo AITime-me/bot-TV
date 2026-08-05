@@ -1,7 +1,9 @@
 """Remote DTOs for POST /api/internal/bot/v1/eligibility.
 
-Separated from dialog/domain DTOs. No client phone, client name, channel ids,
-or conversation text. Repr never prints publicName or body-like payloads.
+Wire contract (online-zapis-tv PR A): camelCase JSON with ``serviceId``,
+optional ``masterId``, and ``includeAlternatives`` (backend default false).
+No client phone, client name, channel ids, or conversation text.
+Repr never prints publicName or body-like payloads.
 """
 
 from __future__ import annotations

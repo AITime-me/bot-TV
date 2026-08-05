@@ -1,7 +1,23 @@
-"""Booking eligibility HTTP adapter foundation (CURSOR-15).
+"""Booking eligibility HTTP adapter (CURSOR-15/17).
 
-Typed client for POST /api/internal/bot/v1/eligibility only.
-No env loading, no dialog/pipeline wiring. Backend IDs are canonical UUIDs.
+Confirmed S2S contract against online-zapis-tv
+``POST /api/internal/bot/v1/eligibility`` (PR A):
+
+- Auth: ``Authorization: Bearer <token>`` only (no HMAC/query token).
+  Token is 32..512 printable ASCII (``\\x21-\\x7E``); maps to backend
+  ``BOT_INTERNAL_API_TOKEN``.
+- Request JSON (max 4096 bytes): required ``serviceId`` (canonical UUID),
+  optional ``masterId``, optional ``includeAlternatives`` (backend default
+  false; this client default matches and always sends the boolean).
+- Success HTTP 200: ``ok:true`` + ``SELF_BOOKING_ALLOWED`` /
+  ``MANAGER_HANDOFF`` with machine ``reasonCode`` allowlist;
+  ``otherOnlineMasters`` only when alternatives were requested.
+- Errors: 401/400/413/429/500 with ``{ok:false,code,error}`` — client maps
+  any non-200 to fail-closed ``REMOTE_REJECTED`` (no retries, no body echo).
+- No client PII, channel/conversation ids, or service display names on the
+  wire. ``publicName`` is remote-only and never mapped into dialog DTOs.
+
+No env loading and no dialog/pipeline/worker wiring in this module.
 """
 
 from __future__ import annotations
@@ -39,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 ELIGIBILITY_ROUTE_PATH: Final[str] = "/api/internal/bot/v1/eligibility"
 _MIN_TOKEN_LENGTH: Final[int] = 32
+_MAX_TOKEN_LENGTH: Final[int] = 512
+_PRINTABLE_ASCII_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[\x21-\x7E]+$")
 _MAX_PUBLIC_NAME_LENGTH: Final[int] = 256
 _MAX_REQUEST_BYTES: Final[int] = 4096
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -189,9 +207,12 @@ def _validate_base_url(raw: object) -> str:
 def _validate_bearer_token(raw: object) -> str:
     if type(raw) is not str:
         raise BookingEligibilityHttpError("CONFIG_INVALID") from None
-    if not raw or len(raw) < _MIN_TOKEN_LENGTH:
-        raise BookingEligibilityHttpError("CONFIG_INVALID") from None
-    if any(ch.isspace() for ch in raw) or _contains_control_chars(raw):
+    if (
+        not raw
+        or len(raw) < _MIN_TOKEN_LENGTH
+        or len(raw) > _MAX_TOKEN_LENGTH
+        or _PRINTABLE_ASCII_TOKEN_RE.fullmatch(raw) is None
+    ):
         raise BookingEligibilityHttpError("CONFIG_INVALID") from None
     return raw
 
@@ -499,7 +520,7 @@ class BookingEligibilityHttpClient:
         service: SelectedService,
         master: SelectedMaster | None = None,
         *,
-        include_alternatives: bool = True,
+        include_alternatives: bool = False,
     ) -> BookingEligibilityResult:
         if type(service) is not SelectedService:
             raise BookingEligibilityHttpError("CONFIG_INVALID") from None

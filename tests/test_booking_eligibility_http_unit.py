@@ -99,6 +99,7 @@ def _json_response(
 
 
 def _success_payload(**overrides: Any) -> dict[str, Any]:
+    # Matches backend when includeAlternatives is false: no otherOnlineMasters key.
     payload: dict[str, Any] = {
         "ok": True,
         "outcome": "SELF_BOOKING_ALLOWED",
@@ -106,7 +107,6 @@ def _success_payload(**overrides: Any) -> dict[str, Any]:
         "selectedPairAllowed": True,
         "serviceOnlineInGeneral": True,
         "otherOnlineMasterCount": 0,
-        "otherOnlineMasters": [],
     }
     payload.update(overrides)
     return payload
@@ -175,6 +175,32 @@ def test_config_rejects_invalid_base_url(base_url: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "token",
+    [
+        "short",
+        "a" * 31,
+        "a" * 513,
+        "a" * 31 + " ",
+        "a" * 16 + "\n" + "b" * 15,
+        "а" * 32,  # non-ASCII
+        "a" * 31 + "\x00",
+    ],
+)
+def test_config_rejects_invalid_bearer_token(token: str) -> None:
+    with pytest.raises(BookingEligibilityHttpError) as exc_info:
+        _config(bearer_token=token)
+    assert exc_info.value.code == "CONFIG_INVALID"
+    assert token not in str(exc_info.value)
+    assert token not in repr(exc_info.value)
+
+
+def test_config_accepts_max_length_printable_ascii_token() -> None:
+    token = "A" * 512
+    cfg = _config(bearer_token=token)
+    assert cfg.bearer_token == token
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         "not-a-uuid",
@@ -195,7 +221,7 @@ def test_invalid_service_uuid_raises_before_transport(raw: str) -> None:
 def test_uppercase_uuid_normalized_in_request_body() -> None:
     transport = FakeTransport(
         response=_json_response(
-            _success_payload(selectedPairAllowed=True, otherOnlineMasters=[])
+            _success_payload(selectedPairAllowed=True)
         )
     )
     upper_service = SelectedService(_SERVICE_UUID.upper())
@@ -205,6 +231,7 @@ def test_uppercase_uuid_normalized_in_request_body() -> None:
     body = json.loads(transport.calls[0].body.decode("utf-8"))
     assert body["serviceId"] == _SERVICE_UUID
     assert body["masterId"] == _MASTER_UUID
+    assert body["includeAlternatives"] is False
 
 
 def test_require_canonical_uuid_helper() -> None:
@@ -219,8 +246,12 @@ def test_require_canonical_uuid_helper() -> None:
 
 
 def test_request_is_exact_post_json_with_auth_header_only() -> None:
-    transport = FakeTransport(response=_json_response(_success_payload()))
-    result = _client(transport).check_eligibility(_SERVICE, _MASTER, include_alternatives=True)
+    transport = FakeTransport(
+        response=_json_response(_success_payload(otherOnlineMasters=[]))
+    )
+    result = _client(transport).check_eligibility(
+        _SERVICE, _MASTER, include_alternatives=True
+    )
     assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
     assert len(transport.calls) == 1
     call = transport.calls[0]
@@ -238,6 +269,14 @@ def test_request_is_exact_post_json_with_auth_header_only() -> None:
     assert call.headers["Authorization"] == f"Bearer {_VALID_TOKEN}"
     assert _VALID_TOKEN not in repr(call)
     assert len(call.body) <= 4096
+
+
+def test_request_default_include_alternatives_is_false() -> None:
+    transport = FakeTransport(response=_json_response(_success_payload()))
+    _client(transport).check_eligibility(_SERVICE, _MASTER)
+    body = json.loads(transport.calls[0].body.decode("utf-8"))
+    assert body["includeAlternatives"] is False
+    assert "masterId" in body
 
 
 def test_request_omits_master_id_when_master_absent() -> None:
@@ -266,7 +305,7 @@ def test_self_booking_with_master() -> None:
 
 def test_self_booking_without_master() -> None:
     transport = FakeTransport(
-        response=_json_response(_success_payload(selectedPairAllowed=None, otherOnlineMasters=[]))
+        response=_json_response(_success_payload(selectedPairAllowed=None))
     )
     result = _client(transport).check_eligibility(_SERVICE, None)
     assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
@@ -279,7 +318,6 @@ def test_manager_handoff_with_master() -> None:
                 outcome="MANAGER_HANDOFF",
                 reasonCode="ONLINE_DISABLED",
                 selectedPairAllowed=False,
-                otherOnlineMasters=[],
             )
         )
     )
@@ -295,7 +333,6 @@ def test_manager_handoff_null_reason_fails_closed() -> None:
                 outcome="MANAGER_HANDOFF",
                 reasonCode=None,
                 selectedPairAllowed=False,
-                otherOnlineMasters=[],
             )
         )
     )
@@ -321,7 +358,7 @@ def test_self_booking_selected_pair_false_fails_closed() -> None:
 
 def test_include_alternatives_true_requires_list() -> None:
     payload = _success_payload(otherOnlineMasterCount=2)
-    del payload["otherOnlineMasters"]
+    assert "otherOnlineMasters" not in payload
     transport = FakeTransport(response=_json_response(payload))
     result = _client(transport).check_eligibility(_SERVICE, _MASTER, include_alternatives=True)
     assert result.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
@@ -345,7 +382,7 @@ def test_alternatives_present_when_requested() -> None:
 
 def test_include_alternatives_false_with_count_without_list() -> None:
     payload = _success_payload(otherOnlineMasterCount=3, selectedPairAllowed=True)
-    del payload["otherOnlineMasters"]
+    assert "otherOnlineMasters" not in payload
     transport = FakeTransport(response=_json_response(payload))
     result = _client(transport).check_eligibility(_SERVICE, _MASTER, include_alternatives=False)
     assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
@@ -510,7 +547,6 @@ def test_internal_reason_not_in_client_message() -> None:
                 outcome="MANAGER_HANDOFF",
                 reasonCode="MANAGER_ONLY",
                 selectedPairAllowed=False,
-                otherOnlineMasters=[],
             )
         )
     )
