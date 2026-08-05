@@ -28,6 +28,7 @@ from app.core.booking_availability_http import (
 from app.core.booking_availability_remote import (
     AvailableDaysResult,
     AvailableSlotsResult,
+    require_canonical_booking_starts_at,
 )
 from app.core.booking_eligibility_factory import (
     build_booking_availability_client,
@@ -618,6 +619,30 @@ def test_available_days_missing_field_fail_closed() -> None:
             "slots": [
                 _slot_payload(
                     slot_id="a",
+                    starts_at="2026-08-06T10:00:00+00:00",
+                )
+            ]
+        },
+        {
+            "slots": [
+                _slot_payload(
+                    slot_id="a",
+                    starts_at="2026-08-06T10:00:01+05:00",
+                )
+            ]
+        },
+        {
+            "slots": [
+                _slot_payload(
+                    slot_id="a",
+                    starts_at="2026-02-30T10:00:00+05:00",
+                )
+            ]
+        },
+        {
+            "slots": [
+                _slot_payload(
+                    slot_id="a",
                     starts_at="2026-08-07T10:00:00+05:00",
                 )
             ]
@@ -692,6 +717,32 @@ def test_available_slots_contradictory_response_fail_closed(
             date=_DATE,
         )
     assert exc_info.value.code == "RESPONSE_INVALID"
+
+
+def test_http_adapter_uses_shared_canonical_starts_at_helper() -> None:
+    good = "2026-08-06T10:15:00+05:00"
+    assert require_canonical_booking_starts_at(good) is good
+    with pytest.raises(ValueError):
+        require_canonical_booking_starts_at("2026-08-06T10:15:00Z")
+    # Happy remote path still accepts studio offset only.
+    transport = FakeTransport(
+        response=_json_response(
+            _slots_success(
+                slots=[
+                    _slot_payload(
+                        slot_id="ok",
+                        starts_at=good,
+                    )
+                ]
+            )
+        )
+    )
+    result = _client(transport).get_available_slots(
+        service_id=_SERVICE_UUID,
+        master_id=_MASTER_UUID,
+        date=_DATE,
+    )
+    assert result.slots[0].starts_at.utcoffset() == timedelta(hours=5)
 
 
 def test_available_slots_more_than_288_fail_closed() -> None:

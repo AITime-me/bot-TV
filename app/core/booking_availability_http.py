@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Final, Mapping, NoReturn
@@ -30,6 +29,9 @@ from app.core.booking_availability_remote import (
     AvailableDaysResult,
     AvailableSlotsRemoteRequest,
     AvailableSlotsResult,
+    require_calendar_date as _require_calendar_date,
+    require_calendar_month as _require_calendar_month,
+    require_canonical_booking_starts_at,
 )
 from app.core.booking_eligibility_http import (
     BookingEligibilityHttpConfig,
@@ -69,14 +71,6 @@ _MAX_SLOT_ID_LENGTH: Final[int] = 128
 # Studio wall-clock offset matches Asia/Yekaterinburg (permanent UTC+5).
 _STUDIO_UTC_OFFSET: Final[timedelta] = timedelta(hours=5)
 _STUDIO_TZ: Final[timezone] = timezone(_STUDIO_UTC_OFFSET, name=MANAGER_TIMEZONE_NAME)
-
-_MONTH_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]{4})-([0-9]{2})$")
-_DATE_RE: Final[re.Pattern[str]] = re.compile(
-    r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$"
-)
-_STARTS_AT_RE: Final[re.Pattern[str]] = re.compile(
-    r"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):00\+05:00$"
-)
 
 _AVAILABLE_DAYS_SUCCESS_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -200,46 +194,19 @@ def _contains_control_chars(value: str) -> bool:
 def require_calendar_month(value: object) -> str:
     """Require a real calendar month ``YYYY-MM``. Never echoes the value."""
 
-    if type(value) is not str or not value:
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    if any(ch.isspace() for ch in value) or _contains_control_chars(value):
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    match = _MONTH_RE.fullmatch(value)
-    if match is None:
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    year = int(match.group(1))
-    month = int(match.group(2))
-    if year < 1 or month < 1 or month > 12:
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    # Prove the month exists in the Gregorian calendar.
     try:
-        date(year, month, 1)
+        return _require_calendar_month(value)
     except ValueError:
         raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    return f"{year:04d}-{month:02d}"
 
 
 def require_calendar_date(value: object) -> str:
     """Require a real calendar day ``YYYY-MM-DD``. Never echoes the value."""
 
-    if type(value) is not str or not value:
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    if any(ch.isspace() for ch in value) or _contains_control_chars(value):
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    match = _DATE_RE.fullmatch(value)
-    if match is None:
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    year = int(match.group(1))
-    month = int(match.group(2))
-    day = int(match.group(3))
     try:
-        parsed = date(year, month, day)
+        return _require_calendar_date(value)
     except ValueError:
         raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    canonical = parsed.isoformat()
-    if canonical != value:
-        raise BookingAvailabilityHttpError("REQUEST_INVALID") from None
-    return canonical
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
@@ -258,26 +225,19 @@ def _content_type_is_json(content_type: str | None) -> bool:
 
 
 def _parse_starts_at(raw: object, *, expected_date: str) -> datetime | None:
-    if type(raw) is not str or not raw:
-        return None
-    if _contains_control_chars(raw) or any(ch.isspace() for ch in raw):
-        return None
-    match = _STARTS_AT_RE.fullmatch(raw)
-    if match is None:
-        return None
-    year = int(match.group(1))
-    month = int(match.group(2))
-    day = int(match.group(3))
-    hour = int(match.group(4))
-    minute = int(match.group(5))
     try:
-        wall = date(year, month, day)
+        canonical = require_canonical_booking_starts_at(raw)
     except ValueError:
         return None
-    if wall.isoformat() != expected_date:
+    # Format is fixed: YYYY-MM-DDTHH:MM:00+05:00
+    day_part = canonical[0:10]
+    if day_part != expected_date:
         return None
-    if hour > 23 or minute > 59:
-        return None
+    year = int(canonical[0:4])
+    month = int(canonical[5:7])
+    day = int(canonical[8:10])
+    hour = int(canonical[11:13])
+    minute = int(canonical[14:16])
     return datetime(year, month, day, hour, minute, 0, tzinfo=_STUDIO_TZ)
 
 

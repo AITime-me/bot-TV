@@ -842,3 +842,116 @@ def test_alternatives_and_consent_forwarded() -> None:
     outbound = build_synthetic_outbound_payload(plan, booking_flow=flow)
     assert outbound["booking_offered_slot_ids"] == ["alt1"]
     assert client.calls[0]["include_alternatives"] is True
+
+
+@pytest.mark.asyncio
+async def test_availability_query_durable_success_one_eligibility_one_availability() -> None:
+    from app.core.booking_availability_remote import AvailableDaysResult
+    from app.schemas.booking_input import SyntheticAvailableDaysQuery
+
+    class RecordingAvailability:
+        def __init__(self) -> None:
+            self.day_calls: list[dict[str, Any]] = []
+
+        def get_available_days(
+            self,
+            *,
+            service_id: object,
+            master_id: object,
+            month: object,
+        ) -> AvailableDaysResult:
+            self.day_calls.append(
+                {"service_id": service_id, "master_id": master_id, "month": month}
+            )
+            return AvailableDaysResult(
+                service_id=_SERVICE,
+                master_id=_MASTER,
+                month="2026-08",
+                studio_today="2026-08-05",
+                date_keys=("2026-08-06", "2026-08-07"),
+            )
+
+        def get_available_slots(self, **_kwargs: Any) -> Any:
+            raise AssertionError("slots must not be called")
+
+    eligibility = FakeEligibilityClient(result=_allowed_result())
+    availability = RecordingAvailability()
+    flow = BookingFlowService(
+        BookingEligibilityFlowService(eligibility),
+        availability,  # type: ignore[arg-type]
+    )
+    booking = SyntheticBookingInput(
+        service_id=_SERVICE,
+        master_id=_MASTER,
+        include_alternatives=False,
+        availability_query=SyntheticAvailableDaysQuery(
+            kind="AVAILABLE_DAYS", month="2026-08"
+        ),
+        decision_at=_NOW,
+    )
+    plan = client_reply_plan_payload(inbox_id="i1", booking=booking)
+    claim = _claim_with_plan(plan)
+    store = _PlanStore(payload=dict(plan))
+    probe = _TxnProbe()
+
+    result = await _run_booking_dispatch(
+        claim=claim, flow=flow, store=store, probe=probe
+    )
+    assert result.outbound_created is True
+    assert len(eligibility.calls) == 1
+    assert len(availability.day_calls) == 1
+    assert probe.resolve_calls == 1
+    assert store.inserted_payloads[0]["booking_action"] == (
+        BookingDialogAction.OFFER_DAYS.value
+    )
+    assert store.inserted_payloads[0]["booking_available_date_keys"] == [
+        "2026-08-06",
+        "2026-08-07",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_availability_interrupted_marker_skips_both_remote_calls() -> None:
+    from app.core.booking_availability_remote import AvailableDaysResult
+    from app.schemas.booking_input import SyntheticAvailableDaysQuery
+
+    class RecordingAvailability:
+        def __init__(self) -> None:
+            self.day_calls: list[dict[str, Any]] = []
+
+        def get_available_days(self, **_kwargs: Any) -> AvailableDaysResult:
+            self.day_calls.append({})
+            raise AssertionError("must not call availability after interrupt")
+
+        def get_available_slots(self, **_kwargs: Any) -> Any:
+            raise AssertionError("must not call slots")
+
+    eligibility = FakeEligibilityClient(result=_allowed_result())
+    availability = RecordingAvailability()
+    flow = BookingFlowService(
+        BookingEligibilityFlowService(eligibility),
+        availability,  # type: ignore[arg-type]
+    )
+    booking = SyntheticBookingInput(
+        service_id=_SERVICE,
+        master_id=_MASTER,
+        include_alternatives=False,
+        availability_query=SyntheticAvailableDaysQuery(
+            kind="AVAILABLE_DAYS", month="2026-08"
+        ),
+        decision_at=_NOW,
+    )
+    plan = client_reply_plan_payload(inbox_id="i1", booking=booking)
+    plan = dict(plan)
+    plan[BOOKING_RESOLUTION_STARTED_KEY] = True
+    claim = _claim_with_plan(plan)
+    store = _PlanStore(payload=dict(plan))
+    probe = _TxnProbe()
+
+    await _run_booking_dispatch(claim=claim, flow=flow, store=store, probe=probe)
+    assert probe.resolve_calls == 0
+    assert eligibility.calls == []
+    assert availability.day_calls == []
+    assert store.inserted_payloads[0]["booking_reason"] == (
+        BookingInternalReasonCode.BOOKING_RESOLUTION_INTERRUPTED.value
+    )

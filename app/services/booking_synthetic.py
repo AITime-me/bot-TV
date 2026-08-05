@@ -1,4 +1,4 @@
-"""Bridge synthetic reply-plan booking fixtures to BookingFlowService (CURSOR-20).
+"""Bridge synthetic reply-plan booking fixtures to BookingFlowService (CURSOR-20/23).
 
 Pure mapping + durable resolution helpers for ReplyPlanWorker.
 No channel/outbound/HTTP I/O. Remote resolve must run outside DB locks.
@@ -9,22 +9,63 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Final
 
+from app.core.booking_availability_remote import (
+    format_canonical_booking_starts_at,
+    require_calendar_date,
+    require_canonical_booking_starts_at,
+)
 from app.core.booking_types import (
+    AvailableDaysOfferDecision,
     AvailableSlot,
     BookingDialogAction,
     BookingDomainError,
     BookingInternalReasonCode,
     ManagerHandoffDecision,
+    MAX_OFFERED_SLOTS,
     SelectedMaster,
     SelectedService,
     ServiceUnavailableDecision,
     SlotOfferDecision,
 )
-from app.schemas.booking_input import SyntheticBookingInput
+from app.schemas.booking_input import (
+    SyntheticAvailableDaysQuery,
+    SyntheticAvailableSlotsQuery,
+    SyntheticBookingInput,
+)
 from app.services.booking_flow import BookingFlowService
 
 BOOKING_RESOLUTION_STARTED_KEY: Final[str] = "booking_resolution_started"
 BOOKING_RESOLUTION_RESULT_KEY: Final[str] = "booking_resolution_result"
+
+_MAX_OFFER_DAYS: Final[int] = 31
+_MAX_SLOT_ID_LENGTH: Final[int] = 128
+
+_OFFER_DAYS_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "booking_action",
+        "booking_reason",
+        "booking_available_date_keys",
+        "booking_studio_today",
+    }
+)
+_OFFER_SLOTS_LEGACY_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "booking_action",
+        "booking_reason",
+        "booking_offered_slot_ids",
+    }
+)
+_OFFER_SLOTS_NEW_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "booking_action",
+        "booking_reason",
+        "booking_offered_slot_ids",
+        "booking_offered_slots",
+    }
+)
+_OFFERED_SLOT_OBJECT_KEYS: Final[frozenset[str]] = frozenset(
+    {"slot_id", "starts_at"}
+)
 
 _ALLOWED_BOOKING_REASONS: Final[frozenset[str]] = frozenset(
     {
@@ -41,6 +82,11 @@ _ALLOWED_BOOKING_REASONS: Final[frozenset[str]] = frozenset(
         "RESPONSE_TOO_LARGE",
         "RESPONSE_INVALID",
         "CONFIG_INVALID",
+        "REQUEST_INVALID",
+        "UNAUTHORIZED",
+        "RATE_LIMITED",
+        "VALIDATION_ERROR",
+        "SERVICE_UNAVAILABLE",
     }
 )
 
@@ -96,14 +142,193 @@ def _allowlisted_reason(raw: object) -> str | None:
     return raw
 
 
+def _require_safe_slot_id(value: object) -> str | None:
+    if type(value) is not str or not value:
+        return None
+    if len(value) > _MAX_SLOT_ID_LENGTH:
+        return None
+    if any(ch.isspace() for ch in value):
+        return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return None
+    return value
+
+
+def _sanitize_offered_slots_new(
+    slot_ids: list[str],
+    offered: object,
+) -> list[dict[str, str]] | None:
+    if type(offered) is not list:
+        return None
+    if len(offered) != len(slot_ids):
+        return None
+    if not offered or len(offered) > MAX_OFFERED_SLOTS:
+        return None
+
+    sanitized: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    seen_starts: set[str] = set()
+    previous_start: str | None = None
+
+    for index, item in enumerate(offered):
+        if type(item) is not dict:
+            return None
+        if set(item) != _OFFERED_SLOT_OBJECT_KEYS:
+            return None
+        slot_id = _require_safe_slot_id(item.get("slot_id"))
+        if slot_id is None:
+            return None
+        if slot_id != slot_ids[index]:
+            return None
+        if slot_id in seen_ids:
+            return None
+        try:
+            starts_at = require_canonical_booking_starts_at(item.get("starts_at"))
+        except ValueError:
+            return None
+        if starts_at in seen_starts:
+            return None
+        # Canonical studio timestamps are lexicographically ordered by wall time.
+        if previous_start is not None and starts_at <= previous_start:
+            return None
+        seen_ids.add(slot_id)
+        seen_starts.add(starts_at)
+        previous_start = starts_at
+        sanitized.append({"slot_id": slot_id, "starts_at": starts_at})
+    return sanitized
+
+
+def _sanitize_offer_days_fields(raw: dict[str, Any]) -> dict[str, Any] | None:
+    if set(raw) != _OFFER_DAYS_KEYS:
+        return None
+    if raw.get("booking_action") != BookingDialogAction.OFFER_DAYS.value:
+        return None
+    if raw.get("booking_reason") is not None:
+        return None
+
+    date_keys_raw = raw.get("booking_available_date_keys")
+    if type(date_keys_raw) is not list:
+        return None
+    if not date_keys_raw or len(date_keys_raw) > _MAX_OFFER_DAYS:
+        return None
+
+    keys: list[str] = []
+    seen: set[str] = set()
+    previous: str | None = None
+    for item in date_keys_raw:
+        try:
+            key = require_calendar_date(item)
+        except Exception:
+            return None
+        if key in seen:
+            return None
+        if previous is not None and key <= previous:
+            return None
+        seen.add(key)
+        previous = key
+        keys.append(key)
+
+    studio_raw = raw.get("booking_studio_today")
+    try:
+        studio_today = require_calendar_date(studio_raw)
+    except Exception:
+        return None
+
+    return {
+        "booking_action": BookingDialogAction.OFFER_DAYS.value,
+        "booking_reason": None,
+        "booking_available_date_keys": list(keys),
+        "booking_studio_today": studio_today,
+    }
+
+
+def _sanitize_offer_slots_fields(raw: dict[str, Any]) -> dict[str, Any] | None:
+    keys = set(raw)
+    if keys == _OFFER_SLOTS_LEGACY_KEYS:
+        return _sanitize_offer_slots_legacy(raw)
+    if keys == _OFFER_SLOTS_NEW_KEYS:
+        return _sanitize_offer_slots_new_shape(raw)
+    return None
+
+
+def _sanitize_slot_ids_list(raw: object) -> list[str] | None:
+    if type(raw) is not list:
+        return None
+    if not raw or len(raw) > MAX_OFFERED_SLOTS:
+        return None
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        slot_id = _require_safe_slot_id(item)
+        if slot_id is None:
+            return None
+        if slot_id in seen:
+            return None
+        seen.add(slot_id)
+        ids.append(slot_id)
+    return ids
+
+
+def _sanitize_offer_slots_legacy(raw: dict[str, Any]) -> dict[str, Any] | None:
+    if raw.get("booking_action") != BookingDialogAction.OFFER_SLOTS.value:
+        return None
+    if raw.get("booking_reason") is not None:
+        return None
+    slot_ids = _sanitize_slot_ids_list(raw.get("booking_offered_slot_ids"))
+    if slot_ids is None:
+        return None
+    return {
+        "booking_action": BookingDialogAction.OFFER_SLOTS.value,
+        "booking_reason": None,
+        "booking_offered_slot_ids": list(slot_ids),
+    }
+
+
+def _sanitize_offer_slots_new_shape(raw: dict[str, Any]) -> dict[str, Any] | None:
+    if raw.get("booking_action") != BookingDialogAction.OFFER_SLOTS.value:
+        return None
+    if raw.get("booking_reason") is not None:
+        return None
+    slot_ids = _sanitize_slot_ids_list(raw.get("booking_offered_slot_ids"))
+    if slot_ids is None:
+        return None
+    offered = _sanitize_offered_slots_new(slot_ids, raw.get("booking_offered_slots"))
+    if offered is None:
+        return None
+    return {
+        "booking_action": BookingDialogAction.OFFER_SLOTS.value,
+        "booking_reason": None,
+        "booking_offered_slot_ids": list(slot_ids),
+        "booking_offered_slots": [
+            {"slot_id": item["slot_id"], "starts_at": item["starts_at"]}
+            for item in offered
+        ],
+    }
+
+
 def decision_to_outbound_fields(decision: object) -> dict[str, Any]:
     """Map a booking decision to safe synthetic outbound fields."""
 
     if type(decision) is SlotOfferDecision:
+        offered = [
+            {
+                "slot_id": slot.slot_id,
+                "starts_at": format_canonical_booking_starts_at(slot.starts_at),
+            }
+            for slot in decision.offered_slots
+        ]
         return {
             "booking_action": BookingDialogAction.OFFER_SLOTS.value,
             "booking_reason": None,
             "booking_offered_slot_ids": [slot.slot_id for slot in decision.offered_slots],
+            "booking_offered_slots": offered,
+        }
+    if type(decision) is AvailableDaysOfferDecision:
+        return {
+            "booking_action": BookingDialogAction.OFFER_DAYS.value,
+            "booking_reason": None,
+            "booking_available_date_keys": list(decision.date_keys),
+            "booking_studio_today": decision.studio_today,
         }
     if type(decision) is ManagerHandoffDecision:
         return {
@@ -133,22 +358,30 @@ def interrupted_booking_fields() -> dict[str, Any]:
 
 
 def sanitize_booking_result_fields(raw: object) -> dict[str, Any]:
-    """Keep only allowlisted action/reason/slot_ids for durable persistence."""
+    """Keep only allowlisted action/reason/slot/day fields for durable persistence."""
 
     if type(raw) is not dict:
         return interrupted_booking_fields()
     action = raw.get("booking_action")
     if type(action) is not str or action not in _ALLOWED_RESULT_ACTIONS:
         return interrupted_booking_fields()
+
+    if action == BookingDialogAction.OFFER_DAYS.value:
+        sanitized = _sanitize_offer_days_fields(raw)
+        if sanitized is None:
+            return interrupted_booking_fields()
+        return sanitized
+
+    if action == BookingDialogAction.OFFER_SLOTS.value:
+        sanitized = _sanitize_offer_slots_fields(raw)
+        if sanitized is None:
+            return interrupted_booking_fields()
+        return sanitized
+
     fields: dict[str, Any] = {
         "booking_action": action,
         "booking_reason": _allowlisted_reason(raw.get("booking_reason")),
     }
-    if action == BookingDialogAction.OFFER_SLOTS.value:
-        slot_ids = raw.get("booking_offered_slot_ids")
-        if type(slot_ids) is not list or not all(type(x) is str for x in slot_ids):
-            return interrupted_booking_fields()
-        fields["booking_offered_slot_ids"] = list(slot_ids)
     return fields
 
 
@@ -182,7 +415,7 @@ def resolve_booking_outbound_fields(
     *,
     booking_flow: BookingFlowService,
 ) -> dict[str, Any]:
-    """Call booking_flow.resolve once for a plan payload booking block.
+    """Call BookingFlowService once for a plan payload booking block.
 
     Must run outside DB transactions/locks (typically via asyncio.to_thread).
     Missing booking → empty dict (non-booking path unchanged).
@@ -210,23 +443,43 @@ def resolve_booking_outbound_fields(
         master = (
             SelectedMaster(fixture.master_id) if fixture.master_id is not None else None
         )
-        slots = tuple(
-            AvailableSlot(
-                slot_id=slot.slot_id,
-                starts_at=slot.starts_at,
-                master_id=slot.master_id,
-                service_id=slot.service_id,
+        query = fixture.availability_query
+        if type(query) is SyntheticAvailableDaysQuery:
+            decision = booking_flow.resolve_available_days(
+                service,
+                master,
+                query.month,
+                now=fixture.decision_at,
+                include_alternatives=fixture.include_alternatives,
+                alternate_master_consent=fixture.alternate_master_consent,
             )
-            for slot in fixture.slots
-        )
-        decision = booking_flow.resolve(
-            service,
-            master,
-            slots,
-            now=fixture.decision_at,
-            include_alternatives=fixture.include_alternatives,
-            alternate_master_consent=fixture.alternate_master_consent,
-        )
+        elif type(query) is SyntheticAvailableSlotsQuery:
+            decision = booking_flow.resolve_available_slots(
+                service,
+                master,
+                query.date,
+                now=fixture.decision_at,
+                include_alternatives=fixture.include_alternatives,
+                alternate_master_consent=fixture.alternate_master_consent,
+            )
+        else:
+            slots = tuple(
+                AvailableSlot(
+                    slot_id=slot.slot_id,
+                    starts_at=slot.starts_at,
+                    master_id=slot.master_id,
+                    service_id=slot.service_id,
+                )
+                for slot in fixture.slots
+            )
+            decision = booking_flow.resolve(
+                service,
+                master,
+                slots,
+                now=fixture.decision_at,
+                include_alternatives=fixture.include_alternatives,
+                alternate_master_consent=fixture.alternate_master_consent,
+            )
     except (BookingDomainError, ValueError, TypeError):
         return {
             "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,

@@ -26,11 +26,17 @@ _BOOKING_FLOW = Path("app/services/booking_flow.py")
 _BOOKING_SYNTHETIC = Path("app/services/booking_synthetic.py")
 _MAIN = Path("app/main.py")
 _WORKER_RUNTIME = Path("app/services/worker_runtime.py")
+_FACTORY = Path("app/core/booking_eligibility_factory.py")
 _REPLY_OUTBOUND = Path("app/services/reply_outbound.py")
 _INBOUND = Path("app/services/inbound.py")
 
 _DECIDE_ALLOWED = {_POLICY_DEF, _ELIGIBILITY_FLOW}
-_ELIGIBILITY_FLOW_SERVICE_ALLOWED = {_ELIGIBILITY_FLOW, _MAIN, _WORKER_RUNTIME}
+_ELIGIBILITY_FLOW_SERVICE_ALLOWED = {
+    _ELIGIBILITY_FLOW,
+    _MAIN,
+    _WORKER_RUNTIME,
+    _FACTORY,
+}
 
 
 def _app_python_files() -> list[Path]:
@@ -207,23 +213,52 @@ def test_availability_client_uses_stdlib_s2s_only() -> None:
             assert banned not in text, f"{rel}: banned DB token {banned}"
 
 
-def test_availability_not_wired_to_live_channels_or_synthetic_flow() -> None:
-    """CURSOR-22 is transport-only; no inbound/outbound/synthetic semantic changes."""
+def test_availability_http_not_used_outside_flow_and_composition() -> None:
+    """CURSOR-23: availability HTTP only via BookingFlowService / factory roots."""
 
-    for rel in (
+    banned_in = (
         _INBOUND,
         _REPLY_OUTBOUND,
-        _BOOKING_SYNTHETIC,
-        _BOOKING_FLOW,
         _ELIGIBILITY_FLOW,
-        _MAIN,
-        _WORKER_RUNTIME,
-    ):
+    )
+    for rel in banned_in:
         text = _source(_REPO_ROOT / rel)
+        assert "BookingAvailabilityHttpClient" not in text, rel.as_posix()
         assert "get_available_days" not in text, rel.as_posix()
         assert "get_available_slots" not in text, rel.as_posix()
-        assert "BookingAvailabilityHttpClient" not in text, rel.as_posix()
-        assert "booking_availability_http" not in text, rel.as_posix()
+        assert "from app.core.booking_availability_http" not in text, rel.as_posix()
+
+    synthetic = _source(_REPO_ROOT / _BOOKING_SYNTHETIC)
+    assert "BookingAvailabilityHttpClient" not in synthetic
+    assert "get_available_days" not in synthetic
+    assert "get_available_slots" not in synthetic
+    assert "from app.core.booking_availability_http" not in synthetic
+    assert "import app.core.booking_availability_http" not in synthetic
+    assert "require_canonical_booking_starts_at" in synthetic
+    assert "booking_availability_remote" in synthetic
+    # Calendar / startsAt validators come from the shared remote module only.
+    assert "BookingFlowService" in synthetic
+    assert "resolve_available_days" in synthetic
+    assert "resolve_available_slots" in synthetic
+
+    remote = _source(_REPO_ROOT / Path("app/core/booking_availability_remote.py"))
+    assert "def require_canonical_booking_starts_at" in remote
+    assert "+05:00" in remote
+
+    http_text = _source(_REPO_ROOT / Path("app/core/booking_availability_http.py"))
+    assert "require_canonical_booking_starts_at" in http_text
+    assert "_STARTS_AT_RE" not in http_text
+
+    flow_text = _source(_REPO_ROOT / _BOOKING_FLOW)
+    assert "BookingAvailabilityPort" in flow_text
+    assert "resolve_available_days" in flow_text
+    assert "resolve_available_slots" in flow_text
+    assert "decide_booking_dialog" not in flow_text
+    assert "_eligibility_confirmed_master" in flow_text
+
+    worker = _source(_REPO_ROOT / _WORKER_RUNTIME)
+    assert "build_booking_flow_from_settings" in worker
+    assert "application.state" not in worker
 
 
 def test_availability_modules_have_no_booking_writes() -> None:
@@ -246,3 +281,10 @@ def test_availability_modules_have_no_booking_writes() -> None:
                 assert "create_hold" not in lower
                 continue
             assert marker.lower() not in lower, f"{rel}: write marker {marker}"
+
+
+def test_app_state_does_not_publish_raw_availability_client() -> None:
+    main_text = _source(_REPO_ROOT / _MAIN)
+    assert "application.state.booking_flow" in main_text
+    assert "application.state.booking_availability" not in main_text
+    assert "state.booking_availability_client" not in main_text

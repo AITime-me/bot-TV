@@ -428,3 +428,112 @@ def test_deleting_missing_client_guard_would_be_caught() -> None:
         == BookingInternalReasonCode.ELIGIBILITY_SERVICE_UNAVAILABLE.value
     )
     assert len(exploding.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# CURSOR-23 primitives: check_eligibility / decide_from_eligibility / resolve
+# ---------------------------------------------------------------------------
+
+
+def test_check_eligibility_one_call_and_fail_closed_paths() -> None:
+    fake = FakeEligibilityClient(result=_allowed())
+    flow = BookingEligibilityFlowService(fake)
+    result = flow.check_eligibility(_SERVICE, _MASTER, include_alternatives=False)
+    assert type(result) is BookingEligibilityResult
+    assert result.outcome is BookingEligibilityOutcome.SELF_BOOKING_ALLOWED
+    assert len(fake.calls) == 1
+
+    missing = BookingEligibilityFlowService(None).check_eligibility(
+        _SERVICE, _MASTER, include_alternatives=False
+    )
+    assert missing.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert (
+        missing.internal_reason_code
+        == BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE.value
+    )
+
+    boom = FakeEligibilityClient(error=RuntimeError("boom"))
+    exploded = BookingEligibilityFlowService(boom).check_eligibility(
+        _SERVICE, _MASTER, include_alternatives=False
+    )
+    assert exploded.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert (
+        exploded.internal_reason_code
+        == BookingInternalReasonCode.ELIGIBILITY_SERVICE_UNAVAILABLE.value
+    )
+    assert len(boom.calls) == 1
+
+    class BadClient:
+        def check_eligibility(self, *args: object, **kwargs: object) -> object:
+            return {"outcome": "SELF_BOOKING_ALLOWED"}
+
+    unknown = BookingEligibilityFlowService(BadClient()).check_eligibility(  # type: ignore[arg-type]
+        _SERVICE, _MASTER, include_alternatives=False
+    )
+    assert unknown.outcome is BookingEligibilityOutcome.SERVICE_UNAVAILABLE
+    assert (
+        unknown.internal_reason_code
+        == BookingInternalReasonCode.UNKNOWN_OUTCOME.value
+    )
+
+
+def test_decide_from_eligibility_never_calls_client() -> None:
+    fake = FakeEligibilityClient(result=_allowed())
+    flow = BookingEligibilityFlowService(fake)
+    eligibility = _allowed()
+    decision = flow.decide_from_eligibility(
+        eligibility,
+        (_slot(slot_id="s1", master_id=_MASTER_UUID),),
+        now=_NOW,
+        alternate_master_consent=False,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert fake.calls == []
+
+    handoff = flow.decide_from_eligibility(
+        _handoff(),
+        (_slot(slot_id="s1", master_id=_MASTER_UUID),),
+        now=_NOW,
+    )
+    assert isinstance(handoff, ManagerHandoffDecision)
+    assert fake.calls == []
+
+    empty = flow.decide_from_eligibility(eligibility, (), now=_NOW)
+    assert isinstance(empty, ManagerHandoffDecision)
+    assert empty.internal_reason_code == BookingInternalReasonCode.NO_VALID_SLOTS.value
+
+    alt = flow.decide_from_eligibility(
+        _allowed(other_ids=(_ALT_UUID,)),
+        (_slot(slot_id="alt", master_id=_ALT_UUID),),
+        now=_NOW,
+        alternate_master_consent=False,
+    )
+    assert isinstance(alt, ManagerHandoffDecision)
+    assert (
+        alt.internal_reason_code
+        == BookingInternalReasonCode.ALTERNATE_MASTER_WITHOUT_CONSENT.value
+    )
+    assert fake.calls == []
+
+
+def test_resolve_uses_check_once_then_decide_no_nested_double_call() -> None:
+    fake = FakeEligibilityClient(result=_allowed())
+    flow = BookingEligibilityFlowService(fake)
+    check_calls: list[int] = []
+    original_check = flow.check_eligibility
+
+    def _counting_check(*args: object, **kwargs: object) -> BookingEligibilityResult:
+        check_calls.append(1)
+        return original_check(*args, **kwargs)  # type: ignore[arg-type]
+
+    flow.check_eligibility = _counting_check  # type: ignore[method-assign]
+    decision = flow.resolve(
+        _SERVICE,
+        _MASTER,
+        (_slot(slot_id="s1", master_id=_MASTER_UUID),),
+        now=_NOW,
+        include_alternatives=False,
+    )
+    assert isinstance(decision, SlotOfferDecision)
+    assert len(fake.calls) == 1
+    assert len(check_calls) == 1

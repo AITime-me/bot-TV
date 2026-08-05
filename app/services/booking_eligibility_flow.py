@@ -1,8 +1,13 @@
-"""Booking eligibility → dialog policy orchestrator (CURSOR-18).
+"""Booking eligibility → dialog policy orchestrator (CURSOR-18/23).
 
 Wires an injected eligibility client into pure ``decide_booking_dialog`` so
 self-booking cannot proceed without a remote check (or an explicit fail-closed
 path when the client is unset). Exactly one eligibility call per decision.
+
+Primitives:
+- ``check_eligibility`` — one remote/normalized eligibility result;
+- ``decide_from_eligibility`` — apply dialog policy to an existing result;
+- ``resolve`` — check once, then decide (backward-compatible).
 
 No channel adapters, outbound, worker loops, or env loading.
 """
@@ -84,10 +89,73 @@ def _unavailable_eligibility(
 
 
 class BookingEligibilityFlowService:
-    """Resolve one booking dialog decision with a single eligibility check."""
+    """Resolve booking dialog decisions with a single eligibility check."""
 
     def __init__(self, client: BookingEligibilityPort | None) -> None:
         self._client = client
+
+    def check_eligibility(
+        self,
+        service: SelectedService,
+        master: SelectedMaster | None,
+        *,
+        include_alternatives: bool,
+    ) -> BookingEligibilityResult:
+        """Perform exactly one eligibility check (or fail-closed result)."""
+
+        if type(service) is not SelectedService:
+            raise BookingDomainError("BOOKING_DOMAIN_VALUE_INVALID") from None
+        if master is not None and type(master) is not SelectedMaster:
+            raise BookingDomainError("BOOKING_DOMAIN_VALUE_INVALID") from None
+        if type(include_alternatives) is not bool:
+            raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
+
+        if self._client is None:
+            return _unavailable_eligibility(
+                service=service,
+                master=master,
+                reason=BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE,
+            )
+        try:
+            eligibility = self._client.check_eligibility(
+                service,
+                master,
+                include_alternatives=include_alternatives,
+            )
+        except Exception:
+            return _unavailable_eligibility(
+                service=service,
+                master=master,
+                reason=BookingInternalReasonCode.ELIGIBILITY_SERVICE_UNAVAILABLE,
+            )
+        if type(eligibility) is not BookingEligibilityResult:
+            return _unavailable_eligibility(
+                service=service,
+                master=master,
+                reason=BookingInternalReasonCode.UNKNOWN_OUTCOME,
+            )
+        return eligibility
+
+    def decide_from_eligibility(
+        self,
+        eligibility: BookingEligibilityResult,
+        raw_slots: object,
+        *,
+        now: datetime,
+        alternate_master_consent: bool = False,
+    ) -> BookingPolicyDecision:
+        """Apply dialog policy to an already-fetched eligibility result."""
+
+        if type(eligibility) is not BookingEligibilityResult:
+            raise BookingDomainError("BOOKING_DOMAIN_VALUE_INVALID") from None
+        if type(alternate_master_consent) is not bool:
+            raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
+        return decide_booking_dialog(
+            eligibility,
+            raw_slots,
+            now=now,
+            alternate_master_consent=alternate_master_consent,
+        )
 
     def resolve(
         self,
@@ -105,43 +173,14 @@ class BookingEligibilityFlowService:
         (no implicit default at this boundary).
         """
 
-        if type(service) is not SelectedService:
-            raise BookingDomainError("BOOKING_DOMAIN_VALUE_INVALID") from None
-        if master is not None and type(master) is not SelectedMaster:
-            raise BookingDomainError("BOOKING_DOMAIN_VALUE_INVALID") from None
-        if type(include_alternatives) is not bool:
-            raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
         if type(alternate_master_consent) is not bool:
             raise BookingDomainError("BOOKING_DOMAIN_POLICY_INVALID") from None
-
-        if self._client is None:
-            eligibility = _unavailable_eligibility(
-                service=service,
-                master=master,
-                reason=BookingInternalReasonCode.ELIGIBILITY_CLIENT_UNAVAILABLE,
-            )
-        else:
-            try:
-                eligibility = self._client.check_eligibility(
-                    service,
-                    master,
-                    include_alternatives=include_alternatives,
-                )
-            except Exception:
-                eligibility = _unavailable_eligibility(
-                    service=service,
-                    master=master,
-                    reason=BookingInternalReasonCode.ELIGIBILITY_SERVICE_UNAVAILABLE,
-                )
-            else:
-                if type(eligibility) is not BookingEligibilityResult:
-                    eligibility = _unavailable_eligibility(
-                        service=service,
-                        master=master,
-                        reason=BookingInternalReasonCode.UNKNOWN_OUTCOME,
-                    )
-
-        return decide_booking_dialog(
+        eligibility = self.check_eligibility(
+            service,
+            master,
+            include_alternatives=include_alternatives,
+        )
+        return self.decide_from_eligibility(
             eligibility,
             raw_slots,
             now=now,

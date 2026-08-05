@@ -1,4 +1,4 @@
-"""Factory for booking S2S clients (CURSOR-16/22).
+"""Factory for booking S2S clients (CURSOR-16/22/23).
 
 Builds eligibility and availability HTTP clients from Settings without env
 reads or network probes. Returns None when the integration is fully
@@ -7,6 +7,8 @@ same stdlib transport defaults.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from app.config import Settings
 from app.core.booking_availability_http import (
@@ -20,6 +22,17 @@ from app.core.booking_eligibility_http import (
 )
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.core.s2s_http_transport import S2sHttpTransport
+from app.services.booking_eligibility_flow import BookingEligibilityFlowService
+from app.services.booking_flow import BookingFlowService
+
+
+@dataclass(frozen=True, slots=True)
+class BookingS2sClients:
+    """Paired S2S clients sharing one config and one transport instance."""
+
+    eligibility: BookingEligibilityHttpClient | None
+    availability: BookingAvailabilityHttpClient | None
+    transport: S2sHttpTransport | None
 
 
 def build_booking_s2s_config(settings: Settings) -> BookingEligibilityHttpConfig | None:
@@ -53,6 +66,47 @@ def _select_transport(transport: S2sHttpTransport | None) -> S2sHttpTransport:
     if transport is None:
         return S2sHttpStdlibTransport()
     return transport
+
+
+def build_booking_s2s_clients(
+    settings: Settings,
+    *,
+    transport: S2sHttpTransport | None = None,
+) -> BookingS2sClients:
+    """Build eligibility + availability clients with one shared transport."""
+
+    config = build_booking_s2s_config(settings)
+    if config is None:
+        return BookingS2sClients(
+            eligibility=None,
+            availability=None,
+            transport=None,
+        )
+    selected = _select_transport(transport)
+    try:
+        eligibility = BookingEligibilityHttpClient(config, selected)
+        availability = BookingAvailabilityHttpClient(config, selected)
+    except (BookingEligibilityHttpError, BookingAvailabilityHttpError):
+        raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
+    return BookingS2sClients(
+        eligibility=eligibility,
+        availability=availability,
+        transport=selected,
+    )
+
+
+def build_booking_flow_from_settings(
+    settings: Settings,
+    *,
+    transport: S2sHttpTransport | None = None,
+) -> BookingFlowService:
+    """Compose BookingFlowService with shared S2S clients (no HTTP I/O)."""
+
+    clients = build_booking_s2s_clients(settings, transport=transport)
+    return BookingFlowService(
+        BookingEligibilityFlowService(clients.eligibility),
+        clients.availability,
+    )
 
 
 def build_booking_eligibility_client(
