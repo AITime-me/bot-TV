@@ -1026,12 +1026,15 @@ def test_worker_and_factory_share_transport_identity() -> None:
     clients = build_booking_s2s_clients(settings, transport=transport)
     assert clients.eligibility is not None
     assert clients.availability is not None
+    assert clients.booking_create is not None
     assert clients.transport is transport
     assert clients.eligibility._transport is transport
     assert clients.availability._transport is transport
+    assert clients.booking_create._transport is transport
     flow = build_booking_flow_for_worker(settings)
     assert type(flow) is BookingFlowService
     assert flow._availability_client is not None
+    assert flow._booking_create_client is not None
 
 
 def test_absent_config_fail_closed_booking_flow() -> None:

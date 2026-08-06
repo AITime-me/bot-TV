@@ -278,6 +278,12 @@ class BookingEligibilityHttpConfig:
 
         return f"{self.base_url}{SLOTS_ROUTE_PATH}"
 
+    @property
+    def bookings_url(self) -> str:
+        from app.core.booking_create_remote import BOOKINGS_ROUTE_PATH
+
+        return f"{self.base_url}{BOOKINGS_ROUTE_PATH}"
+
     def __repr__(self) -> str:
         return (
             "BookingEligibilityHttpConfig("
