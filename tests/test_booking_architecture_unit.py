@@ -288,3 +288,88 @@ def test_app_state_does_not_publish_raw_availability_client() -> None:
     assert "application.state.booking_flow" in main_text
     assert "application.state.booking_availability" not in main_text
     assert "state.booking_availability_client" not in main_text
+
+
+_CREATE_MODULES = (
+    Path("app/core/booking_create_remote.py"),
+    Path("app/core/booking_create_http.py"),
+)
+
+
+def test_booking_create_route_defined_once() -> None:
+    remote = _source(_REPO_ROOT / Path("app/core/booking_create_remote.py"))
+    assert 'BOOKINGS_ROUTE_PATH: Final[str] = "/api/internal/bot/v1/bookings"' in remote
+    http_text = _source(_REPO_ROOT / Path("app/core/booking_create_http.py"))
+    assert "BOOKINGS_ROUTE_PATH" in http_text
+    assert '="/api/internal/bot/v1/bookings"' not in http_text
+    assert "='/api/internal/bot/v1/bookings'" not in http_text
+    factory = _source(_REPO_ROOT / _FACTORY)
+    assert "BookingCreateHttpClient" in factory
+    assert "booking_create" in factory
+
+
+def test_booking_create_uses_stdlib_s2s_only() -> None:
+    for rel in _CREATE_MODULES:
+        text = _source(_REPO_ROOT / rel)
+        for banned in _BANNED_HTTP_LIBS:
+            assert banned not in text, f"{rel}: banned HTTP lib {banned}"
+        for banned in _BANNED_DB_TOKENS:
+            assert banned not in text, f"{rel}: banned DB token {banned}"
+        assert "prisma" not in text.lower()
+        assert "online-zapis" not in text or "online-zapis-tv" in text
+
+
+def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
+    synthetic = _source(_REPO_ROOT / _BOOKING_SYNTHETIC)
+    inbound = _source(_REPO_ROOT / _INBOUND)
+    reply = _source(_REPO_ROOT / _REPLY_OUTBOUND)
+    for label, text in (
+        ("synthetic", synthetic),
+        ("inbound", inbound),
+        ("reply_outbound", reply),
+    ):
+        assert "BookingCreateHttpClient" not in text, label
+        assert "confirm_selected_slot" not in text, label
+        assert "clientName" not in text, label
+        assert "personalDataConsent" not in text, label
+    # Synthetic booking input must remain PII-free.
+    schema = _source(_REPO_ROOT / Path("app/schemas/booking_input.py"))
+    assert "client_name" not in schema
+    assert "phone" not in schema
+    assert "personal_data_consent" not in schema
+    assert "No PII" in schema or "No free-text" in schema
+
+
+def test_booking_create_http_has_no_automatic_retry_or_uuid_mint() -> None:
+    http_text = _source(_REPO_ROOT / Path("app/core/booking_create_http.py"))
+    flow_text = _source(_REPO_ROOT / _BOOKING_FLOW)
+    remote_text = _source(_REPO_ROOT / Path("app/core/booking_create_remote.py"))
+    for text, label in (
+        (http_text, "http"),
+        (flow_text, "flow"),
+        (remote_text, "remote"),
+    ):
+        assert "uuid4(" not in text, label
+        assert "uuid.uuid4" not in text, label
+        assert "uuid.uuid1" not in text, label
+        assert "time.sleep" not in text, label
+    assert "allow_redirects=False" in http_text
+    assert "confirm_selected_slot" in flow_text
+    assert "BookingCreatePort" in flow_text
+    # HTTP adapter performs a single transport.request — no retry loop.
+    assert http_text.count("self._transport.request(") == 1
+
+
+def test_booking_create_not_on_app_state() -> None:
+    main_text = _source(_REPO_ROOT / _MAIN)
+    assert "application.state.booking_create" not in main_text
+    assert "application.state.booking_flow" in main_text
+    assert "clients.booking_create" in main_text or "booking_create" in main_text
+
+
+def test_bot_mode_and_emergency_lock_untouched_by_create_modules() -> None:
+    for rel in _CREATE_MODULES:
+        text = _source(_REPO_ROOT / rel)
+        assert "BOT_MODE" not in text
+        assert "EMERGENCY_LOCK" not in text
+        assert "BotMode" not in text

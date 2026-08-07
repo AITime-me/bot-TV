@@ -71,9 +71,11 @@ def create_app(
                 clients = build_booking_s2s_clients(loaded_settings)
                 resolved_eligibility_client = clients.eligibility
                 resolved_availability_client = clients.availability
+                resolved_booking_create_client = clients.booking_create
             else:
                 resolved_eligibility_client = booking_eligibility_client
                 resolved_availability_client = None
+                resolved_booking_create_client = None
 
             if booking_eligibility_flow is _BOOKING_ELIGIBILITY_FLOW_UNSET:
                 resolved_eligibility_flow = BookingEligibilityFlowService(
@@ -85,6 +87,7 @@ def create_app(
             resolved_booking_flow = BookingFlowService(
                 resolved_eligibility_flow,  # type: ignore[arg-type]
                 resolved_availability_client,  # type: ignore[arg-type]
+                resolved_booking_create_client,  # type: ignore[arg-type]
             )
     elif booking_flow is None:
         # Never publish None: fail-closed consumer with unset eligibility flow.

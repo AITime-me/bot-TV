@@ -4,10 +4,12 @@
 
 Accepted for CURSOR-17 (S2S contract), CURSOR-19 (application consumer
 boundary), CURSOR-20 (synthetic inbound → two-phase durable reply-plan
-booking), CURSOR-22 (typed read-only availability S2S client), and
-CURSOR-23 (availability wired into synthetic durable booking flow). Source of
-truth for wire contracts: `online-zapis-tv` internal bot API
-(`POST /api/internal/bot/v1/eligibility`, `.../available-days`, `.../slots`).
+booking), CURSOR-22 (typed read-only availability S2S client),
+CURSOR-23 (availability wired into synthetic durable booking flow), and
+CURSOR-25 (typed booking-create write client + `confirm_selected_slot`
+application boundary; see ADR-016). Source of truth for wire contracts:
+`online-zapis-tv` internal bot API (`POST /api/internal/bot/v1/eligibility`,
+`.../available-days`, `.../slots`, `.../bookings`).
 
 ## Context
 
@@ -30,6 +32,7 @@ Authenticated booking S2S boundary (one base URL, one Bearer token
 | Eligibility | `POST /api/internal/bot/v1/eligibility` |
 | Available days (read-only) | `POST /api/internal/bot/v1/available-days` |
 | Slots (read-only) | `POST /api/internal/bot/v1/slots` |
+| Bookings create (CURSOR-25) | `POST /api/internal/bot/v1/bookings` — see ADR-016 |
 | Auth | `Authorization: Bearer <token>` only (no HMAC, no query token) |
 | Token | 32..512 printable ASCII (`\x21-\x7E`) |
 | Eligibility request | `{ serviceId, masterId?, includeAlternatives }` JSON, max 4096 bytes; IDs only |
@@ -42,7 +45,8 @@ Authenticated booking S2S boundary (one base URL, one Bearer token
 | Alternate master | explicit future dialog step; CURSOR-23 never queries availability for an alternate |
 | Durable attempt | one resolution attempt may perform at most one eligibility + one availability read; started marker forbids repeating either after interruption |
 | OFFER_DAYS | machine-only durable/outbound fields; not renderable via client-message helpers yet |
-| Out of this stage | booking create, holds, live-channel wiring, user-facing days copy |
+| Out of this stage (ADR-015) | holds, live-channel wiring, user-facing days copy |
+| Create write (CURSOR-25) | typed client + `confirm_selected_slot`; not invoked from synthetic/live dialog yet (ADR-016) |
 | Fail-closed | non-200 / transport / parse → typed adapter failure / eligibility `SERVICE_UNAVAILABLE` (no client retries) |
 
 ### Application boundary (CURSOR-19)
