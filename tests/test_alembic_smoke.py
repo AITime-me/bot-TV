@@ -20,6 +20,7 @@ from app.models import (
     InboxMessage,
     IngressEvent,
     ManagerMessage,
+    MasterChannelBinding,
     OutboxMessage,
     ReplyPlan,
     WorkerHeartbeat,
@@ -170,6 +171,7 @@ def test_alembic_metadata_imports() -> None:
     assert ConversationOpsEvent.__tablename__ == "conversation_ops_events"
     assert EphemeralPiiValue.__tablename__ == "ephemeral_pii_values"
     assert AttachmentSpoolObject.__tablename__ == "attachment_spool_objects"
+    assert MasterChannelBinding.__tablename__ == "master_channel_bindings"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -183,6 +185,7 @@ def test_alembic_metadata_imports() -> None:
         "conversation_ops_events",
         "ephemeral_pii_values",
         "attachment_spool_objects",
+        "master_channel_bindings",
     }
 
 
@@ -223,6 +226,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260801_16_spool_leases"].down_revision
         == "20260801_15_attachment_spool"
     )
+    assert "20260807_17_master_bindings" in by_id
+    assert (
+        by_id["20260807_17_master_bindings"].down_revision
+        == "20260801_16_spool_leases"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -233,6 +241,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260729_11_handoff_schema",
         "20260729_12_worker_runtime",
         "20260801_16_spool_leases",
+        "20260807_17_master_bindings",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -250,6 +259,8 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len(revision_ids) == len(set(revision_ids))
     assert "20260801_16_spool_leases" in revision_ids
     assert len("20260801_16_spool_leases") <= 32
+    assert "20260807_17_master_bindings" in revision_ids
+    assert len("20260807_17_master_bindings") <= 32
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation

@@ -23,6 +23,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260731_14_ephemeral_pii_values.py",
     "!alembic/versions/20260801_15_attachment_spool.py",
     "!alembic/versions/20260801_16_spool_leases.py",
+    "!alembic/versions/20260807_17_master_bindings.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -52,6 +53,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/s2s_http_transport.py",
     "!app/core/s2s_http_stdlib.py",
     "!app/core/booking_eligibility_factory.py",
+    "!app/core/master_channel_binding.py",
     "!app/db/",
     "!app/db/__init__.py",
     "!app/db/base.py",
@@ -72,6 +74,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/inbox.py",
     "!app/models/ingress.py",
     "!app/models/manager_message.py",
+    "!app/models/master_channel_binding.py",
     "!app/models/outbox.py",
     "!app/models/reply_plan.py",
     "!app/models/worker_heartbeat.py",
@@ -83,6 +86,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/attachment_spool.py",
     "!app/repositories/ingress.py",
     "!app/repositories/manager_messages.py",
+    "!app/repositories/master_channel_bindings.py",
     "!app/repositories/messages.py",
     "!app/repositories/outbound.py",
     "!app/repositories/reply_plans.py",
@@ -108,6 +112,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/inbound.py",
     "!app/services/ingress.py",
     "!app/services/manager_messages.py",
+    "!app/services/master_channel_binding.py",
     "!app/services/outbound_arbiter.py",
     "!app/services/reply_outbound.py",
     "!app/services/synthetic_outbound.py",
@@ -129,10 +134,77 @@ BANNED_BROAD_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/**/*",
 )
 
+# CURSOR-27 runtime + migration paths that must be present in Docker build context.
+CURSOR27_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260807_17_master_bindings.py",
+    "app/core/master_channel_binding.py",
+    "app/models/master_channel_binding.py",
+    "app/repositories/master_channel_bindings.py",
+    "app/services/master_channel_binding.py",
+)
+
 
 def dockerignore_lines(repo_root: Path | None = None) -> list[str]:
     root = repo_root or Path(__file__).resolve().parents[1]
     return (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+
+def _normalize_repo_rel_path(rel_path: str) -> str:
+    return rel_path.replace("\\", "/").lstrip("./")
+
+
+def _docker_pattern_matches(pattern: str, rel_path: str) -> bool:
+    """Match a single .dockerignore pattern against a repo-relative path.
+
+    Covers the patterns used by this repository's default-deny allowlist
+    (exact paths, ``**``, directory trailing slash, and limited globs).
+    """
+
+    import fnmatch
+
+    path = _normalize_repo_rel_path(rel_path)
+    pat = pattern.replace("\\", "/")
+    if pat == "**":
+        return True
+    if pat.endswith("/"):
+        # Directory exception only re-includes the directory entry itself
+        # (for traversal). Children stay excluded unless separately allowlisted.
+        base = pat[:-1]
+        return path == base
+    if "**" in pat or "*" in pat or "?" in pat or "[" in pat:
+        # Docker treats ``**`` as matching across path segments.
+        regex_friendly = pat.replace("**/", "*").replace("**", "*")
+        return fnmatch.fnmatchcase(path, regex_friendly) or fnmatch.fnmatchcase(
+            path.split("/")[-1], regex_friendly
+        )
+    return path == pat
+
+
+def is_included_in_docker_build_context(
+    rel_path: str,
+    lines: list[str] | None = None,
+    *,
+    repo_root: Path | None = None,
+) -> bool:
+    """Return whether ``rel_path`` would be sent in the Docker build context.
+
+    Last matching .dockerignore rule wins (Docker semantics). Default before any
+    match is included; this repo's ``**`` then excludes everything until ``!``
+    allow rules re-include exact runtime paths.
+    """
+
+    dockerignore = lines if lines is not None else dockerignore_lines(repo_root)
+    path = _normalize_repo_rel_path(rel_path)
+    included = True
+    for raw in dockerignore:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negate = line.startswith("!")
+        pattern = line[1:] if negate else line
+        if _docker_pattern_matches(pattern, path):
+            included = negate
+    return included
 
 
 def assert_canonical_docker_runtime_allowlist(
