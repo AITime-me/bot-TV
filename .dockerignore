@@ -46,6 +46,7 @@ Thumbs.db
 !alembic/versions/20260731_14_ephemeral_pii_values.py
 !alembic/versions/20260801_15_attachment_spool.py
 !alembic/versions/20260801_16_spool_leases.py
+!alembic/versions/20260807_17_master_bindings.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -75,6 +76,7 @@ Thumbs.db
 !app/core/s2s_http_transport.py
 !app/core/s2s_http_stdlib.py
 !app/core/booking_eligibility_factory.py
+!app/core/master_channel_binding.py
 !app/db/
 !app/db/__init__.py
 !app/db/base.py
@@ -95,6 +97,7 @@ Thumbs.db
 !app/models/inbox.py
 !app/models/ingress.py
 !app/models/manager_message.py
+!app/models/master_channel_binding.py
 !app/models/outbox.py
 !app/models/reply_plan.py
 !app/models/worker_heartbeat.py
@@ -106,6 +109,7 @@ Thumbs.db
 !app/repositories/attachment_spool.py
 !app/repositories/ingress.py
 !app/repositories/manager_messages.py
+!app/repositories/master_channel_bindings.py
 !app/repositories/messages.py
 !app/repositories/outbound.py
 !app/repositories/reply_plans.py
@@ -131,6 +135,7 @@ Thumbs.db
 !app/services/inbound.py
 !app/services/ingress.py
 !app/services/manager_messages.py
+!app/services/master_channel_binding.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py
 !app/services/synthetic_outbound.py

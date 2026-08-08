@@ -362,13 +362,41 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/core/s2s_http_transport.py",
         "!app/core/s2s_http_stdlib.py",
         "!app/core/booking_eligibility_factory.py",
+        "!app/core/master_channel_binding.py",
+        "!app/models/master_channel_binding.py",
+        "!app/repositories/master_channel_bindings.py",
+        "!app/services/master_channel_binding.py",
         "!app/services/booking_eligibility_flow.py",
         "!app/services/booking_flow.py",
         "!app/services/booking_synthetic.py",
         "!app/schemas/booking_input.py",
+        "!alembic/versions/20260807_17_master_bindings.py",
     ):
         assert required in EXPECTED_DOCKER_ALLOW_RULES
         assert required in allow_rules
+
+    from tests.docker_runtime_allowlist import (
+        CURSOR27_DOCKER_RUNTIME_PATHS,
+        is_included_in_docker_build_context,
+    )
+
+    for rel in CURSOR27_DOCKER_RUNTIME_PATHS:
+        assert f"!{rel}" in allow_rules
+        assert is_included_in_docker_build_context(rel, lines) is True
+        assert (_REPO_ROOT / rel).is_file()
+    # Sibling not on the allowlist must stay excluded by default-deny ``**``.
+    assert (
+        is_included_in_docker_build_context(
+            "app/core/master_channel_binding_NOT_ALLOWLISTED.py", lines
+        )
+        is False
+    )
+    assert (
+        is_included_in_docker_build_context(
+            "alembic/versions/20260807_17_master_bindings_SECRET.py", lines
+        )
+        is False
+    )
 
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "USER bot-tv" in dockerfile
