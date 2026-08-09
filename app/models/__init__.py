@@ -55,6 +55,7 @@ from app.models.manager_message import (
     ManagerMessage,
     ManagerMessageStatus,
 )
+from app.models.canonical_identity import CanonicalIdentity, ExternalIdentityLink
 from app.models.master_channel_binding import MasterChannelBinding
 from app.models.master_command_pending import MasterCommandPending
 from app.models.outbox import (
@@ -126,6 +127,8 @@ __all__ = [
     "MessageType",
     "ManagerMessage",
     "ManagerMessageStatus",
+    "CanonicalIdentity",
+    "ExternalIdentityLink",
     "MasterChannelBinding",
     "MasterCommandPending",
     "MirrorPayloadViolation",

@@ -114,6 +114,18 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_identity_links = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.external_identity_links') "
+                    "IS NOT NULL"
+                )
+            )
+            has_canonical_identities = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.canonical_identities') "
+                    "IS NOT NULL"
+                )
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
@@ -131,6 +143,10 @@ async def truncate_foundation_tables(
                 tables.insert(0, "master_command_pendings")
             if has_master_bindings:
                 tables.insert(0, "master_channel_bindings")
+            if has_identity_links:
+                tables.insert(0, "external_identity_links")
+            if has_canonical_identities:
+                tables.insert(0, "canonical_identities")
             if has_worker_heartbeats:
                 tables.insert(0, "worker_heartbeats")
             if has_ingress:

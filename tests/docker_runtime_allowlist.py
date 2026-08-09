@@ -26,6 +26,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260801_16_spool_leases.py",
     "!alembic/versions/20260807_17_master_bindings.py",
     "!alembic/versions/20260808_18_master_commands.py",
+    "!alembic/versions/20260809_19_identity_resolution.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -63,6 +64,8 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/s2s_http_stdlib.py",
     "!app/core/booking_eligibility_factory.py",
     "!app/core/master_channel_binding.py",
+    "!app/core/identity_resolution.py",
+    "!app/core/identity_provider_port.py",
     "!app/core/master_command_types.py",
     "!app/core/master_command_parser.py",
     "!app/core/master_command_remote.py",
@@ -87,6 +90,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/inbox.py",
     "!app/models/ingress.py",
     "!app/models/manager_message.py",
+    "!app/models/canonical_identity.py",
     "!app/models/master_channel_binding.py",
     "!app/models/master_command_pending.py",
     "!app/models/outbox.py",
@@ -100,6 +104,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/attachment_spool.py",
     "!app/repositories/ingress.py",
     "!app/repositories/manager_messages.py",
+    "!app/repositories/identity_resolution.py",
     "!app/repositories/master_channel_bindings.py",
     "!app/repositories/master_command_pendings.py",
     "!app/repositories/messages.py",
@@ -127,6 +132,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/inbound.py",
     "!app/services/ingress.py",
     "!app/services/manager_messages.py",
+    "!app/services/identity_resolution.py",
     "!app/services/master_channel_binding.py",
     "!app/services/master_command_flow.py",
     "!app/services/vk_master_adapter.py",
@@ -180,6 +186,16 @@ CURSOR29_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/channels/vk_master_reply.py",
     "app/channels/vk_master_http.py",
     "app/services/vk_master_adapter.py",
+)
+
+# CURSOR-30 Identity Resolution paths that must be present in Docker build context.
+CURSOR30_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260809_19_identity_resolution.py",
+    "app/core/identity_resolution.py",
+    "app/core/identity_provider_port.py",
+    "app/models/canonical_identity.py",
+    "app/repositories/identity_resolution.py",
+    "app/services/identity_resolution.py",
 )
 
 
