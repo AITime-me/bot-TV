@@ -387,6 +387,12 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/schemas/booking_input.py",
         "!alembic/versions/20260807_17_master_bindings.py",
         "!alembic/versions/20260808_18_master_commands.py",
+        "!alembic/versions/20260809_19_identity_resolution.py",
+        "!app/core/identity_resolution.py",
+        "!app/core/identity_provider_port.py",
+        "!app/models/canonical_identity.py",
+        "!app/repositories/identity_resolution.py",
+        "!app/services/identity_resolution.py",
     ):
         assert required in EXPECTED_DOCKER_ALLOW_RULES
         assert required in allow_rules
@@ -395,6 +401,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         CURSOR27_DOCKER_RUNTIME_PATHS,
         CURSOR28_DOCKER_RUNTIME_PATHS,
         CURSOR29_DOCKER_RUNTIME_PATHS,
+        CURSOR30_DOCKER_RUNTIME_PATHS,
         collect_app_import_graph_modules,
         is_included_in_docker_build_context,
     )
@@ -411,6 +418,10 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         assert f"!{rel}" in allow_rules
         assert is_included_in_docker_build_context(rel, lines) is True
         assert (_REPO_ROOT / rel).is_file()
+    for rel in CURSOR30_DOCKER_RUNTIME_PATHS:
+        assert f"!{rel}" in allow_rules
+        assert is_included_in_docker_build_context(rel, lines) is True
+        assert (_REPO_ROOT / rel).is_file()
 
     # Behavioral: real static import closure of the factory / master-command
     # runtime must be in the Docker build context (not only CURSOR28 path list).
@@ -419,6 +430,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
             "app.core.booking_eligibility_factory",
             "app.services.master_command_flow",
             "app.services.vk_master_adapter",
+            "app.services.identity_resolution",
             "app.main",
         ),
         repo_root=_REPO_ROOT,
