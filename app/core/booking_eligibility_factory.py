@@ -24,6 +24,10 @@ from app.core.booking_eligibility_http import (
     BookingEligibilityHttpConfig,
     BookingEligibilityHttpError,
 )
+from app.core.master_command_http import (
+    MasterCommandHttpClient,
+    MasterCommandHttpError,
+)
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.core.s2s_http_transport import S2sHttpTransport
 from app.services.booking_eligibility_flow import BookingEligibilityFlowService
@@ -37,6 +41,7 @@ class BookingS2sClients:
     eligibility: BookingEligibilityHttpClient | None
     availability: BookingAvailabilityHttpClient | None
     booking_create: BookingCreateHttpClient | None
+    master_command: MasterCommandHttpClient | None
     transport: S2sHttpTransport | None
 
 
@@ -86,6 +91,7 @@ def build_booking_s2s_clients(
             eligibility=None,
             availability=None,
             booking_create=None,
+            master_command=None,
             transport=None,
         )
     selected = _select_transport(transport)
@@ -93,16 +99,19 @@ def build_booking_s2s_clients(
         eligibility = BookingEligibilityHttpClient(config, selected)
         availability = BookingAvailabilityHttpClient(config, selected)
         booking_create = BookingCreateHttpClient(config, selected)
+        master_command = MasterCommandHttpClient(config, selected)
     except (
         BookingEligibilityHttpError,
         BookingAvailabilityHttpError,
         BookingCreateHttpError,
+        MasterCommandHttpError,
     ):
         raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
     return BookingS2sClients(
         eligibility=eligibility,
         availability=availability,
         booking_create=booking_create,
+        master_command=master_command,
         transport=selected,
     )
 
@@ -181,4 +190,24 @@ def build_booking_create_client(
     try:
         return BookingCreateHttpClient(config, _select_transport(transport))
     except BookingCreateHttpError:
+        raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None
+
+
+def build_master_command_client(
+    settings: Settings,
+    *,
+    transport: S2sHttpTransport | None = None,
+) -> MasterCommandHttpClient | None:
+    """Create the master-command S2S client or return None when unset.
+
+    Uses the same BOOKING_ELIGIBILITY_* settings. Never performs HTTP I/O.
+    """
+
+    config = build_booking_s2s_config(settings)
+    if config is None:
+        return None
+
+    try:
+        return MasterCommandHttpClient(config, _select_transport(transport))
+    except MasterCommandHttpError:
         raise ValueError("BOOKING_ELIGIBILITY configuration is invalid") from None

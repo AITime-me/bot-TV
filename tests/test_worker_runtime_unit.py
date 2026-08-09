@@ -359,6 +359,8 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/core/booking_eligibility_http.py",
         "!app/core/booking_availability_remote.py",
         "!app/core/booking_availability_http.py",
+        "!app/core/booking_create_remote.py",
+        "!app/core/booking_create_http.py",
         "!app/core/s2s_http_transport.py",
         "!app/core/s2s_http_stdlib.py",
         "!app/core/booking_eligibility_factory.py",
@@ -366,17 +368,27 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/models/master_channel_binding.py",
         "!app/repositories/master_channel_bindings.py",
         "!app/services/master_channel_binding.py",
+        "!app/core/master_command_types.py",
+        "!app/core/master_command_parser.py",
+        "!app/core/master_command_remote.py",
+        "!app/core/master_command_http.py",
+        "!app/models/master_command_pending.py",
+        "!app/repositories/master_command_pendings.py",
+        "!app/services/master_command_flow.py",
         "!app/services/booking_eligibility_flow.py",
         "!app/services/booking_flow.py",
         "!app/services/booking_synthetic.py",
         "!app/schemas/booking_input.py",
         "!alembic/versions/20260807_17_master_bindings.py",
+        "!alembic/versions/20260808_18_master_commands.py",
     ):
         assert required in EXPECTED_DOCKER_ALLOW_RULES
         assert required in allow_rules
 
     from tests.docker_runtime_allowlist import (
         CURSOR27_DOCKER_RUNTIME_PATHS,
+        CURSOR28_DOCKER_RUNTIME_PATHS,
+        collect_app_import_graph_modules,
         is_included_in_docker_build_context,
     )
 
@@ -384,6 +396,27 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         assert f"!{rel}" in allow_rules
         assert is_included_in_docker_build_context(rel, lines) is True
         assert (_REPO_ROOT / rel).is_file()
+    for rel in CURSOR28_DOCKER_RUNTIME_PATHS:
+        assert f"!{rel}" in allow_rules
+        assert is_included_in_docker_build_context(rel, lines) is True
+        assert (_REPO_ROOT / rel).is_file()
+
+    # Behavioral: real static import closure of the factory / master-command
+    # runtime must be in the Docker build context (not only CURSOR28 path list).
+    factory_runtime_modules = collect_app_import_graph_modules(
+        (
+            "app.core.booking_eligibility_factory",
+            "app.services.master_command_flow",
+        ),
+        repo_root=_REPO_ROOT,
+    )
+    assert "app/core/booking_create_http.py" in factory_runtime_modules
+    assert "app/core/booking_create_remote.py" in factory_runtime_modules
+    assert "app/core/master_command_http.py" in factory_runtime_modules
+    for rel in sorted(factory_runtime_modules):
+        assert (_REPO_ROOT / rel).is_file(), rel
+        assert is_included_in_docker_build_context(rel, lines) is True, rel
+
     # Sibling not on the allowlist must stay excluded by default-deny ``**``.
     assert (
         is_included_in_docker_build_context(
@@ -394,6 +427,18 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
     assert (
         is_included_in_docker_build_context(
             "alembic/versions/20260807_17_master_bindings_SECRET.py", lines
+        )
+        is False
+    )
+    assert (
+        is_included_in_docker_build_context(
+            "app/services/master_command_flow_NOT_ALLOWLISTED.py", lines
+        )
+        is False
+    )
+    assert (
+        is_included_in_docker_build_context(
+            "alembic/versions/20260808_18_master_commands_SECRET.py", lines
         )
         is False
     )

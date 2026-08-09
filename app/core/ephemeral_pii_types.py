@@ -62,12 +62,14 @@ class EphemeralPiiError(RuntimeError):
 
 class EphemeralPiiKind(StrEnum):
     PHONE = "PHONE"
+    CLIENT_NAME = "CLIENT_NAME"
 
 
 class EphemeralPiiPurpose(StrEnum):
     BOOKING_PHONE_WRITE = "BOOKING_PHONE_WRITE"
     APPROVED_STAFF_ALERT_PHONE = "APPROVED_STAFF_ALERT_PHONE"
     AMOCRM_CONTACT_SYNC = "AMOCRM_CONTACT_SYNC"
+    MASTER_BOOKING_CLIENT_WRITE = "MASTER_BOOKING_CLIENT_WRITE"
 
 
 def _require_exact_uuid(value: object) -> UUID:

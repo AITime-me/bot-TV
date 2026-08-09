@@ -21,6 +21,7 @@ from app.models import (
     IngressEvent,
     ManagerMessage,
     MasterChannelBinding,
+    MasterCommandPending,
     OutboxMessage,
     ReplyPlan,
     WorkerHeartbeat,
@@ -172,6 +173,7 @@ def test_alembic_metadata_imports() -> None:
     assert EphemeralPiiValue.__tablename__ == "ephemeral_pii_values"
     assert AttachmentSpoolObject.__tablename__ == "attachment_spool_objects"
     assert MasterChannelBinding.__tablename__ == "master_channel_bindings"
+    assert MasterCommandPending.__tablename__ == "master_command_pendings"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -186,6 +188,7 @@ def test_alembic_metadata_imports() -> None:
         "ephemeral_pii_values",
         "attachment_spool_objects",
         "master_channel_bindings",
+        "master_command_pendings",
     }
 
 
@@ -231,6 +234,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260807_17_master_bindings"].down_revision
         == "20260801_16_spool_leases"
     )
+    assert "20260808_18_master_commands" in by_id
+    assert (
+        by_id["20260808_18_master_commands"].down_revision
+        == "20260807_17_master_bindings"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -242,6 +250,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260729_12_worker_runtime",
         "20260801_16_spool_leases",
         "20260807_17_master_bindings",
+        "20260808_18_master_commands",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -261,6 +270,8 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260801_16_spool_leases") <= 32
     assert "20260807_17_master_bindings" in revision_ids
     assert len("20260807_17_master_bindings") <= 32
+    assert "20260808_18_master_commands" in revision_ids
+    assert len("20260808_18_master_commands") <= 32
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
