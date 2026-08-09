@@ -112,8 +112,11 @@ async def insert_pending(
         created_at=now,
         updated_at=now,
     )
-    session.add(row)
-    await session.flush()
+    # SAVEPOINT so unique/ partial-index conflicts do not abort the caller UoW
+    # (PostgreSQL fails the whole transaction on IntegrityError without one).
+    async with session.begin_nested():
+        session.add(row)
+        await session.flush()
     return row
 
 

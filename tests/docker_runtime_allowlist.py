@@ -30,6 +30,11 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/__init__.py",
     "!app/channels/",
     "!app/channels/__init__.py",
+    "!app/channels/vk_master_config.py",
+    "!app/channels/vk_master_types.py",
+    "!app/channels/vk_master_webhook.py",
+    "!app/channels/vk_master_reply.py",
+    "!app/channels/vk_master_http.py",
     "!app/config.py",
     "!app/core/",
     "!app/core/__init__.py",
@@ -124,6 +129,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/manager_messages.py",
     "!app/services/master_channel_binding.py",
     "!app/services/master_command_flow.py",
+    "!app/services/vk_master_adapter.py",
     "!app/services/outbound_arbiter.py",
     "!app/services/reply_outbound.py",
     "!app/services/synthetic_outbound.py",
@@ -164,6 +170,16 @@ CURSOR28_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/models/master_command_pending.py",
     "app/repositories/master_command_pendings.py",
     "app/services/master_command_flow.py",
+)
+
+# CURSOR-29 VK master adapter paths that must be present in Docker build context.
+CURSOR29_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "app/channels/vk_master_config.py",
+    "app/channels/vk_master_types.py",
+    "app/channels/vk_master_webhook.py",
+    "app/channels/vk_master_reply.py",
+    "app/channels/vk_master_http.py",
+    "app/services/vk_master_adapter.py",
 )
 
 

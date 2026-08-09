@@ -1330,31 +1330,16 @@ def _schedule_summary_lines(days: tuple) -> tuple[str, ...]:
 
 
 def _result_from_row(row) -> MasterCommandFlowResult:
-    outcome_raw = row.result_outcome
-    try:
-        outcome = (
-            MasterCommandFlowOutcome(outcome_raw)
-            if type(outcome_raw) is str
-            else MasterCommandFlowOutcome.DUPLICATE_IGNORED
-        )
-    except ValueError:
-        outcome = MasterCommandFlowOutcome.DUPLICATE_IGNORED
+    """Inbound-message dedupe hit: never re-execute or replay side effects."""
+
     kind = None
     try:
         kind = MasterCommandKind(row.command_kind)
     except ValueError:
         kind = None
-    preview = None
-    if outcome is MasterCommandFlowOutcome.CONFIRMATION_REQUIRED:
-        preview = _preview_for(
-            kind or MasterCommandKind.CLOSE_DAY,
-            MasterCommandSafePayload.from_json_dict(row.safe_payload),
-            row.command_version,
-        )
     return MasterCommandFlowResult(
-        outcome=outcome,
-        preview=preview,
-        result_code=row.result_code,
+        outcome=MasterCommandFlowOutcome.DUPLICATE_IGNORED,
+        result_code="DUPLICATE",
         command_kind=kind,
         command_version=row.command_version,
     )

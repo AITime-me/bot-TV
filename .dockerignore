@@ -52,6 +52,11 @@ Thumbs.db
 !app/__init__.py
 !app/channels/
 !app/channels/__init__.py
+!app/channels/vk_master_config.py
+!app/channels/vk_master_types.py
+!app/channels/vk_master_webhook.py
+!app/channels/vk_master_reply.py
+!app/channels/vk_master_http.py
 !app/config.py
 !app/core/
 !app/core/__init__.py
@@ -146,6 +151,7 @@ Thumbs.db
 !app/services/manager_messages.py
 !app/services/master_channel_binding.py
 !app/services/master_command_flow.py
+!app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py
 !app/services/synthetic_outbound.py
