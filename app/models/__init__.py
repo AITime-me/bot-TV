@@ -56,6 +56,7 @@ from app.models.manager_message import (
     ManagerMessageStatus,
 )
 from app.models.master_channel_binding import MasterChannelBinding
+from app.models.master_command_pending import MasterCommandPending
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
     DeliveryStatus,
@@ -126,6 +127,7 @@ __all__ = [
     "ManagerMessage",
     "ManagerMessageStatus",
     "MasterChannelBinding",
+    "MasterCommandPending",
     "MirrorPayloadViolation",
     "OutboxMessage",
     "OUTBOUND_LOOP",

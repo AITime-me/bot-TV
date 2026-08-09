@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
@@ -24,6 +25,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260801_15_attachment_spool.py",
     "!alembic/versions/20260801_16_spool_leases.py",
     "!alembic/versions/20260807_17_master_bindings.py",
+    "!alembic/versions/20260808_18_master_commands.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -50,10 +52,16 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/booking_eligibility_http.py",
     "!app/core/booking_availability_remote.py",
     "!app/core/booking_availability_http.py",
+    "!app/core/booking_create_remote.py",
+    "!app/core/booking_create_http.py",
     "!app/core/s2s_http_transport.py",
     "!app/core/s2s_http_stdlib.py",
     "!app/core/booking_eligibility_factory.py",
     "!app/core/master_channel_binding.py",
+    "!app/core/master_command_types.py",
+    "!app/core/master_command_parser.py",
+    "!app/core/master_command_remote.py",
+    "!app/core/master_command_http.py",
     "!app/db/",
     "!app/db/__init__.py",
     "!app/db/base.py",
@@ -75,6 +83,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/ingress.py",
     "!app/models/manager_message.py",
     "!app/models/master_channel_binding.py",
+    "!app/models/master_command_pending.py",
     "!app/models/outbox.py",
     "!app/models/reply_plan.py",
     "!app/models/worker_heartbeat.py",
@@ -87,6 +96,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/ingress.py",
     "!app/repositories/manager_messages.py",
     "!app/repositories/master_channel_bindings.py",
+    "!app/repositories/master_command_pendings.py",
     "!app/repositories/messages.py",
     "!app/repositories/outbound.py",
     "!app/repositories/reply_plans.py",
@@ -113,6 +123,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/ingress.py",
     "!app/services/manager_messages.py",
     "!app/services/master_channel_binding.py",
+    "!app/services/master_command_flow.py",
     "!app/services/outbound_arbiter.py",
     "!app/services/reply_outbound.py",
     "!app/services/synthetic_outbound.py",
@@ -141,6 +152,18 @@ CURSOR27_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/models/master_channel_binding.py",
     "app/repositories/master_channel_bindings.py",
     "app/services/master_channel_binding.py",
+)
+
+# CURSOR-28 runtime + migration paths that must be present in Docker build context.
+CURSOR28_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260808_18_master_commands.py",
+    "app/core/master_command_types.py",
+    "app/core/master_command_parser.py",
+    "app/core/master_command_remote.py",
+    "app/core/master_command_http.py",
+    "app/models/master_command_pending.py",
+    "app/repositories/master_command_pendings.py",
+    "app/services/master_command_flow.py",
 )
 
 
@@ -226,3 +249,64 @@ def assert_canonical_docker_runtime_allowlist(
         assert "*" not in path
         assert "?" not in path
         assert "[" not in path
+
+
+def _module_name_to_repo_paths(module_name: str, *, repo_root: Path) -> list[Path]:
+    """Map ``app.foo.bar`` to candidate filesystem paths under the repo."""
+
+    rel = Path(*module_name.split("."))
+    return [repo_root / f"{rel}.py", repo_root / rel / "__init__.py"]
+
+
+def collect_app_import_graph_modules(
+    entry_modules: tuple[str, ...],
+    *,
+    repo_root: Path | None = None,
+) -> frozenset[str]:
+    """Return repo-relative ``app/**/*.py`` modules reachable via ``app.*`` imports.
+
+    Walks static Import/ImportFrom edges only (no dynamic imports). Used to
+    assert Docker default-deny includes the real factory runtime closure, not
+    just a hand-maintained CURSOR-28 path list.
+    """
+
+    root = repo_root or Path(__file__).resolve().parents[1]
+    pending = list(entry_modules)
+    seen_modules: set[str] = set()
+    files: set[str] = set()
+
+    while pending:
+        mod = pending.pop()
+        if mod in seen_modules:
+            continue
+        seen_modules.add(mod)
+        if not mod.startswith("app"):
+            continue
+        path: Path | None = None
+        for candidate in _module_name_to_repo_paths(mod, repo_root=root):
+            if candidate.is_file():
+                path = candidate
+                break
+        if path is None:
+            continue
+        rel = path.relative_to(root).as_posix()
+        files.add(rel)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.name
+                    if name == "app" or name.startswith("app."):
+                        pending.append(name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is None:
+                    continue
+                if node.level and node.level > 0:
+                    continue
+                if node.module == "app" or node.module.startswith("app."):
+                    pending.append(node.module)
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        pending.append(f"{node.module}.{alias.name}")
+    return frozenset(files)

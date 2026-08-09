@@ -108,6 +108,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_master_commands = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.master_command_pendings') "
+                    "IS NOT NULL"
+                )
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
@@ -121,6 +127,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "ephemeral_pii_values")
             if has_attachment_spool:
                 tables.insert(0, "attachment_spool_objects")
+            if has_master_commands:
+                tables.insert(0, "master_command_pendings")
             if has_master_bindings:
                 tables.insert(0, "master_channel_bindings")
             if has_worker_heartbeats:

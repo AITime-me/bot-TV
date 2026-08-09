@@ -655,12 +655,16 @@ def test_requirements_txt_pins_cryptography() -> None:
     assert "cryptography==49.0.0" in text
 
 
-def test_kind_enum_phone_only() -> None:
-    assert list(EphemeralPiiKind) == [EphemeralPiiKind.PHONE]
+def test_kind_enum_phone_and_client_name() -> None:
+    assert list(EphemeralPiiKind) == [
+        EphemeralPiiKind.PHONE,
+        EphemeralPiiKind.CLIENT_NAME,
+    ]
     assert {p.value for p in EphemeralPiiPurpose} == {
         "BOOKING_PHONE_WRITE",
         "APPROVED_STAFF_ALERT_PHONE",
         "AMOCRM_CONTACT_SYNC",
+        "MASTER_BOOKING_CLIENT_WRITE",
     }
 
 

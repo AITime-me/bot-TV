@@ -124,6 +124,66 @@ class EphemeralPiiStore:
             raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
         return handle
 
+    async def read_plaintext(
+        self,
+        reference: EphemeralPiiReference,
+        *,
+        conversation_id: UUID,
+        kind: EphemeralPiiKind,
+        purpose: EphemeralPiiPurpose,
+    ) -> str:
+        """Purpose-bound decrypt without destroying ciphertext (retry-safe)."""
+
+        _require_reference(reference)
+        _require_conversation_id(conversation_id)
+        _require_kind(kind)
+        _require_purpose(purpose)
+
+        digest = reference.digest()
+        try:
+            async with session_scope(self._session_factory) as session:
+                row = await ephemeral_pii_repo.select_for_read(
+                    session,
+                    reference_digest=digest,
+                )
+                if row is None:
+                    raise EphemeralPiiError("EPHEMERAL_PII_ACCESS_DENIED") from None
+                if not _bindings_match(row, conversation_id, kind, purpose):
+                    raise EphemeralPiiError("EPHEMERAL_PII_ACCESS_DENIED") from None
+                if row.crypto_version != CRYPTO_VERSION_V1:
+                    raise EphemeralPiiError("EPHEMERAL_PII_ACCESS_DENIED") from None
+
+                aad = EphemeralPiiAad(
+                    crypto_version=row.crypto_version,
+                    record_id=row.id,
+                    key_id=row.key_id,
+                    kind=kind,
+                    conversation_id=conversation_id,
+                    purpose=purpose,
+                )
+                encrypted = EphemeralPiiCiphertext(
+                    ciphertext=row.ciphertext,
+                    nonce=row.nonce,
+                    key_id=row.key_id,
+                    crypto_version=row.crypto_version,
+                )
+                try:
+                    return decrypt_text(
+                        encrypted,
+                        aad=aad,
+                        key_provider=self._key_provider,
+                    )
+                except EphemeralPiiError as exc:
+                    if exc.code == "EPHEMERAL_PII_ACCESS_DENIED":
+                        raise
+                    raise EphemeralPiiError("EPHEMERAL_PII_ACCESS_DENIED") from None
+        except EphemeralPiiError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
+
     async def consume_once(
         self,
         reference: EphemeralPiiReference,

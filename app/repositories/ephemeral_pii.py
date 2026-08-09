@@ -140,6 +140,31 @@ async def select_for_consume(
     )
 
 
+async def select_for_read(
+    session: AsyncSession,
+    *,
+    reference_digest: bytes,
+) -> EphemeralPiiLockedRow | None:
+    """Load an unexpired row for non-destructive decrypt. Does not delete."""
+    stmt = select(EphemeralPiiValue).where(
+        EphemeralPiiValue.reference_digest == reference_digest,
+        EphemeralPiiValue.expires_at > func.statement_timestamp(),
+    )
+    row = await session.scalar(stmt)
+    if row is None:
+        return None
+    return EphemeralPiiLockedRow(
+        id=_db_uuid(row.id),
+        conversation_id=_db_uuid(row.conversation_id),
+        pii_kind=row.pii_kind,
+        allowed_purpose=row.allowed_purpose,
+        ciphertext=row.ciphertext,
+        nonce=row.nonce,
+        key_id=row.key_id,
+        crypto_version=row.crypto_version,
+    )
+
+
 async def delete_locked_row(session: AsyncSession, *, row_id: uuid.UUID) -> None:
     """Delete a row already locked in the current transaction."""
     await session.execute(

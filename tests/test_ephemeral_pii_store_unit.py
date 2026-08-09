@@ -510,6 +510,90 @@ async def test_consume_commit_before_plaintext_return(
 
 
 @pytest.mark.asyncio
+async def test_read_plaintext_decrypts_without_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = TxnTracker()
+    conversation_id = uuid4()
+    locked = sample_locked_row(conversation_id=conversation_id)
+    order: list[str] = []
+    delete_calls = {"count": 0}
+
+    async def _select(*_args: Any, **_kwargs: Any) -> Any:
+        order.append("select_for_read")
+        return locked
+
+    async def _delete(*_args: Any, **_kwargs: Any) -> None:
+        delete_calls["count"] += 1
+
+    def _decrypt(*_args: Any, **_kwargs: Any) -> str:
+        order.append("decrypt")
+        return _SYNTHETIC_PLAINTEXT
+
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.ephemeral_pii_repo.select_for_read",
+        _select,
+    )
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.ephemeral_pii_repo.delete_locked_row",
+        _delete,
+    )
+    monkeypatch.setattr("app.services.ephemeral_pii_store.decrypt_text", _decrypt)
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.session_scope",
+        make_observing_session_scope(tracker),
+    )
+    store = _store_with_tracker(tracker)
+    plaintext = await store.read_plaintext(
+        EphemeralPiiReference.generate(),
+        conversation_id=conversation_id,
+        kind=EphemeralPiiKind.PHONE,
+        purpose=EphemeralPiiPurpose.BOOKING_PHONE_WRITE,
+    )
+    assert plaintext == _SYNTHETIC_PLAINTEXT
+    assert order == ["select_for_read", "decrypt"]
+    assert delete_calls["count"] == 0
+    assert tracker.events == ["enter", "commit", "exit"]
+
+
+@pytest.mark.asyncio
+async def test_read_plaintext_wrong_purpose_access_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locked = sample_locked_row()
+    delete_calls = {"count": 0}
+
+    async def _select(*_args: Any, **_kwargs: Any) -> Any:
+        return locked
+
+    async def _delete(*_args: Any, **_kwargs: Any) -> None:
+        delete_calls["count"] += 1
+
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.ephemeral_pii_repo.select_for_read",
+        _select,
+    )
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.ephemeral_pii_repo.delete_locked_row",
+        _delete,
+    )
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.session_scope",
+        make_observing_session_scope(TxnTracker()),
+    )
+    store = _store_with_tracker(TxnTracker())
+    with pytest.raises(EphemeralPiiError) as raised:
+        await store.read_plaintext(
+            EphemeralPiiReference.generate(),
+            conversation_id=locked.conversation_id,
+            kind=EphemeralPiiKind.PHONE,
+            purpose=EphemeralPiiPurpose.MASTER_BOOKING_CLIENT_WRITE,
+        )
+    _assert_safe_error(raised.value, "EPHEMERAL_PII_ACCESS_DENIED")
+    assert delete_calls["count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_consume_missing_row_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     tracker = TxnTracker()
 

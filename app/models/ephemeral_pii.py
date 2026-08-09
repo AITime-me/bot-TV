@@ -16,6 +16,7 @@ _ALLOWED_PURPOSES = (
     "BOOKING_PHONE_WRITE",
     "APPROVED_STAFF_ALERT_PHONE",
     "AMOCRM_CONTACT_SYNC",
+    "MASTER_BOOKING_CLIENT_WRITE",
 )
 _PURPOSE_SQL = ", ".join(f"'{value}'" for value in _ALLOWED_PURPOSES)
 
@@ -46,7 +47,7 @@ class EphemeralPiiValue(Base):
             name="ck_ephemeral_pii_values_crypto_version",
         ),
         CheckConstraint(
-            "pii_kind = 'PHONE'",
+            "pii_kind IN ('PHONE', 'CLIENT_NAME')",
             name="ck_ephemeral_pii_values_pii_kind",
         ),
         CheckConstraint(
