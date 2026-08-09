@@ -497,3 +497,90 @@ async def test_dedupe_mirror_persists_real_mutation_kind() -> None:
     assert inserted["command_kind"] is MasterCommandKind.CREATE_BOOKING
     assert inserted["idempotency_key"] == key
     assert inserted["command_kind"] is not MasterCommandKind.SCHEDULE_READ
+
+
+class _DriverUuid:
+    """UUID-like stand-in (asyncpg/driver): str/eq work, type is not uuid.UUID."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw: uuid.UUID) -> None:
+        self._raw = raw
+
+    def __str__(self) -> str:
+        return str(self._raw)
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is uuid.UUID:
+            return self._raw == other
+        if type(other) is _DriverUuid:
+            return self._raw == other._raw
+        return NotImplemented
+
+
+@pytest.mark.asyncio
+async def test_read_booking_pii_normalizes_driver_uuid_for_store_gate() -> None:
+    """DB/driver UUID must be stdlib uuid.UUID before EphemeralPiiStore reads."""
+
+    from app.core.ephemeral_pii_types import EphemeralPiiReference
+    from app.core.master_command_types import master_command_pii_conversation_id
+    from app.services.master_command_flow import _stdlib_uuid
+
+    conv = master_command_pii_conversation_id(
+        channel="vk",
+        connection_scope="default",
+        external_account_id="vk-uuid-norm",
+    )
+    driver_conv = _DriverUuid(conv)
+    assert type(driver_conv) is not uuid.UUID
+    assert type(_stdlib_uuid(driver_conv)) is uuid.UUID
+    assert _stdlib_uuid(driver_conv) == conv
+
+    phone_tok = EphemeralPiiReference.generate().to_token()
+    name_tok = EphemeralPiiReference.generate().to_token()
+    active = MagicMock()
+    active.phone_ref_token = phone_tok
+    active.name_ref_token = name_tok
+    active.pii_conversation_id = driver_conv
+
+    seen: list[object] = []
+
+    async def _read(
+        _ref: object,
+        *,
+        conversation_id: object,
+        kind: object,
+        purpose: object,
+    ) -> str:
+        seen.append(conversation_id)
+        assert type(conversation_id) is uuid.UUID
+        assert conversation_id == conv
+        if kind.value == "PHONE":
+            return "+79991234567"
+        return "Иван"
+
+    pii = MagicMock()
+    pii.read_plaintext = AsyncMock(side_effect=_read)
+    flow = MasterCommandFlowService(
+        MagicMock(), master_client=MagicMock(), pii_store=pii
+    )
+    result = await flow._read_booking_pii(active)
+    assert result == ("+79991234567", "Иван")
+    assert len(seen) == 2
+    assert all(type(item) is uuid.UUID for item in seen)
+
+
+@pytest.mark.asyncio
+async def test_read_booking_pii_invalid_conversation_id_fail_closed() -> None:
+    active = MagicMock()
+    active.phone_ref_token = "not-a-token"
+    active.name_ref_token = "not-a-token"
+    active.pii_conversation_id = object()
+
+    pii = MagicMock()
+    pii.read_plaintext = AsyncMock(return_value="x")
+    flow = MasterCommandFlowService(
+        MagicMock(), master_client=MagicMock(), pii_store=pii
+    )
+    assert await flow._read_booking_pii(active) is None
+    pii.read_plaintext.assert_not_awaited()

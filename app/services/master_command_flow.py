@@ -124,6 +124,22 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _stdlib_uuid(value: object) -> uuid.UUID:
+    """Normalize DB/driver UUID values to exact stdlib ``uuid.UUID``.
+
+    EphemeralPiiStore requires ``type(conversation_id) is UUID``. asyncpg and
+    some ORM round-trips may yield UUID-like objects that compare/str correctly
+    but fail that exact-type gate. Invalid values fail closed.
+    """
+
+    if type(value) is uuid.UUID:
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError("INVALID_PII_CONVERSATION_ID") from None
+
+
 class MasterCommandFlowService:
     """Application boundary for master commands. Caller owns session UoW."""
 
@@ -900,15 +916,25 @@ class MasterCommandFlowService:
                         result_code="PII_STORE_UNCONFIGURED",
                         command_kind=parsed.kind,
                     )
+                if active.pii_conversation_id is None:
+                    pii_conv = master_command_pii_conversation_id(
+                        channel=envelope.channel,
+                        connection_scope=envelope.connection_scope,
+                        external_account_id=envelope.external_account_id,
+                    )
+                else:
+                    try:
+                        pii_conv = _stdlib_uuid(active.pii_conversation_id)
+                    except ValueError:
+                        return MasterCommandFlowResult(
+                            outcome=MasterCommandFlowOutcome.UNAVAILABLE,
+                            result_code="PII_UNAVAILABLE",
+                            command_kind=parsed.kind,
+                        )
                 if parsed.phone:
                     handle = await self._pii.store(
                         parsed.phone,
-                        conversation_id=active.pii_conversation_id
-                        or master_command_pii_conversation_id(
-                            channel=envelope.channel,
-                            connection_scope=envelope.connection_scope,
-                            external_account_id=envelope.external_account_id,
-                        ),
+                        conversation_id=pii_conv,
                         kind=EphemeralPiiKind.PHONE,
                         purpose=EphemeralPiiPurpose.MASTER_BOOKING_CLIENT_WRITE,
                     )
@@ -916,12 +942,7 @@ class MasterCommandFlowService:
                 if parsed.client_name:
                     handle = await self._pii.store(
                         parsed.client_name,
-                        conversation_id=active.pii_conversation_id
-                        or master_command_pii_conversation_id(
-                            channel=envelope.channel,
-                            connection_scope=envelope.connection_scope,
-                            external_account_id=envelope.external_account_id,
-                        ),
+                        conversation_id=pii_conv,
                         kind=EphemeralPiiKind.CLIENT_NAME,
                         purpose=EphemeralPiiPurpose.MASTER_BOOKING_CLIENT_WRITE,
                     )
@@ -1040,15 +1061,16 @@ class MasterCommandFlowService:
         if active.pii_conversation_id is None:
             return None
         try:
+            conversation_id = _stdlib_uuid(active.pii_conversation_id)
             phone = await self._pii.read_plaintext(
                 EphemeralPiiReference.parse(active.phone_ref_token),
-                conversation_id=active.pii_conversation_id,
+                conversation_id=conversation_id,
                 kind=EphemeralPiiKind.PHONE,
                 purpose=EphemeralPiiPurpose.MASTER_BOOKING_CLIENT_WRITE,
             )
             name = await self._pii.read_plaintext(
                 EphemeralPiiReference.parse(active.name_ref_token),
-                conversation_id=active.pii_conversation_id,
+                conversation_id=conversation_id,
                 kind=EphemeralPiiKind.CLIENT_NAME,
                 purpose=EphemeralPiiPurpose.MASTER_BOOKING_CLIENT_WRITE,
             )
