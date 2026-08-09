@@ -228,6 +228,23 @@ def test_reply_mapper_safe_and_silent_bindings() -> None:
         )
         is not None
     )
+    assert (
+        render_vk_master_reply(
+            MasterCommandFlowResult(
+                outcome=MasterCommandFlowOutcome.MANUAL_HELP,
+                result_code="MANUAL_HELP",
+            )
+        )
+        is None
+    )
+    unknown = render_vk_master_reply(
+        MasterCommandFlowResult(
+            outcome=MasterCommandFlowOutcome.MANUAL_HELP,
+            result_code="UNKNOWN_COMMAND",
+        )
+    )
+    assert unknown is not None
+    assert "не понял" in unknown.lower()
     text = render_vk_master_reply(
         MasterCommandFlowResult(
             outcome=MasterCommandFlowOutcome.CONFIRMATION_REQUIRED,

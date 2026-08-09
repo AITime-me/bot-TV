@@ -294,7 +294,7 @@ def test_http_client_malformed_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_flow_unbound_never_calls_booking() -> None:
+async def test_flow_unbound_never_calls_booking(monkeypatch: pytest.MonkeyPatch) -> None:
     session = MagicMock()
     client = MagicMock()
     flow = MasterCommandFlowService(session, master_client=client)
@@ -304,10 +304,14 @@ async def test_flow_unbound_never_calls_booking() -> None:
             outcome=ResolveMasterBindingOutcome.NOT_FOUND
         )
     )
-    from app.repositories import master_command_pendings as pending_repo
+    import app.services.master_command_flow as flow_mod
 
-    pending_repo.get_by_inbound = AsyncMock(return_value=None)  # type: ignore[method-assign]
-    pending_repo.lock_active_by_identity = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        flow_mod.pending_repo, "get_by_inbound", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        flow_mod.pending_repo, "lock_active_by_identity", AsyncMock(return_value=None)
+    )
 
     env = build_master_command_envelope(
         channel="vk",
@@ -316,12 +320,6 @@ async def test_flow_unbound_never_calls_booking() -> None:
         text="выходной завтра",
         occurred_at=_NOW,
     )
-    # Patch module-level repo used inside service
-    import app.services.master_command_flow as flow_mod
-
-    flow_mod.pending_repo.get_by_inbound = AsyncMock(return_value=None)
-    flow_mod.pending_repo.lock_active_by_identity = AsyncMock(return_value=None)
-
     result = await flow.handle(env)
     assert result.outcome is MasterCommandFlowOutcome.BINDING_REQUIRED
     client.read_schedule.assert_not_called()
@@ -329,7 +327,9 @@ async def test_flow_unbound_never_calls_booking() -> None:
 
 
 @pytest.mark.asyncio
-async def test_flow_ambiguous_binding_fail_closed() -> None:
+async def test_flow_ambiguous_binding_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = MagicMock()
     client = MagicMock()
     flow = MasterCommandFlowService(session, master_client=client)
@@ -341,7 +341,9 @@ async def test_flow_ambiguous_binding_fail_closed() -> None:
     )
     import app.services.master_command_flow as flow_mod
 
-    flow_mod.pending_repo.get_by_inbound = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        flow_mod.pending_repo, "get_by_inbound", AsyncMock(return_value=None)
+    )
     env = build_master_command_envelope(
         channel="vk",
         external_account_id="vk-1",
@@ -416,7 +418,9 @@ def test_create_booking_uses_non_destructive_pii_read() -> None:
 
 
 @pytest.mark.asyncio
-async def test_response_invalid_is_retryable_not_terminal() -> None:
+async def test_response_invalid_is_retryable_not_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Malformed/unknown 2xx must release to confirmation, not destroy the command."""
 
     from app.services.master_command_flow import MasterCommandFlowService
@@ -431,11 +435,13 @@ async def test_response_invalid_is_retryable_not_terminal() -> None:
 
     import app.services.master_command_flow as flow_mod
 
-    flow_mod.pending_repo.release_execution_to_confirmation = AsyncMock(
-        return_value=True
+    release = AsyncMock(return_value=True)
+    complete = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        flow_mod.pending_repo, "release_execution_to_confirmation", release
     )
-    flow_mod.pending_repo.complete_execution = AsyncMock(return_value=True)
-    flow_mod.pending_repo.insert_pending = AsyncMock()
+    monkeypatch.setattr(flow_mod.pending_repo, "complete_execution", complete)
+    monkeypatch.setattr(flow_mod.pending_repo, "insert_pending", AsyncMock())
 
     flow = MasterCommandFlowService(session, master_client=MagicMock())
     env = build_master_command_envelope(
@@ -456,12 +462,14 @@ async def test_response_invalid_is_retryable_not_terminal() -> None:
     )
     assert result.outcome is MasterCommandFlowOutcome.UNAVAILABLE
     assert result.result_code == "RESPONSE_INVALID"
-    flow_mod.pending_repo.release_execution_to_confirmation.assert_awaited_once()
-    flow_mod.pending_repo.complete_execution.assert_not_awaited()
+    release.assert_awaited_once()
+    complete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_dedupe_mirror_persists_real_mutation_kind() -> None:
+async def test_dedupe_mirror_persists_real_mutation_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Audit/dedupe rows must not lie as SCHEDULE_READ when a mutation key exists."""
 
     session = MagicMock()
@@ -473,7 +481,9 @@ async def test_dedupe_mirror_persists_real_mutation_kind() -> None:
 
     import app.services.master_command_flow as flow_mod
 
-    flow_mod.pending_repo.insert_pending = AsyncMock(side_effect=_insert_pending)
+    monkeypatch.setattr(
+        flow_mod.pending_repo, "insert_pending", AsyncMock(side_effect=_insert_pending)
+    )
     flow = MasterCommandFlowService(session, master_client=MagicMock())
     env = build_master_command_envelope(
         channel="vk",

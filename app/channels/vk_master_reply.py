@@ -29,8 +29,11 @@ def render_vk_master_reply(result: MasterCommandFlowResult) -> str | None:
     Ownership for concurrent deliveries: only the C28 delivery that wins the
     inbound insert / claim-execution path may surface a non-silent outcome.
     Inbound losers are ``DUPLICATE_IGNORED``. Claim losers are local
-    ``CONFLICT`` (result_code ``CONFLICT``) and stay silent. Business remote
-    conflicts and ``PENDING_COMMAND_ACTIVE`` still reply.
+    ``CONFLICT`` (result_code ``CONFLICT``) and stay silent. Control no-ops
+    with ``MANUAL_HELP``/``MANUAL_HELP`` (orphan/expired confirm) stay silent
+    so a late concurrent «да» does not spam after the winner finishes.
+    Business remote conflicts, ``PENDING_COMMAND_ACTIVE``, and unknown-command
+    ``MANUAL_HELP``/``UNKNOWN_COMMAND`` still reply.
     """
 
     if type(result) is not MasterCommandFlowResult:
@@ -65,6 +68,12 @@ def render_vk_master_reply(result: MasterCommandFlowResult) -> str | None:
             "отправьте «да» ещё раз позже."
         )
     if outcome is MasterCommandFlowOutcome.MANUAL_HELP:
+        # Control no-ops (orphan/expired «да», nothing to confirm) use
+        # result_code MANUAL_HELP — silent on VK to avoid reply storms when a
+        # concurrent confirm loser observes a already-terminal command.
+        # Unknown free-text still uses UNKNOWN_COMMAND and stays vocal.
+        if result.result_code == "MANUAL_HELP":
+            return None
         return (
             "Не понял команду. Примеры: «выходной завтра», "
             "«закрыть интервал …», «запись клиенту …», «расписание»."
