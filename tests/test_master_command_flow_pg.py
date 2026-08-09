@@ -379,13 +379,15 @@ async def test_no_pii_in_pending_payload(
             _env("закрыть интервал 10.08 с 14:00 до 15:00", "msg-pii")
         )
         assert result.outcome is MasterCommandFlowOutcome.CONFIRMATION_REQUIRED
-        row = await session.scalar(
-            text(
-                "SELECT safe_payload::text, phone_ref_token, name_ref_token, "
-                "master_id FROM master_command_pendings "
-                "WHERE inbound_message_id = 'msg-pii'"
+        row = (
+            await session.execute(
+                text(
+                    "SELECT safe_payload::text, phone_ref_token, name_ref_token, "
+                    "master_id FROM master_command_pendings "
+                    "WHERE inbound_message_id = 'msg-pii'"
+                )
             )
-        )
+        ).one_or_none()
         assert row is not None
         payload_text, phone_ref, name_ref, master_id = row
         assert "+7" not in payload_text
@@ -401,19 +403,21 @@ async def test_no_pii_in_pending_payload(
 async def _active_booking_row(
     session: AsyncSession,
 ) -> Any:
-    return await session.scalar(
-        text(
-            "SELECT id, state, idempotency_key, phone_ref_token, name_ref_token, "
-            "pii_conversation_id, command_version, command_kind, "
-            "execution_lease_expires_at, result_code "
-            "FROM master_command_pendings "
-            "WHERE external_account_id = :acc AND command_kind = 'CREATE_BOOKING' "
-            "AND state IN ('AWAITING_CONFIRMATION', 'AWAITING_CLARIFICATION', "
-            "'EXECUTING') "
-            "ORDER BY created_at DESC LIMIT 1"
-        ),
-        {"acc": _ACCOUNT},
-    )
+    return (
+        await session.execute(
+            text(
+                "SELECT id, state, idempotency_key, phone_ref_token, name_ref_token, "
+                "pii_conversation_id, command_version, command_kind, "
+                "execution_lease_expires_at, result_code "
+                "FROM master_command_pendings "
+                "WHERE external_account_id = :acc AND command_kind = 'CREATE_BOOKING' "
+                "AND state IN ('AWAITING_CONFIRMATION', 'AWAITING_CLARIFICATION', "
+                "'EXECUTING') "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"acc": _ACCOUNT},
+        )
+    ).one_or_none()
 
 
 async def _pii_still_readable(
@@ -493,23 +497,27 @@ async def test_create_booking_success_reads_pii_nondestructively_ttl_orphan(
         conversation_id=uuid.UUID(str(conv)),
     )
     async with session_factory() as session:
-        terminal = await session.scalar(
-            text(
-                "SELECT state, phone_ref_token, name_ref_token, command_kind "
-                "FROM master_command_pendings WHERE id = :id"
-            ),
-            {"id": _id},
-        )
+        terminal = (
+            await session.execute(
+                text(
+                    "SELECT state, phone_ref_token, name_ref_token, command_kind "
+                    "FROM master_command_pendings WHERE id = :id"
+                ),
+                {"id": _id},
+            )
+        ).one()
         assert terminal[0] == "SUCCEEDED"
         # Terminal row clears executable refs in the same UoW; not re-executed.
         assert terminal[1] is None
         assert terminal[2] is None
-        mirror = await session.scalar(
-            text(
-                "SELECT command_kind, idempotency_key FROM master_command_pendings "
-                "WHERE inbound_message_id = 'msg-cb-ok-da'"
+        mirror = (
+            await session.execute(
+                text(
+                    "SELECT command_kind, idempotency_key FROM master_command_pendings "
+                    "WHERE inbound_message_id = 'msg-cb-ok-da'"
+                )
             )
-        )
+        ).one_or_none()
         assert mirror is not None
         assert mirror[0] == "CREATE_BOOKING"
         assert mirror[1] == key
@@ -825,12 +833,14 @@ async def test_create_booking_repo_concurrent_reclaim_cas(
     assert sum(1 for r in results if r) == 1
     assert winners["count"] == 1
     async with session_factory() as session:
-        state_key = await session.scalar(
-            text(
-                "SELECT state, idempotency_key FROM master_command_pendings "
-                "WHERE inbound_message_id = 'msg-cb-cas'"
+        state_key = (
+            await session.execute(
+                text(
+                    "SELECT state, idempotency_key FROM master_command_pendings "
+                    "WHERE inbound_message_id = 'msg-cb-cas'"
+                )
             )
-        )
+        ).one()
         assert state_key[0] == "EXECUTING"
         assert state_key[1] == key
 
