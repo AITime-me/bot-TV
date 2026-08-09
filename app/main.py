@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Final
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncEngine
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
 
+from app.channels.vk_master_config import VkMasterAdapterConfig, VkMasterConfigError
+from app.channels.vk_master_http import NullVkMasterSender, VkMasterHttpSender
 from app.config import Settings
 from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
     build_booking_s2s_clients,
+    build_master_command_client,
 )
 from app.core.booking_eligibility_http import BookingEligibilityHttpClient
+from app.core.ephemeral_pii_types import EphemeralPiiError
 from app.core.outbound_policy import (
     OutboundAction,
     is_automatic_outbound_allowed,
@@ -21,11 +26,20 @@ from app.core.outbound_policy import (
 from app.db.session import create_engine, create_session_factory
 from app.services.booking_eligibility_flow import BookingEligibilityFlowService
 from app.services.booking_flow import BookingFlowService
+from app.services.ephemeral_pii_store import build_ephemeral_pii_store_from_env
+from app.services.vk_master_adapter import VkMasterAdapterService
 from app.services.worker_health import WorkerHealthService
 
 _BOOKING_ELIGIBILITY_CLIENT_UNSET: Final[object] = object()
 _BOOKING_ELIGIBILITY_FLOW_UNSET: Final[object] = object()
 _BOOKING_FLOW_UNSET: Final[object] = object()
+
+logger = logging.getLogger(__name__)
+_VK_WIRING_LOG: Final[frozenset[str]] = frozenset(
+    {
+        "VK_MASTER_PII_UNAVAILABLE",
+    }
+)
 
 
 def create_app(
@@ -146,7 +160,108 @@ def create_app(
             return JSONResponse(status_code=503, content=payload)
         return JSONResponse(status_code=200, content=payload)
 
+    # CURSOR-29: VK master Callback — registered only with complete callback
+    # config + database. Business execution remains default-off / safety-gated.
+    _register_vk_master_route(
+        application,
+        settings=loaded_settings,
+        engine=engine,
+    )
+
     return application
+
+
+def _register_vk_master_route(
+    application: FastAPI,
+    *,
+    settings: Settings,
+    engine: AsyncEngine | None,
+) -> None:
+    try:
+        vk_config = VkMasterAdapterConfig.from_env()
+    except VkMasterConfigError:
+        return
+    if not vk_config.callback_config_complete():
+        return
+
+    if engine is None:
+        # Callback config only: confirmation handshake; no business execution.
+        from app.channels.vk_master_webhook import parse_vk_master_callback
+        from app.channels.vk_master_types import VkMasterWebhookKind
+
+        @application.post("/webhooks/vk/master")
+        async def vk_master_webhook_confirmation_only(request: Request) -> Response:
+            raw = await request.body()
+            parsed = parse_vk_master_callback(raw, config=vk_config)
+            if parsed.kind is VkMasterWebhookKind.CONFIRMATION:
+                assert parsed.confirmation_response is not None
+                return PlainTextResponse(content=parsed.confirmation_response)
+            return PlainTextResponse(content="ok")
+
+        return
+
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    master_client = build_master_command_client(settings)
+    if vk_config.runtime_config_complete():
+        sender: NullVkMasterSender | VkMasterHttpSender = VkMasterHttpSender(vk_config)
+    else:
+        sender = NullVkMasterSender()
+    adapter = build_vk_master_adapter_service(
+        session_factory,
+        settings=settings,
+        vk_config=vk_config,
+        master_client=master_client,
+        sender=sender,
+    )
+
+    @application.post("/webhooks/vk/master")
+    async def vk_master_webhook(request: Request) -> Response:
+        raw = await request.body()
+        result = await adapter.handle_callback(raw)
+        return PlainTextResponse(content=result.body, status_code=result.status_code)
+
+
+def build_vk_master_adapter_service(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    settings: Settings,
+    vk_config: VkMasterAdapterConfig,
+    master_client: object,
+    sender: NullVkMasterSender | VkMasterHttpSender,
+    environ: Mapping[str, str] | None = None,
+) -> VkMasterAdapterService:
+    """Production VK adapter wiring (injects real EphemeralPiiStore when configured).
+
+    Invalid/partial ``EPHEMERAL_PII_*`` must not abort API startup: catch at this
+    boundary, degrade to ``pii_store=None`` (CREATE_BOOKING unavailable), keep
+    confirmation + non-PII commands. Canonical factory stays strict.
+    """
+
+    try:
+        pii_store = build_ephemeral_pii_store_from_env(
+            session_factory, environ=environ
+        )
+    except EphemeralPiiError:
+        # Constant code only — never log exception / key material / env values.
+        _log_vk_wiring("VK_MASTER_PII_UNAVAILABLE")
+        pii_store = None
+    return VkMasterAdapterService(
+        session_factory,
+        settings=settings,
+        config=vk_config,
+        master_client=master_client,  # type: ignore[arg-type]
+        pii_store=pii_store,
+        sender=sender,
+    )
+
+
+def _log_vk_wiring(event: str) -> None:
+    if event not in _VK_WIRING_LOG:
+        return
+    try:
+        logger.warning("%s", event)
+    except Exception:
+        return
 
 
 app = create_app()

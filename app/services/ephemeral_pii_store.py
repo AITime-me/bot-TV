@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Final
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.ephemeral_pii_crypto import decrypt_text, encrypt_text
-from app.core.ephemeral_pii_keys import EphemeralPiiKeyProvider
+from app.core.ephemeral_pii_keys import (
+    EnvEphemeralPiiKeyProvider,
+    EphemeralPiiKeyProvider,
+)
 from app.core.ephemeral_pii_types import (
     CRYPTO_VERSION_V1,
     MAX_PURGE_BATCH,
@@ -26,6 +30,10 @@ from app.core.ephemeral_pii_types import (
 )
 from app.db.session import session_scope
 from app.repositories import ephemeral_pii as ephemeral_pii_repo
+
+# Align ciphertext TTL with master confirmation window (15m); not imported from
+# master_command_types to keep the PII store free of command-flow coupling.
+_DEFAULT_STORE_TTL_SECONDS: Final[int] = 15 * 60
 
 _REFERENCE_FACTORY: Final[
     Callable[[], EphemeralPiiReference]
@@ -350,6 +358,47 @@ def _bindings_match(
         row.conversation_id == conversation_id
         and row.pii_kind == kind.value
         and row.allowed_purpose == purpose.value
+    )
+
+
+_PII_ACTIVE_KEY_ENV: Final[str] = "EPHEMERAL_PII_ACTIVE_KEY_ID"
+_PII_KEY_PREFIX: Final[str] = "EPHEMERAL_PII_KEY_"
+
+
+def build_ephemeral_pii_store_from_env(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    environ: Mapping[str, str] | None = None,
+    ttl_seconds: int = _DEFAULT_STORE_TTL_SECONDS,
+) -> EphemeralPiiStore | None:
+    """Compose the production EphemeralPiiStore from env, or None if unset.
+
+    Fully unset → ``None`` (CREATE_BOOKING stays unavailable without inventing
+    keys). Any partial/invalid ``EPHEMERAL_PII_*`` presence fails closed via
+    ``EphemeralPiiError`` — same EnvEphemeralPiiKeyProvider semantics.
+    """
+
+    if session_factory is None:
+        raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+    source = os.environ if environ is None else environ
+    try:
+        active_raw = source.get(_PII_ACTIVE_KEY_ENV)
+        key_present = any(name.startswith(_PII_KEY_PREFIX) for name in source)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+
+    if (active_raw is None or active_raw == "") and not key_present:
+        return None
+
+    provider = EnvEphemeralPiiKeyProvider(source)
+    # Eager validate when any EPHEMERAL_PII_* is present (fail closed incomplete).
+    provider.get_active_key()
+    return EphemeralPiiStore(
+        session_factory=session_factory,
+        key_provider=provider,
+        ttl_policy=EphemeralPiiTtlPolicy(ttl_seconds),
     )
 
 
