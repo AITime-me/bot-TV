@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.core.booking_eligibility_factory import build_booking_flow_from_settings
+from app.core.booking_eligibility_factory import (
+    build_booking_flow_from_settings,
+    rebind_booking_flow_to_runtime_settings,
+)
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     AMOCRM_MIRROR_LOOP,
@@ -265,7 +268,7 @@ def build_default_loop_specs(
     booking_flow: BookingFlowService | None = None,
 ) -> tuple[WorkerLoopSpec, ...]:
     resolved_booking_flow = (
-        booking_flow
+        rebind_booking_flow_to_runtime_settings(settings, booking_flow)
         if booking_flow is not None
         else build_booking_flow_for_worker(settings)
     )

@@ -1018,6 +1018,8 @@ def test_legacy_fixture_slots_path_unchanged() -> None:
 def test_worker_and_factory_share_transport_identity() -> None:
     settings = Settings.from_env(
         {
+            "BOT_MODE": "AUTO_READ",
+            "EMERGENCY_LOCK": "false",
             "BOOKING_ELIGIBILITY_BASE_URL": "https://eligibility.example",
             "BOOKING_ELIGIBILITY_BEARER_TOKEN": _TOKEN,
         }
