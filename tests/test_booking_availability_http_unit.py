@@ -101,7 +101,16 @@ def _json_response(
 
 
 def _client(transport: FakeTransport, **config_overrides: Any) -> BookingAvailabilityHttpClient:
-    return BookingAvailabilityHttpClient(_config(**config_overrides), transport)
+    return BookingAvailabilityHttpClient(
+        _config(**config_overrides),
+        transport,
+        settings=Settings.from_env(
+            {
+                "BOT_MODE": "AUTO_READ",
+                "EMERGENCY_LOCK": "false",
+            }
+        ),
+    )
 
 
 def _slot_payload(
@@ -342,7 +351,16 @@ def test_availability_shares_config_urls_and_token_with_eligibility() -> None:
 
 def test_eligibility_client_delegates_availability_methods() -> None:
     transport = FakeTransport(response=_json_response(_days_success()))
-    client = BookingEligibilityHttpClient(_config(), transport)
+    client = BookingEligibilityHttpClient(
+        _config(),
+        transport,
+        settings=Settings.from_env(
+            {
+                "BOT_MODE": "AUTO_READ",
+                "EMERGENCY_LOCK": "false",
+            }
+        ),
+    )
     result = client.get_available_days(
         service_id=_SERVICE_UUID,
         master_id=_MASTER_UUID,
@@ -355,8 +373,8 @@ def test_eligibility_client_delegates_availability_methods() -> None:
 def test_factory_builds_availability_from_same_settings() -> None:
     settings = Settings.from_env(
         {
-            "BOT_MODE": "OFF",
-            "EMERGENCY_LOCK": "true",
+            "BOT_MODE": "AUTO_READ",
+            "EMERGENCY_LOCK": "false",
             "BOOKING_ELIGIBILITY_BASE_URL": "https://eligibility.example",
             "BOOKING_ELIGIBILITY_BEARER_TOKEN": _VALID_TOKEN,
             "BOOKING_ELIGIBILITY_TIMEOUT_SECONDS": "4",

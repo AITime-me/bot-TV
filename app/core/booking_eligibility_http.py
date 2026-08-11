@@ -530,19 +530,34 @@ def _map_success_to_domain(
 
 
 class BookingEligibilityHttpClient:
-    """S2S eligibility client over an injected transport. No retries. No redirects."""
+    """S2S eligibility client over an injected transport. No retries. No redirects.
+
+    Live network reads are allowed only when bound ``Settings`` pass
+    ``is_live_booking_s2s_read_allowed`` — re-checked immediately before I/O.
+    Callers cannot enable live reads via a boolean flag.
+    """
 
     def __init__(
         self,
         config: BookingEligibilityHttpConfig,
         transport: S2sHttpTransport,
+        *,
+        settings: object | None = None,
     ) -> None:
         if type(config) is not BookingEligibilityHttpConfig:
             raise BookingEligibilityHttpError("CONFIG_INVALID") from None
         if transport is None:
             raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+        if settings is not None:
+            # Lazy import: app.config imports this module at load time.
+            from app.config import Settings as RuntimeSettings
+
+            if type(settings) is not RuntimeSettings:
+                raise BookingEligibilityHttpError("CONFIG_INVALID") from None
         self._config = config
         self._transport = transport
+        # None / non-allowing Settings → fail closed at every read boundary.
+        self._settings = settings
 
     def check_eligibility(
         self,
@@ -557,6 +572,15 @@ class BookingEligibilityHttpClient:
             raise BookingEligibilityHttpError("CONFIG_INVALID") from None
         if type(include_alternatives) is not bool:
             raise BookingEligibilityHttpError("CONFIG_INVALID") from None
+        # Lazy import avoids config ↔ http circular import at module load.
+        from app.core.mode_contract import is_live_booking_s2s_read_allowed
+
+        if not is_live_booking_s2s_read_allowed(self._settings):  # type: ignore[arg-type]
+            return _unavailable(
+                selected_service=service,
+                selected_master=master,
+                reason=BookingEligibilityAdapterReasonCode.CONFIG_INVALID,
+            )
 
         # Backend-specific UUID boundary — raise before any network I/O.
         service_id = require_canonical_backend_uuid(service.service_id)
@@ -728,7 +752,9 @@ class BookingEligibilityHttpClient:
         from app.core.booking_availability_http import BookingAvailabilityHttpClient
 
         return BookingAvailabilityHttpClient(
-            self._config, self._transport
+            self._config,
+            self._transport,
+            settings=self._settings,
         ).get_available_days(
             service_id=service_id,
             master_id=master_id,
@@ -747,7 +773,9 @@ class BookingEligibilityHttpClient:
         from app.core.booking_availability_http import BookingAvailabilityHttpClient
 
         return BookingAvailabilityHttpClient(
-            self._config, self._transport
+            self._config,
+            self._transport,
+            settings=self._settings,
         ).get_available_slots(
             service_id=service_id,
             master_id=master_id,

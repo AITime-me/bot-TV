@@ -442,19 +442,34 @@ def _map_error_envelope(status_code: int, body: bytes) -> BookingAvailabilityAda
 
 
 class BookingAvailabilityHttpClient:
-    """S2S availability client over injected transport. No retries. No redirects."""
+    """S2S availability client over injected transport. No retries. No redirects.
+
+    Live network reads are allowed only when bound ``Settings`` pass
+    ``is_live_booking_s2s_read_allowed`` — re-checked immediately before I/O.
+    Callers cannot enable live reads via a boolean flag.
+    """
 
     def __init__(
         self,
         config: BookingEligibilityHttpConfig,
         transport: S2sHttpTransport,
+        *,
+        settings: object | None = None,
     ) -> None:
         if type(config) is not BookingEligibilityHttpConfig:
             raise BookingAvailabilityHttpError("CONFIG_INVALID") from None
         if transport is None:
             raise BookingAvailabilityHttpError("CONFIG_INVALID") from None
+        if settings is not None:
+            # Lazy import: app.config imports eligibility http (shared config) at load.
+            from app.config import Settings as RuntimeSettings
+
+            if type(settings) is not RuntimeSettings:
+                raise BookingAvailabilityHttpError("CONFIG_INVALID") from None
         self._config = config
         self._transport = transport
+        # None / non-allowing Settings → fail closed at every read boundary.
+        self._settings = settings
 
     @property
     def available_days_url(self) -> str:
@@ -471,6 +486,10 @@ class BookingAvailabilityHttpClient:
         master_id: object,
         month: object,
     ) -> AvailableDaysResult:
+        from app.core.mode_contract import is_live_booking_s2s_read_allowed
+
+        if not is_live_booking_s2s_read_allowed(self._settings):  # type: ignore[arg-type]
+            _fail(BookingAvailabilityAdapterReasonCode.CONFIG_INVALID)
         try:
             canonical_service = require_canonical_backend_uuid(service_id)
             canonical_master = require_canonical_backend_uuid(master_id)
@@ -503,6 +522,10 @@ class BookingAvailabilityHttpClient:
         master_id: object,
         date: object,
     ) -> AvailableSlotsResult:
+        from app.core.mode_contract import is_live_booking_s2s_read_allowed
+
+        if not is_live_booking_s2s_read_allowed(self._settings):  # type: ignore[arg-type]
+            _fail(BookingAvailabilityAdapterReasonCode.CONFIG_INVALID)
         try:
             canonical_service = require_canonical_backend_uuid(service_id)
             canonical_master = require_canonical_backend_uuid(master_id)

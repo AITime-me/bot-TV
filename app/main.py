@@ -16,6 +16,9 @@ from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
     build_booking_s2s_clients,
     build_master_command_client,
+    rebind_availability_client_to_runtime_settings,
+    rebind_booking_flow_to_runtime_settings,
+    rebind_eligibility_client_to_runtime_settings,
 )
 from app.core.booking_eligibility_http import BookingEligibilityHttpClient
 from app.core.ephemeral_pii_types import EphemeralPiiError
@@ -87,7 +90,13 @@ def create_app(
                 resolved_availability_client = clients.availability
                 resolved_booking_create_client = clients.booking_create
             else:
-                resolved_eligibility_client = booking_eligibility_client
+                # Runtime Settings win over any injected live HTTP policy.
+                resolved_eligibility_client = (
+                    rebind_eligibility_client_to_runtime_settings(
+                        loaded_settings,
+                        booking_eligibility_client,
+                    )
+                )
                 resolved_availability_client = None
                 resolved_booking_create_client = None
 
@@ -96,8 +105,29 @@ def create_app(
                     resolved_eligibility_client  # type: ignore[arg-type]
                 )
             else:
-                resolved_eligibility_flow = booking_eligibility_flow
+                # Rebind live HTTP client inside an injected eligibility flow.
+                if isinstance(
+                    booking_eligibility_flow, BookingEligibilityFlowService
+                ):
+                    bound_client = rebind_eligibility_client_to_runtime_settings(
+                        loaded_settings,
+                        booking_eligibility_flow._client,  # noqa: SLF001
+                    )
+                    if bound_client is booking_eligibility_flow._client:  # noqa: SLF001
+                        resolved_eligibility_flow = booking_eligibility_flow
+                    else:
+                        resolved_eligibility_flow = BookingEligibilityFlowService(
+                            bound_client  # type: ignore[arg-type]
+                        )
+                else:
+                    resolved_eligibility_flow = booking_eligibility_flow
 
+            resolved_availability_client = (
+                rebind_availability_client_to_runtime_settings(
+                    loaded_settings,
+                    resolved_availability_client,
+                )
+            )
             resolved_booking_flow = BookingFlowService(
                 resolved_eligibility_flow,  # type: ignore[arg-type]
                 resolved_availability_client,  # type: ignore[arg-type]
@@ -107,7 +137,10 @@ def create_app(
         # Never publish None: fail-closed consumer with unset eligibility flow.
         resolved_booking_flow = BookingFlowService(None)
     else:
-        resolved_booking_flow = booking_flow
+        resolved_booking_flow = rebind_booking_flow_to_runtime_settings(
+            loaded_settings,
+            booking_flow,
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:

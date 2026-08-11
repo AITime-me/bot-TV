@@ -63,6 +63,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/s2s_http_transport.py",
     "!app/core/s2s_http_stdlib.py",
     "!app/core/booking_eligibility_factory.py",
+    "!app/core/mode_contract.py",
     "!app/core/master_channel_binding.py",
     "!app/core/identity_resolution.py",
     "!app/core/identity_provider_port.py",

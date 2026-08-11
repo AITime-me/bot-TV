@@ -15,6 +15,14 @@
 Для `EMERGENCY_LOCK` допустимы только точные значения `true` и `false`;
 регистр, пробелы и псевдобулевы значения не нормализуются.
 
+Control plane (`online-zapis-tv`) использует отдельный enum
+`OFF|TEST|HINTS|DRAFT|AUTO`. Явный dual-enum contract — в
+`app/core/mode_contract.py` и ADR-001: `TEST` не является `BotMode`;
+control-plane `AUTO` не alias `AUTO_WRITE` (максимум `AUTO_READ` до
+отдельного OWNER write gate). Live Booking Service S2S reads
+(eligibility/availability) разрешены только при `AUTO_READ`/`AUTO_WRITE`
+и `EMERGENCY_LOCK=false`.
+
 Даже `BOT_MODE=AUTO_WRITE` и `EMERGENCY_LOCK=false` пока не подключают внешние
 интеграции и сами по себе не разрешают отправку сообщений.
 

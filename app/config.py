@@ -13,8 +13,9 @@ from app.core.booking_eligibility_http import (
     BookingEligibilityHttpError,
 )
 
-# Mode values stay local to bot-TV. Do not map to online-zapis-tv control-plane
-# enums (TEST/AUTO) until CONTRACT-MODE-01 — see docs/adr/001-mode-contract-deferred.md.
+# Mode values stay local to bot-TV. Dual-enum mapping to the online-zapis-tv
+# control plane is OWNER-approved in app/core/mode_contract.py (CONTRACT-MODE-01).
+# Do not invent silent aliases (TEST is not BotMode; AUTO is not AUTO_WRITE).
 
 
 class BotMode(str, Enum):

@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from app.config import Settings
 from app.core.booking_eligibility_http import (
     ELIGIBILITY_ROUTE_PATH,
     BookingEligibilityHttpClient,
@@ -66,7 +67,16 @@ def _config(**overrides: Any) -> BookingEligibilityHttpConfig:
 def _client(
     transport: _RecordingTransport, **config_overrides: Any
 ) -> BookingEligibilityHttpClient:
-    return BookingEligibilityHttpClient(_config(**config_overrides), transport)
+    return BookingEligibilityHttpClient(
+        _config(**config_overrides),
+        transport,
+        settings=Settings.from_env(
+            {
+                "BOT_MODE": "AUTO_READ",
+                "EMERGENCY_LOCK": "false",
+            }
+        ),
+    )
 
 
 def _json_response(

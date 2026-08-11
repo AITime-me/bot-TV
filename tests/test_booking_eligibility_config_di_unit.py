@@ -12,7 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import BotMode, Settings
-from app.core.booking_eligibility_factory import build_booking_eligibility_client
+from app.core.booking_eligibility_factory import (
+    build_booking_eligibility_client,
+    build_booking_s2s_clients,
+)
 from app.core.booking_eligibility_http import (
     DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_TIMEOUT_SECONDS,
@@ -46,6 +49,9 @@ _SECRET_TOKEN = "secret-token-value-must-not-leak!!"
 
 def _full_env(**overrides: str) -> dict[str, str]:
     env = {
+        # Live S2S reads require AUTO_READ/AUTO_WRITE with lock=false (M1).
+        "BOT_MODE": "AUTO_READ",
+        "EMERGENCY_LOCK": "false",
         "BOOKING_ELIGIBILITY_BASE_URL": _VALID_URL,
         "BOOKING_ELIGIBILITY_BEARER_TOKEN": _VALID_TOKEN,
     }
@@ -770,7 +776,17 @@ def test_create_app_makes_no_http_request(
 
 
 def test_create_app_health_endpoints_unchanged() -> None:
-    client = TestClient(create_app(Settings.from_env(_full_env())))
+    # Defaults remain OFF/lock=true even when eligibility config is present.
+    client = TestClient(
+        create_app(
+            Settings.from_env(
+                {
+                    "BOOKING_ELIGIBILITY_BASE_URL": _VALID_URL,
+                    "BOOKING_ELIGIBILITY_BEARER_TOKEN": _VALID_TOKEN,
+                }
+            )
+        )
+    )
     assert client.get("/health").json() == {"status": "ok"}
     assert client.get("/health/live").json() == {"status": "ok"}
     ready = client.get("/health/ready")
@@ -785,10 +801,20 @@ def test_create_app_health_endpoints_unchanged() -> None:
 
 
 def test_create_app_preserves_fail_closed_mode_defaults() -> None:
-    settings = Settings.from_env(_full_env())
+    settings = Settings.from_env(
+        {
+            "BOOKING_ELIGIBILITY_BASE_URL": _VALID_URL,
+            "BOOKING_ELIGIBILITY_BEARER_TOKEN": _VALID_TOKEN,
+        }
+    )
     assert settings.bot_mode is BotMode.OFF
     assert settings.emergency_lock is True
     application = create_app(settings)
     ready = TestClient(application).get("/health/ready").json()
     assert ready["bot_mode"] == "OFF"
     assert ready["emergency_lock"] is True
+    # M1: configured credentials under OFF must not publish live read clients.
+    clients = build_booking_s2s_clients(settings)
+    assert clients.eligibility is None
+    assert clients.availability is None
+    assert clients.booking_create is not None
