@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from uuid import uuid4
 
@@ -16,11 +17,12 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.amocrm_chat_webhook import AMOCRM_CHAT_WEBHOOK_PATH, build_amocrm_chat_router
-from app.core.amocrm_chat_config import AmoCrmChatConfig
+from app.amocrm_chat_webhook import AMOCRM_CHAT_WEBHOOK_PATH
+from app.config import Settings
 from app.core.amocrm_manager_ids import amocrm_manager_namespaced_id
 from app.db.clock import db_statement_now
 from app.db.session import session_scope
+from app.main import create_app
 from app.models.amocrm_chat_binding import AmocrmChatBindingStatus
 from app.models.conversation import (
     Conversation,
@@ -30,7 +32,7 @@ from app.models.conversation import (
 from app.models.inbox import InboxMessage
 from app.models.ingress import IngressEvent, IngressStatus
 from app.models.manager_message import ManagerMessage, ManagerMessageStatus
-from app.models.outbox import DeliveryStatus, OutboxMessage
+from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.repositories import amocrm_chat_bindings as binding_repo
 from app.schemas.amocrm_manager_ingress import AmoCrmManagerIngressEvent
@@ -44,9 +46,36 @@ from app.services.handoff_expiry import HandoffExpiryWorker
 from app.services.inbound import InboundService
 from app.services.ingress import IngressWorker
 from app.services.manager_messages import SyntheticManagerMessageService
+from tests.foundation_test_db import SecretDatabaseUrl
 from tests.pg_harness import truncate_foundation_tables
 
 _SECRET = "t" * 32
+
+
+@contextmanager
+def _amo_app_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    database_url: str,
+) -> Iterator[TestClient]:
+    """Sync TestClient with lifespan on one anyio portal for the whole ``with``.
+
+    Matches closed-test PG pattern: app owns its engine/session factory on the
+    TestClient portal loop. Do not reuse pytest-asyncio ``session_factory``
+    inside this context — that crosses event loops and breaks asyncpg.
+    """
+
+    monkeypatch.setenv("AMOCRM_CHAT_WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("AMOCRM_CHAT_CHANNEL_SECRET", _SECRET)
+    settings = Settings.from_env(
+        {
+            "BOT_MODE": "OFF",
+            "EMERGENCY_LOCK": "true",
+            "DATABASE_URL": database_url,
+        }
+    )
+    with TestClient(create_app(settings)) as client:
+        yield client
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -378,15 +407,22 @@ async def test_manager_takeover_cancels_bot_work_and_arbiter_denies(
                 )
             )
             assert cancelled_plans >= 1
-            cancelled_outbound = await session.scalar(
+            # Contract: cancel_unadmitted_for_manager_message only touches
+            # SYNTHETIC_OUTBOUND. INTERNAL_DRAFT from client inbound stays PENDING.
+            draft_pending = await session.scalar(
                 select(func.count()).select_from(OutboxMessage).where(
                     OutboxMessage.conversation_id == conversation.id,
-                    OutboxMessage.delivery_status == DeliveryStatus.CANCELLED.value,
+                    OutboxMessage.destination_type
+                    == DestinationType.INTERNAL_DRAFT.value,
+                    OutboxMessage.delivery_status == DeliveryStatus.PENDING.value,
                 )
             )
-            pending = await session.scalar(
+            assert draft_pending == 1
+            pending_synthetic = await session.scalar(
                 select(func.count()).select_from(OutboxMessage).where(
                     OutboxMessage.conversation_id == conversation.id,
+                    OutboxMessage.destination_type
+                    == DestinationType.SYNTHETIC_OUTBOUND.value,
                     OutboxMessage.delivery_status.in_(
                         [
                             DeliveryStatus.PENDING.value,
@@ -395,8 +431,7 @@ async def test_manager_takeover_cancels_bot_work_and_arbiter_denies(
                     ),
                 )
             )
-            assert pending == 0
-            assert cancelled_outbound is not None
+            assert pending_synthetic == 0
 
 
 @pytest.mark.asyncio
@@ -440,16 +475,11 @@ async def test_fifteen_minute_expiry_same_conversation_bot_active(
 
 @pytest.mark.asyncio
 async def test_webhook_http_ack_after_commit_and_signature(
+    monkeypatch: pytest.MonkeyPatch,
     session_factory: async_sessionmaker[AsyncSession],
+    pg_database_url: SecretDatabaseUrl,
 ) -> None:
     await _seed_bound_conversation(session_factory)
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
-    from fastapi import FastAPI
-
-    app = FastAPI()
-    app.include_router(
-        build_amocrm_chat_router(config=config, session_factory=session_factory)
-    )
     body = json.dumps(
         {
             "amocrm_chat_id": "amo-chat-pg-1",
@@ -460,19 +490,20 @@ async def test_webhook_http_ack_after_commit_and_signature(
     ).encode("utf-8")
     namespaced = "amo:amo-chat-pg-1:amo-http-1"
 
-    with TestClient(app) as client:
+    async with session_factory() as session:
+        async with session.begin():
+            before = await session.scalar(
+                select(func.count()).select_from(IngressEvent)
+            )
+    assert before == 0
+
+    with _amo_app_client(monkeypatch, database_url=pg_database_url.reveal()) as client:
         unauthorized = client.post(
             AMOCRM_CHAT_WEBHOOK_PATH,
             content=body,
             headers={"Content-Type": "application/json"},
         )
         assert unauthorized.status_code == 401
-        async with session_factory() as session:
-            async with session.begin():
-                before = await session.scalar(
-                    select(func.count()).select_from(IngressEvent)
-                )
-        assert before == 0
 
         ok = client.post(
             AMOCRM_CHAT_WEBHOOK_PATH,
