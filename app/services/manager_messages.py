@@ -97,21 +97,36 @@ async def apply_manager_message_in_session(
     *,
     event: SyntheticManagerMessageEvent,
     handoff_pause_seconds: int = 15 * 60,
+    conversation_id: uuid.UUID | None = None,
 ) -> ManagerMessageApplyResult:
-    """Persist and classify one manager event under a Conversation row lock."""
+    """Persist and classify one manager event under a Conversation row lock.
+
+    When ``conversation_id`` is provided (AMO-01A binding resolve), lock that
+    row only — never invent a conversation from an amo chat id.
+    """
     if event.channel != "synthetic":
         raise ValueError("UNSUPPORTED_CHANNEL")
 
     channel = event.channel_enum()
-    conversation, _ = await conversation_repo.get_or_create(
-        session,
-        channel=channel,
-        external_conversation_id=event.external_conversation_id,
-    )
-    conversation = await conversation_repo.lock_for_update(
-        session,
-        conversation_id=conversation.id,
-    )
+    if conversation_id is not None:
+        conversation = await conversation_repo.lock_for_update(
+            session,
+            conversation_id=conversation_id,
+        )
+        if conversation.channel != channel.value:
+            raise RuntimeError("BINDING_CONVERSATION_CHANNEL_MISMATCH")
+        if conversation.external_conversation_id != event.external_conversation_id:
+            raise RuntimeError("BINDING_CONVERSATION_EXTERNAL_ID_MISMATCH")
+    else:
+        conversation, _ = await conversation_repo.get_or_create(
+            session,
+            channel=channel,
+            external_conversation_id=event.external_conversation_id,
+        )
+        conversation = await conversation_repo.lock_for_update(
+            session,
+            conversation_id=conversation.id,
+        )
 
     message, created = await manager_message_repo.insert_quarantined_if_absent(
         session,

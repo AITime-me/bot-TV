@@ -13,6 +13,7 @@ from sqlalchemy import CheckConstraint, UniqueConstraint
 from app.db.base import Base
 from app.models import (
     AmoCrmMirrorJob,
+    AmocrmChatBinding,
     AttachmentSpoolObject,
     CanonicalIdentity,
     Conversation,
@@ -47,6 +48,24 @@ _EXPECTED_UNIQUES_01A = {
     "uq_conversations_channel_external_id",
     "uq_inbox_channel_external_message_id",
     "uq_outbox_source_inbox_destination",
+}
+
+_EXPECTED_CHECKS_20 = {
+    "ck_ingress_channel": "channel IN ('synthetic', 'amocrm')",
+    "ck_ingress_event_type": (
+        "event_type IN ('SYNTHETIC_MESSAGE', 'AMOCRM_MANAGER_MESSAGE')"
+    ),
+    "ck_ingress_channel_event_pairing": (
+        "(channel = 'synthetic' AND event_type = 'SYNTHETIC_MESSAGE') OR "
+        "(channel = 'amocrm' AND event_type = 'AMOCRM_MANAGER_MESSAGE')"
+    ),
+    "ck_amocrm_chat_bindings_status": "status IN ('ACTIVE', 'REVOKED')",
+    "ck_amocrm_chat_bindings_chat_id_nonempty": "char_length(amocrm_chat_id) >= 1",
+}
+
+_EXPECTED_UNIQUES_20 = {
+    "uq_amocrm_chat_bindings_conversation_id",
+    "uq_amocrm_chat_bindings_amocrm_chat_id",
 }
 
 _EXPECTED_CHECKS_01B = {
@@ -178,6 +197,7 @@ def test_alembic_metadata_imports() -> None:
     assert MasterCommandPending.__tablename__ == "master_command_pendings"
     assert CanonicalIdentity.__tablename__ == "canonical_identities"
     assert ExternalIdentityLink.__tablename__ == "external_identity_links"
+    assert AmocrmChatBinding.__tablename__ == "amocrm_chat_bindings"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -195,6 +215,7 @@ def test_alembic_metadata_imports() -> None:
         "master_command_pendings",
         "canonical_identities",
         "external_identity_links",
+        "amocrm_chat_bindings",
     }
 
 
@@ -250,6 +271,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260809_19_identity_resolution"].down_revision
         == "20260808_18_master_commands"
     )
+    assert "20260812_20_amocrm_mgr_ingress" in by_id
+    assert (
+        by_id["20260812_20_amocrm_mgr_ingress"].down_revision
+        == "20260809_19_identity_resolution"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -263,6 +289,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260807_17_master_bindings",
         "20260808_18_master_commands",
         "20260809_19_identity_resolution",
+        "20260812_20_amocrm_mgr_ingress",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -355,6 +382,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_12 = (
         root / "alembic" / "versions" / "20260729_12_worker_runtime.py"
     ).read_text(encoding="utf-8")
+    migration_20 = (
+        root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
+    ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
     model_uniques: set[str] = set()
@@ -377,6 +407,8 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert set(_EXPECTED_CHECKS_11) <= set(model_checks)
     assert _EXPECTED_UNIQUES_11 <= model_uniques
     assert set(_EXPECTED_CHECKS_12) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_20) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_20 <= model_uniques
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -402,6 +434,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     for name, sql in _EXPECTED_CHECKS_01B.items():
         assert name in migration_01b
         assert sql in migration_01b
+        if name in {"ck_ingress_channel", "ck_ingress_event_type"}:
+            # 01B historically created the narrow ingress checks; AMO-01A replaces.
+            continue
         assert model_checks[name] == sql
 
     for name in _EXPECTED_UNIQUES_01B:
@@ -455,6 +490,15 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert model_checks[name] == sql
         for token in re.findall(r"'[a-z_]+'", sql):
             assert token in migration_12, f"{name} missing {token}"
+
+    for name, sql in _EXPECTED_CHECKS_20.items():
+        assert name in migration_20
+        assert model_checks[name] == sql
+        assert sql in migration_20
+
+    for name in _EXPECTED_UNIQUES_20:
+        assert name in migration_20
+    assert "amocrm_chat_bindings" in migration_20
 
     for complex_check in (
         "ck_conversations_handoff_consistency",

@@ -12,6 +12,7 @@ from app.config import Settings, normalize_async_database_url
 from app.db.base import Base
 from app.models import (  # noqa: F401 — register metadata
     AmoCrmMirrorJob,
+    AmocrmChatBinding,
     Conversation,
     ConversationOpsEvent,
     InboxMessage,

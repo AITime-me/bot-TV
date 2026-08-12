@@ -7,8 +7,11 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.session import session_scope
-from app.models.ingress import IngressEvent, IngressEventType, IngressStatus
+from app.models.conversation import Conversation
+from app.models.ingress import IngressEvent, IngressEventType
+from app.repositories import amocrm_chat_bindings as binding_repo
 from app.repositories import ingress as ingress_repo
+from app.repositories.amocrm_chat_bindings import AmocrmChatBindingAmbiguousError
 from app.repositories.ingress import (
     DEFAULT_LEASE_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
@@ -19,7 +22,9 @@ from app.repositories.ingress import (
 from app.schemas.booking_input import SyntheticBookingInput
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.ingress import SyntheticIngressEvent
+from app.schemas.manager_message import SyntheticManagerMessageEvent
 from app.services.inbound import InboundService
+from app.services.manager_messages import apply_manager_message_in_session
 
 
 class IngressPersistError(RuntimeError):
@@ -147,7 +152,27 @@ class IngressWorker:
             )
 
     async def process_claimed(self, claim: IngressClaim) -> IngressProcessResult:
-        """Apply foundation inbound persistence under the held lease."""
+        """Apply foundation inbound or amoCRM manager path under the held lease."""
+        # Fail closed: never route mismatched channel/event pairs into synthetic
+        # client inbound (AMO-01A / M1).
+        if claim.channel == "amocrm":
+            if claim.event_type != IngressEventType.AMOCRM_MANAGER_MESSAGE.value:
+                await self.fail_claimed(
+                    claim,
+                    error_code="INGRESS_CHANNEL_EVENT_MISMATCH",
+                )
+                raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
+            return await self._process_amocrm_manager(claim)
+        if (
+            claim.channel != "synthetic"
+            or claim.event_type != IngressEventType.SYNTHETIC_MESSAGE.value
+        ):
+            await self.fail_claimed(
+                claim,
+                error_code="INGRESS_CHANNEL_EVENT_MISMATCH",
+            )
+            raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
+
         inbound = _envelope_to_inbound(claim)
         try:
             async with session_scope(self._session_factory) as session:
@@ -172,6 +197,88 @@ class IngressWorker:
             raise
         except Exception as exc:
             await self.fail_claimed(claim, error_code=type(exc).__name__)
+            raise
+
+    async def _process_amocrm_manager(self, claim: IngressClaim) -> IngressProcessResult:
+        """Resolve binding then apply existing manager-message FSM. No outbound."""
+
+        try:
+            async with session_scope(self._session_factory) as session:
+                envelope = claim.envelope_json
+                amocrm_chat_id = envelope.get("amocrm_chat_id")
+                amocrm_message_id = envelope.get("amocrm_message_id")
+                external_message_id = envelope.get("external_message_id")
+                provider_sequence = envelope.get("provider_sequence")
+                text = envelope.get("text")
+                if (
+                    not isinstance(amocrm_chat_id, str)
+                    or not amocrm_chat_id
+                    or not isinstance(amocrm_message_id, str)
+                    or not amocrm_message_id
+                    or not isinstance(external_message_id, str)
+                    or not external_message_id
+                    or not isinstance(provider_sequence, int)
+                    or not isinstance(text, str)
+                    or not text
+                ):
+                    raise ValueError("INGRESS_ENVELOPE_INVALID")
+                # Ingress row key must match namespaced manager key (H1/H2).
+                if claim.external_event_id != external_message_id:
+                    raise ValueError("INGRESS_ENVELOPE_INVALID")
+                if claim.external_conversation_id != amocrm_chat_id:
+                    raise ValueError("INGRESS_ENVELOPE_INVALID")
+
+                try:
+                    binding = await binding_repo.get_active_by_amocrm_chat_id(
+                        session,
+                        amocrm_chat_id=amocrm_chat_id,
+                    )
+                except AmocrmChatBindingAmbiguousError:
+                    raise ValueError("BINDING_AMBIGUOUS") from None
+                if binding is None:
+                    raise ValueError("BINDING_UNKNOWN")
+
+                conversation = await session.get(Conversation, binding.conversation_id)
+                if conversation is None:
+                    raise ValueError("BINDING_CONVERSATION_MISSING")
+
+                # Namespaced external_message_id keeps AMO provenance out of the
+                # raw synthetic manager id namespace (H2).
+                manager_event = SyntheticManagerMessageEvent(
+                    channel="synthetic",
+                    external_conversation_id=conversation.external_conversation_id,
+                    external_message_id=external_message_id,
+                    provider_sequence=provider_sequence,
+                    text=text,
+                )
+                apply = await apply_manager_message_in_session(
+                    session,
+                    event=manager_event,
+                    handoff_pause_seconds=self._handoff_pause_seconds,
+                    conversation_id=conversation.id,
+                )
+                event = await ingress_repo.complete_with_lease(
+                    session,
+                    event_id=claim.event_id,
+                    lease_token=claim.lease_token,
+                    lease_version=claim.lease_version,
+                )
+                return IngressProcessResult(
+                    event_id=event.id,
+                    status=event.status,
+                    duplicate_business=apply.duplicate,
+                    inbox_id=None,
+                    outbox_id=None,
+                )
+        except StaleIngressLeaseError:
+            raise
+        except Exception as exc:
+            code = type(exc).__name__
+            if isinstance(exc, ValueError) and exc.args:
+                arg0 = exc.args[0]
+                if isinstance(arg0, str) and arg0.isupper() and " " not in arg0:
+                    code = arg0
+            await self.fail_claimed(claim, error_code=code)
             raise
 
     async def fail_claimed(

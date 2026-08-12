@@ -12,11 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.clock import resolve_moment
 from app.models.conversation import Channel
 from app.models.ingress import (
+    IngressChannel,
     IngressEvent,
     IngressEventType,
     IngressStatus,
     ingress_transition_allowed,
 )
+
+IngressChannelLike = Channel | IngressChannel
 
 DEFAULT_LEASE_SECONDS = 30
 DEFAULT_MAX_ATTEMPTS = 5
@@ -84,7 +87,7 @@ def _row_to_claim(row: IngressEvent) -> IngressClaim:
 async def get_by_channel_external(
     session: AsyncSession,
     *,
-    channel: Channel,
+    channel: IngressChannelLike,
     external_event_id: str,
 ) -> IngressEvent | None:
     stmt = select(IngressEvent).where(
@@ -105,7 +108,7 @@ async def get_by_id(
 async def insert_if_absent(
     session: AsyncSession,
     *,
-    channel: Channel,
+    channel: IngressChannelLike,
     external_event_id: str,
     external_conversation_id: str,
     event_type: IngressEventType,
@@ -120,6 +123,7 @@ async def insert_if_absent(
     """
     if max_attempts <= 0:
         raise ValueError("max_attempts must be positive")
+    _assert_channel_event_pairing(channel=channel, event_type=event_type)
 
     existing = await get_by_channel_external(
         session,
@@ -164,6 +168,25 @@ async def insert_if_absent(
     if event is None:
         raise RuntimeError("INGRESS_LOOKUP_FAILED")
     return event, inserted is not None
+
+
+def _assert_channel_event_pairing(
+    *,
+    channel: IngressChannelLike,
+    event_type: IngressEventType,
+) -> None:
+    """Runtime mirror of ck_ingress_channel_event_pairing (fail closed)."""
+
+    channel_value = channel.value
+    if channel_value == IngressChannel.AMOCRM.value:
+        if event_type is not IngressEventType.AMOCRM_MANAGER_MESSAGE:
+            raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
+        return
+    if channel_value == IngressChannel.SYNTHETIC.value:
+        if event_type is not IngressEventType.SYNTHETIC_MESSAGE:
+            raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
+        return
+    raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
 
 
 async def recover_exhausted_leases(
