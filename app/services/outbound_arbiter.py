@@ -164,6 +164,8 @@ class OutboundArbiter:
                     else uuid.uuid4()
                 ),
             )
+            # AMO-01B1a: BOT_OUTBOUND Chat projection deferred — token-only
+            # SYNTHETIC_OUTBOUND must never enqueue amo projection here.
         return ArbiterAdmitResult(
             admitted=True,
             outbound_id=delivered.id,

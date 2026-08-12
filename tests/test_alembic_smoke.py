@@ -14,6 +14,7 @@ from app.db.base import Base
 from app.models import (
     AmoCrmMirrorJob,
     AmocrmChatBinding,
+    AmocrmMessageProjection,
     AttachmentSpoolObject,
     CanonicalIdentity,
     Conversation,
@@ -66,6 +67,39 @@ _EXPECTED_CHECKS_20 = {
 _EXPECTED_UNIQUES_20 = {
     "uq_amocrm_chat_bindings_conversation_id",
     "uq_amocrm_chat_bindings_amocrm_chat_id",
+}
+
+_EXPECTED_CHECKS_21 = {
+    "ck_amocrm_message_projections_source_kind": (
+        "source_kind IN ('CLIENT_INBOUND', 'BOT_OUTBOUND')"
+    ),
+    "ck_amocrm_message_projections_status": (
+        "status IN ('PENDING', 'PROCESSING', 'PROJECTED', 'SKIPPED', "
+        "'FAILED', 'DEAD')"
+    ),
+    "ck_amocrm_message_projections_attempt_count_nonnegative": "attempt_count >= 0",
+    "ck_amocrm_message_projections_max_attempts_positive": "max_attempts > 0",
+    "ck_amocrm_message_projections_lease_version_nonnegative": "lease_version >= 0",
+    "ck_amocrm_message_projections_integration_msgid_format": (
+        "integration_msgid ~ '^[cb][0-9a-f]{32}$'"
+    ),
+    "ck_amocrm_message_projections_projected_has_amo_id": (
+        "(status = 'PROJECTED' AND amocrm_message_id IS NOT NULL) OR "
+        "(status <> 'PROJECTED')"
+    ),
+}
+
+_EXPECTED_UNIQUES_21 = {
+    "uq_amocrm_message_projections_source",
+    "uq_amocrm_message_projections_integration_msgid",
+    "uq_amocrm_message_projections_amocrm_message_id",
+}
+
+_EXPECTED_CHECKS_22 = {
+    "ck_amocrm_chat_bindings_integ_cid_nonempty": (
+        "integration_conversation_id IS NULL OR "
+        "char_length(integration_conversation_id) >= 1"
+    ),
 }
 
 _EXPECTED_CHECKS_01B = {
@@ -198,6 +232,7 @@ def test_alembic_metadata_imports() -> None:
     assert CanonicalIdentity.__tablename__ == "canonical_identities"
     assert ExternalIdentityLink.__tablename__ == "external_identity_links"
     assert AmocrmChatBinding.__tablename__ == "amocrm_chat_bindings"
+    assert AmocrmMessageProjection.__tablename__ == "amocrm_message_projections"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -216,6 +251,7 @@ def test_alembic_metadata_imports() -> None:
         "canonical_identities",
         "external_identity_links",
         "amocrm_chat_bindings",
+        "amocrm_message_projections",
     }
 
 
@@ -276,6 +312,16 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260812_20_amocrm_mgr_ingress"].down_revision
         == "20260809_19_identity_resolution"
     )
+    assert "20260812_21_amocrm_chat_proj" in by_id
+    assert (
+        by_id["20260812_21_amocrm_chat_proj"].down_revision
+        == "20260812_20_amocrm_mgr_ingress"
+    )
+    assert "20260812_22_amo_chat_integ_cid" in by_id
+    assert (
+        by_id["20260812_22_amo_chat_integ_cid"].down_revision
+        == "20260812_21_amocrm_chat_proj"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -290,6 +336,8 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260808_18_master_commands",
         "20260809_19_identity_resolution",
         "20260812_20_amocrm_mgr_ingress",
+        "20260812_21_amocrm_chat_proj",
+        "20260812_22_amo_chat_integ_cid",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -313,6 +361,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260808_18_master_commands") <= 32
     assert "20260809_19_identity_resolution" in revision_ids
     assert len("20260809_19_identity_resolution") <= 32
+    assert "20260812_21_amocrm_chat_proj" in revision_ids
+    assert len("20260812_21_amocrm_chat_proj") <= 32
+    assert "20260812_22_amo_chat_integ_cid" in revision_ids
+    assert len("20260812_22_amo_chat_integ_cid") <= 32
+    assert heads == ["20260812_22_amo_chat_integ_cid"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -385,6 +438,12 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
     ).read_text(encoding="utf-8")
+    migration_21 = (
+        root / "alembic" / "versions" / "20260812_21_amocrm_chat_proj.py"
+    ).read_text(encoding="utf-8")
+    migration_22 = (
+        root / "alembic" / "versions" / "20260812_22_amo_chat_integ_cid.py"
+    ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
     model_uniques: set[str] = set()
@@ -409,6 +468,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert set(_EXPECTED_CHECKS_12) <= set(model_checks)
     assert set(_EXPECTED_CHECKS_20) <= set(model_checks)
     assert _EXPECTED_UNIQUES_20 <= model_uniques
+    assert set(_EXPECTED_CHECKS_21) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_21 <= model_uniques
+    assert set(_EXPECTED_CHECKS_22) <= set(model_checks)
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -499,6 +561,34 @@ def test_model_migration_check_and_unique_parity() -> None:
     for name in _EXPECTED_UNIQUES_20:
         assert name in migration_20
     assert "amocrm_chat_bindings" in migration_20
+
+    for name, sql in _EXPECTED_CHECKS_21.items():
+        assert name in migration_21
+        assert model_checks[name] == sql
+        if name == "ck_amocrm_message_projections_integration_msgid_format":
+            assert sql in migration_21
+            continue
+        # Migration may split long CHECK literals across adjacent strings.
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_21, f"{name} missing {token}"
+        if "'" not in sql:
+            assert sql in migration_21
+
+    for name in _EXPECTED_UNIQUES_21:
+        assert name in migration_21
+    assert "amocrm_message_projections" in migration_21
+    for forbidden_col in ("body_text", "message_text", "payload_text", "text_body"):
+        assert forbidden_col not in migration_21
+
+    for name, sql in _EXPECTED_CHECKS_22.items():
+        assert name in migration_22
+        assert model_checks[name] == sql
+        for token in (
+            "integration_conversation_id",
+            "char_length(integration_conversation_id)",
+        ):
+            assert token in migration_22
+    assert "integration_conversation_id" in migration_22
 
     for complex_check in (
         "ck_conversations_handoff_consistency",

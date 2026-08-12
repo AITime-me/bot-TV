@@ -52,7 +52,18 @@ class AmocrmChatBinding(Base):
             "char_length(amocrm_chat_id) >= 1",
             name="ck_amocrm_chat_bindings_chat_id_nonempty",
         ),
+        CheckConstraint(
+            "integration_conversation_id IS NULL OR "
+            "char_length(integration_conversation_id) >= 1",
+            name="ck_amocrm_chat_bindings_integ_cid_nonempty",
+        ),
         Index("ix_amocrm_chat_bindings_status", "status"),
+        Index(
+            "ix_amocrm_chat_bindings_integration_conversation_id",
+            "integration_conversation_id",
+            unique=True,
+            postgresql_where=text("integration_conversation_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -70,6 +81,10 @@ class AmocrmChatBinding(Base):
         nullable=False,
     )
     amocrm_chat_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    integration_conversation_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

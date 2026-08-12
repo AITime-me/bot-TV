@@ -28,6 +28,8 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260808_18_master_commands.py",
     "!alembic/versions/20260809_19_identity_resolution.py",
     "!alembic/versions/20260812_20_amocrm_mgr_ingress.py",
+    "!alembic/versions/20260812_21_amocrm_chat_proj.py",
+    "!alembic/versions/20260812_22_amo_chat_integ_cid.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -68,6 +70,8 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/closed_test_config.py",
     "!app/core/amocrm_chat_config.py",
     "!app/core/amocrm_chat_signature.py",
+    "!app/core/amocrm_chat_egress_config.py",
+    "!app/core/amocrm_chat_egress_http.py",
     "!app/core/amocrm_manager_ids.py",
     "!app/core/master_channel_binding.py",
     "!app/core/identity_resolution.py",
@@ -92,6 +96,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/__init__.py",
     "!app/models/amocrm_mirror.py",
     "!app/models/amocrm_chat_binding.py",
+    "!app/models/amocrm_message_projection.py",
     "!app/models/conversation.py",
     "!app/models/conversation_ops_event.py",
     "!app/models/ephemeral_pii.py",
@@ -109,6 +114,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/__init__.py",
     "!app/repositories/amocrm_mirror.py",
     "!app/repositories/amocrm_chat_bindings.py",
+    "!app/repositories/amocrm_message_projections.py",
     "!app/repositories/conversations.py",
     "!app/repositories/ephemeral_pii.py",
     "!app/repositories/attachment_spool.py",
@@ -134,6 +140,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/amocrm_adapter.py",
     "!app/services/amocrm_mirror.py",
     "!app/services/amocrm_manager_ingress.py",
+    "!app/services/amocrm_chat_projection.py",
     "!app/services/dialog_context.py",
     "!app/services/ephemeral_pii_store.py",
     "!app/services/attachment_spool_store.py",
@@ -223,6 +230,17 @@ AMO01A_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/repositories/amocrm_chat_bindings.py",
     "app/schemas/amocrm_manager_ingress.py",
     "app/services/amocrm_manager_ingress.py",
+)
+
+# AMO-01B1 Chat projection paths.
+AMO01B1_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260812_21_amocrm_chat_proj.py",
+    "alembic/versions/20260812_22_amo_chat_integ_cid.py",
+    "app/core/amocrm_chat_egress_config.py",
+    "app/core/amocrm_chat_egress_http.py",
+    "app/models/amocrm_message_projection.py",
+    "app/repositories/amocrm_message_projections.py",
+    "app/services/amocrm_chat_projection.py",
 )
 
 

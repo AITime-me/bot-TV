@@ -24,10 +24,12 @@ from app.models.worker_heartbeat import (
 )
 from app.repositories import worker_heartbeats as heartbeat_repo
 from app.repositories.amocrm_mirror import StaleAmoCrmMirrorLeaseError
+from app.repositories.amocrm_message_projections import StaleAmocrmProjectionLeaseError
 from app.repositories.ingress import StaleIngressLeaseError
 from app.repositories.outbound import StaleOutboundLeaseError
 from app.repositories.reply_plans import StaleReplyPlanLeaseError
 from app.services.amocrm_mirror import AmoCrmMirrorWorker
+from app.services.amocrm_chat_projection import AmocrmChatProjectionWorker
 from app.services.booking_flow import BookingFlowService
 from app.services.handoff_expiry import HandoffExpiryWorker
 from app.services.ingress import IngressWorker
@@ -293,6 +295,10 @@ def build_default_loop_specs(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "amocrm"),
     )
+    chat_projection = AmocrmChatProjectionWorker(
+        session_factory,
+        worker_id=_lease_worker_id(worker_id, "amocht"),
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -335,10 +341,21 @@ def build_default_loop_specs(
         for _ in range(settings.worker_batch_size):
             claim = await mirror.claim_one()
             if claim is None:
-                return
+                break
             try:
                 await mirror.process_claimed(claim)
             except StaleAmoCrmMirrorLeaseError:
+                continue
+        for _ in range(settings.worker_batch_size):
+            claim = await chat_projection.claim_one()
+            if claim is None:
+                return
+            try:
+                await chat_projection.process_claimed(claim)
+            except StaleAmocrmProjectionLeaseError:
+                continue
+            except RuntimeError:
+                # Permanent/transient failures already persisted on the row.
                 continue
 
     return (

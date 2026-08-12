@@ -1,4 +1,4 @@
-"""Schemas for amoCRM manager durable ingress (AMO-01A)."""
+"""Schemas for amoCRM manager durable ingress (AMO-01A / AMO-01B1)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,32 @@ def _safe_amo_component_id(value: str) -> str:
     if ":" in value:
         raise ValueError("external id must not contain ':'")
     return value
+
+
+def _lift_conversation_client_id(data: Any) -> Any:
+    """Extract message.conversation.client_id without weakening extra=forbid."""
+
+    if not isinstance(data, dict):
+        return data
+    raw = dict(data)
+    extracted = raw.get("conversation_client_id")
+    message = raw.pop("message", None)
+    if isinstance(message, dict):
+        conversation = message.get("conversation")
+        if isinstance(conversation, dict):
+            client_id = conversation.get("client_id")
+            if type(client_id) is str and client_id.strip():
+                extracted = client_id.strip()
+    conversation = raw.pop("conversation", None)
+    if isinstance(conversation, dict):
+        client_id = conversation.get("client_id")
+        if type(client_id) is str and client_id.strip():
+            extracted = extracted or client_id.strip()
+    if type(extracted) is str and extracted.strip():
+        raw["conversation_client_id"] = extracted.strip()
+    elif "conversation_client_id" in raw and raw["conversation_client_id"] is None:
+        raw.pop("conversation_client_id", None)
+    return raw
 
 
 class AmoCrmManagerIngressEvent(BaseModel):
@@ -50,11 +76,24 @@ class AmoCrmManagerIngressEvent(BaseModel):
     )
     provider_sequence: int = Field(ge=0, le=9_223_372_036_854_775_807)
     text: str = Field(min_length=1, max_length=4000, repr=False)
+    conversation_client_id: str | None = Field(default=None, max_length=128)
     correlation_id: uuid.UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_conversation_client_id(cls, data: Any) -> Any:
+        return _lift_conversation_client_id(data)
 
     @field_validator("amocrm_chat_id", "amocrm_message_id")
     @classmethod
     def _safe_component_id(cls, value: str) -> str:
+        return _safe_amo_component_id(value)
+
+    @field_validator("conversation_client_id")
+    @classmethod
+    def _safe_conversation_client_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return _safe_amo_component_id(value)
 
     @field_validator("external_message_id")
@@ -89,7 +128,7 @@ class AmoCrmManagerIngressEvent(BaseModel):
     def safe_envelope(self) -> dict[str, Any]:
         """Storage-only envelope. Never use for logs/repr/diagnostics."""
 
-        return {
+        envelope: dict[str, Any] = {
             "schema": "amocrm.manager.ingress.v1",
             "event_type": self.event_type,
             "amocrm_chat_id": self.amocrm_chat_id,
@@ -98,6 +137,9 @@ class AmoCrmManagerIngressEvent(BaseModel):
             "provider_sequence": self.provider_sequence,
             "text": self.text,
         }
+        if self.conversation_client_id is not None:
+            envelope["conversation_client_id"] = self.conversation_client_id
+        return envelope
 
     def redacted_view(self) -> dict[str, Any]:
         return {
@@ -116,6 +158,14 @@ class AmoCrmManagerIngressEvent(BaseModel):
                 purpose="external_message_id",
             ),
             "provider_sequence": self.provider_sequence,
+            "conversation_client_id": (
+                safe_fingerprint(
+                    self.conversation_client_id,
+                    purpose="conversation_client_id",
+                )
+                if self.conversation_client_id is not None
+                else None
+            ),
             "correlation_id": (
                 safe_fingerprint(str(self.correlation_id), purpose="correlation_id")
                 if self.correlation_id is not None
@@ -132,7 +182,7 @@ class AmoCrmManagerIngressEvent(BaseModel):
 
 
 class AmoCrmChatWebhookPayload(BaseModel):
-    """HTTP body accepted by the amoCRM Chat manager webhook (01A)."""
+    """HTTP body accepted by the amoCRM Chat manager webhook (01A/01B1)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -140,10 +190,23 @@ class AmoCrmChatWebhookPayload(BaseModel):
     message_id: str = Field(min_length=1, max_length=128)
     provider_sequence: int = Field(ge=0, le=9_223_372_036_854_775_807)
     text: str = Field(min_length=1, max_length=4000, repr=False)
+    conversation_client_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_conversation_client_id(cls, data: Any) -> Any:
+        return _lift_conversation_client_id(data)
 
     @field_validator("amocrm_chat_id", "message_id")
     @classmethod
     def _safe_external_id(cls, value: str) -> str:
+        return _safe_amo_component_id(value)
+
+    @field_validator("conversation_client_id")
+    @classmethod
+    def _safe_conversation_client_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return _safe_amo_component_id(value)
 
     @field_validator("text")
@@ -164,4 +227,5 @@ class AmoCrmChatWebhookPayload(BaseModel):
             external_message_id=namespaced,
             provider_sequence=self.provider_sequence,
             text=self.text,
+            conversation_client_id=self.conversation_client_id,
         )
