@@ -51,6 +51,7 @@ _FOUNDATION_TABLES = (
     "ephemeral_pii_values",
     "attachment_spool_objects",
     "amocrm_chat_bindings",
+    "amocrm_message_projections",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -249,6 +250,47 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"ACTIVE", "REVOKED"}),
     ),
     "ck_amocrm_chat_bindings_chat_id_nonempty": ("amocrm_chat_id", frozenset()),
+    "ck_amocrm_message_projections_source_kind": (
+        "source_kind",
+        frozenset({"CLIENT_INBOUND", "BOT_OUTBOUND"}),
+    ),
+    "ck_amocrm_message_projections_status": (
+        "status",
+        frozenset(
+            {
+                "PENDING",
+                "PROCESSING",
+                "PROJECTED",
+                "SKIPPED",
+                "FAILED",
+                "DEAD",
+            }
+        ),
+    ),
+    "ck_amocrm_message_projections_attempt_count_nonnegative": (
+        "attempt_count",
+        frozenset(),
+    ),
+    "ck_amocrm_message_projections_max_attempts_positive": (
+        "max_attempts",
+        frozenset(),
+    ),
+    "ck_amocrm_message_projections_lease_version_nonnegative": (
+        "lease_version",
+        frozenset(),
+    ),
+    "ck_amocrm_message_projections_integration_msgid_format": (
+        "integration_msgid",
+        frozenset({"^[cb][0-9a-f]{32}$"}),
+    ),
+    "ck_amocrm_message_projections_projected_has_amo_id": (
+        "status",
+        frozenset({"PROJECTED"}),
+    ),
+    "ck_amocrm_chat_bindings_integ_cid_nonempty": (
+        "integration_conversation_id",
+        frozenset(),
+    ),
     "ck_reply_plans_plan_type": (
         "plan_type",
         frozenset({"CLIENT_REPLY", "SERVICE_SIGNAL"}),
@@ -398,6 +440,9 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
     "uq_attachment_spool_objects_object_id": ("object_id",),
     "uq_amocrm_chat_bindings_conversation_id": ("conversation_id",),
     "uq_amocrm_chat_bindings_amocrm_chat_id": ("amocrm_chat_id",),
+    "uq_amocrm_message_projections_source": ("source_kind", "source_id"),
+    "uq_amocrm_message_projections_integration_msgid": ("integration_msgid",),
+    "uq_amocrm_message_projections_amocrm_message_id": ("amocrm_message_id",),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -437,6 +482,15 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_attachment_spool_objects_object_expiry_purge": ("expires_at",),
     "uq_attachment_spool_objects_lease_token_digest": ("lease_token_digest",),
     "ix_amocrm_chat_bindings_status": ("status",),
+    "ix_amocrm_chat_bindings_integration_conversation_id": (
+        "integration_conversation_id",
+    ),
+    "ix_amocrm_message_projections_status_next_attempt_at": (
+        "status",
+        "next_attempt_at",
+    ),
+    "ix_amocrm_message_projections_lease_until": ("lease_until",),
+    "ix_amocrm_message_projections_conversation_id": ("conversation_id",),
 }
 
 

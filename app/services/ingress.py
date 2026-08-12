@@ -10,6 +10,7 @@ from app.db.session import session_scope
 from app.models.conversation import Conversation
 from app.models.ingress import IngressEvent, IngressEventType
 from app.repositories import amocrm_chat_bindings as binding_repo
+from app.repositories import amocrm_message_projections as projection_repo
 from app.repositories import ingress as ingress_repo
 from app.repositories.amocrm_chat_bindings import AmocrmChatBindingAmbiguousError
 from app.repositories.ingress import (
@@ -228,6 +229,48 @@ class IngressWorker:
                 if claim.external_conversation_id != amocrm_chat_id:
                     raise ValueError("INGRESS_ENVELOPE_INVALID")
 
+                # Echo suppress: any projection already carrying this amo msgid
+                # (including PROCESSING after HTTP success, before PROJECTED).
+                projected = await projection_repo.get_projected_by_amocrm_message_id(
+                    session,
+                    amocrm_message_id=amocrm_message_id,
+                )
+                if projected is not None:
+                    conversation_client_id = envelope.get("conversation_client_id")
+                    if (
+                        isinstance(conversation_client_id, str)
+                        and conversation_client_id
+                    ):
+                        try:
+                            binding = await binding_repo.get_active_by_amocrm_chat_id(
+                                session,
+                                amocrm_chat_id=amocrm_chat_id,
+                            )
+                        except AmocrmChatBindingAmbiguousError:
+                            binding = None
+                        if binding is not None:
+                            try:
+                                await binding_repo.capture_integration_conversation_id(
+                                    session,
+                                    binding_id=binding.id,
+                                    integration_conversation_id=conversation_client_id,
+                                )
+                            except (AmocrmChatBindingAmbiguousError, ValueError):
+                                pass
+                    event = await ingress_repo.complete_with_lease(
+                        session,
+                        event_id=claim.event_id,
+                        lease_token=claim.lease_token,
+                        lease_version=claim.lease_version,
+                    )
+                    return IngressProcessResult(
+                        event_id=event.id,
+                        status=event.status,
+                        duplicate_business=True,
+                        inbox_id=None,
+                        outbox_id=None,
+                    )
+
                 try:
                     binding = await binding_repo.get_active_by_amocrm_chat_id(
                         session,
@@ -237,6 +280,17 @@ class IngressWorker:
                     raise ValueError("BINDING_AMBIGUOUS") from None
                 if binding is None:
                     raise ValueError("BINDING_UNKNOWN")
+
+                conversation_client_id = envelope.get("conversation_client_id")
+                if isinstance(conversation_client_id, str) and conversation_client_id:
+                    try:
+                        await binding_repo.capture_integration_conversation_id(
+                            session,
+                            binding_id=binding.id,
+                            integration_conversation_id=conversation_client_id,
+                        )
+                    except AmocrmChatBindingAmbiguousError:
+                        raise ValueError("BINDING_INTEGRATION_CONVERSATION_CONFLICT") from None
 
                 conversation = await session.get(Conversation, binding.conversation_id)
                 if conversation is None:

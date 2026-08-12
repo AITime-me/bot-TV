@@ -20,6 +20,12 @@ from app.models.amocrm_mirror import (
     safe_mirror_payload,
 )
 from app.models.amocrm_chat_binding import AmocrmChatBinding, AmocrmChatBindingStatus
+from app.models.amocrm_message_projection import (
+    AmocrmMessageProjection,
+    AmocrmProjectionSkipReason,
+    AmocrmProjectionSourceKind,
+    AmocrmProjectionStatus,
+)
 from app.models.conversation import (
     Channel,
     Conversation,
@@ -107,6 +113,10 @@ __all__ = [
     "AmoCrmMirrorSubjectKind",
     "AmocrmChatBinding",
     "AmocrmChatBindingStatus",
+    "AmocrmMessageProjection",
+    "AmocrmProjectionSkipReason",
+    "AmocrmProjectionSourceKind",
+    "AmocrmProjectionStatus",
     "Channel",
     "Conversation",
     "ConversationOpsEvent",

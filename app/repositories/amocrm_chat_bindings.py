@@ -51,6 +51,7 @@ async def insert_active_if_absent(
     *,
     conversation_id: uuid.UUID,
     amocrm_chat_id: str,
+    integration_conversation_id: str | None = None,
 ) -> tuple[AmocrmChatBinding, bool]:
     """Idempotently insert an ACTIVE binding. Does not commit."""
 
@@ -61,6 +62,19 @@ async def insert_active_if_absent(
     if existing is not None:
         if existing.conversation_id != conversation_id:
             raise AmocrmChatBindingAmbiguousError("BINDING_AMBIGUOUS")
+        if integration_conversation_id:
+            await capture_integration_conversation_id(
+                session,
+                binding_id=existing.id,
+                integration_conversation_id=integration_conversation_id,
+            )
+            refreshed = await get_active_by_amocrm_chat_id(
+                session,
+                amocrm_chat_id=amocrm_chat_id,
+            )
+            if refreshed is None:
+                raise RuntimeError("BINDING_LOOKUP_FAILED")
+            return refreshed, False
         return existing, False
 
     new_id = uuid.uuid4()
@@ -70,6 +84,7 @@ async def insert_active_if_absent(
             id=new_id,
             conversation_id=conversation_id,
             amocrm_chat_id=amocrm_chat_id,
+            integration_conversation_id=integration_conversation_id,
             status=AmocrmChatBindingStatus.ACTIVE.value,
         )
         .on_conflict_do_nothing(
@@ -87,4 +102,47 @@ async def insert_active_if_absent(
         raise RuntimeError("BINDING_LOOKUP_FAILED")
     if row.conversation_id != conversation_id:
         raise AmocrmChatBindingAmbiguousError("BINDING_AMBIGUOUS")
+    if integration_conversation_id and not row.integration_conversation_id:
+        await capture_integration_conversation_id(
+            session,
+            binding_id=row.id,
+            integration_conversation_id=integration_conversation_id,
+        )
+        row = await get_active_by_amocrm_chat_id(
+            session,
+            amocrm_chat_id=amocrm_chat_id,
+        )
+        if row is None:
+            raise RuntimeError("BINDING_LOOKUP_FAILED")
     return row, inserted is not None
+
+
+async def capture_integration_conversation_id(
+    session: AsyncSession,
+    *,
+    binding_id: uuid.UUID,
+    integration_conversation_id: str,
+) -> AmocrmChatBinding:
+    """Set/refresh integration_conversation_id from Chat webhook when present."""
+
+    if type(integration_conversation_id) is not str or not integration_conversation_id.strip():
+        raise ValueError("INTEGRATION_CONVERSATION_ID_INVALID")
+    value = integration_conversation_id.strip()
+    if len(value) > 128:
+        raise ValueError("INTEGRATION_CONVERSATION_ID_INVALID")
+
+    row = await session.get(AmocrmChatBinding, binding_id)
+    if row is None:
+        raise RuntimeError("BINDING_LOOKUP_FAILED")
+    if row.integration_conversation_id == value:
+        return row
+    if (
+        row.integration_conversation_id is not None
+        and row.integration_conversation_id != value
+    ):
+        # Do not silently remap a known integration conversation.
+        raise AmocrmChatBindingAmbiguousError("BINDING_INTEGRATION_CONVERSATION_CONFLICT")
+
+    row.integration_conversation_id = value
+    await session.flush()
+    return row

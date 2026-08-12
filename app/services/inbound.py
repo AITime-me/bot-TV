@@ -25,6 +25,7 @@ from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.schemas.inbound import SyntheticInboundEvent
 from app.services.amocrm_mirror import enqueue_client_message_received
+from app.services.amocrm_chat_projection import enqueue_client_inbound_projection
 from app.services.booking_synthetic import client_reply_plan_payload
 
 
@@ -214,7 +215,7 @@ class InboundService:
         )
 
         if created_inbox:
-            # Last table in the lock order: enqueued only after every other row
+            # Last tables in the lock order: enqueued only after every other row
             # of this dialog subtree has been written, and only for a genuinely
             # new client message.
             await enqueue_client_message_received(
@@ -222,6 +223,12 @@ class InboundService:
                 conversation_id=conversation.id,
                 inbox_id=inbox.id,
                 context_version=conversation.context_version,
+                correlation_id=uuid.uuid4(),
+            )
+            await enqueue_client_inbound_projection(
+                self._session,
+                conversation_id=conversation.id,
+                inbox_id=inbox.id,
                 correlation_id=uuid.uuid4(),
             )
 
