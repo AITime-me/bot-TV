@@ -86,6 +86,7 @@ Thumbs.db
 !app/core/s2s_http_stdlib.py
 !app/core/booking_eligibility_factory.py
 !app/core/mode_contract.py
+!app/core/closed_test_config.py
 !app/core/master_channel_binding.py
 !app/core/identity_resolution.py
 !app/core/identity_provider_port.py
@@ -100,6 +101,7 @@ Thumbs.db
 !app/db/session.py
 !app/db/worker_lock.py
 !app/http_healthcheck.py
+!app/closed_test_router.py
 !app/integrations/
 !app/integrations/__init__.py
 !app/main.py
@@ -140,6 +142,7 @@ Thumbs.db
 !app/schemas/ingress.py
 !app/schemas/manager_message.py
 !app/schemas/booking_input.py
+!app/schemas/closed_test.py
 !app/services/
 !app/services/__init__.py
 !app/services/amocrm_adapter.py
@@ -151,6 +154,7 @@ Thumbs.db
 !app/services/booking_eligibility_flow.py
 !app/services/booking_flow.py
 !app/services/booking_synthetic.py
+!app/services/closed_test.py
 !app/services/handoff_expiry.py
 !app/services/inbound.py
 !app/services/ingress.py

@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
 
 from app.channels.vk_master_config import VkMasterAdapterConfig, VkMasterConfigError
 from app.channels.vk_master_http import NullVkMasterSender, VkMasterHttpSender
+from app.closed_test_router import (
+    build_closed_test_router,
+    install_closed_test_validation_handler,
+)
 from app.config import Settings
 from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
@@ -21,6 +25,7 @@ from app.core.booking_eligibility_factory import (
     rebind_eligibility_client_to_runtime_settings,
 )
 from app.core.booking_eligibility_http import BookingEligibilityHttpClient
+from app.core.closed_test_config import ClosedTestConfig, ClosedTestConfigError
 from app.core.ephemeral_pii_types import EphemeralPiiError
 from app.core.outbound_policy import (
     OutboundAction,
@@ -201,7 +206,39 @@ def create_app(
         engine=engine,
     )
 
+    # BOT-CLOSED-TEST-01A: synthetic closed-test HTTP surface (default-off).
+    _register_closed_test_routes(
+        application,
+        settings=loaded_settings,
+        engine=engine,
+    )
+
     return application
+
+
+def _register_closed_test_routes(
+    application: FastAPI,
+    *,
+    settings: Settings,
+    engine: AsyncEngine | None,
+) -> None:
+    """Register `/internal/closed-test` only when fully configured.
+
+    Enabled + incomplete/invalid config fails closed (raises). Disabled → no
+    routes. Never registers a half-active surface.
+    """
+
+    config = ClosedTestConfig.from_env()
+    if not config.enabled:
+        return
+    if engine is None or settings.database_url is None:
+        raise ClosedTestConfigError("CLOSED_TEST_DATABASE_REQUIRED") from None
+
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    application.include_router(
+        build_closed_test_router(config=config, session_factory=session_factory)
+    )
+    install_closed_test_validation_handler(application)
 
 
 def _register_vk_master_route(
