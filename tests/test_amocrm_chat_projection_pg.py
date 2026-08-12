@@ -159,7 +159,8 @@ async def test_success_and_idempotent_enqueue(
                     for c in rows[0].__table__.columns
                     if c.name
                     not in {"id", "conversation_id", "source_id", "correlation_id"}
-                }
+                },
+                default=str,
             )
 
     fake = _ScriptedClient()
