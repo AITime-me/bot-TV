@@ -423,6 +423,13 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         assert is_included_in_docker_build_context(rel, lines) is True
         assert (_REPO_ROOT / rel).is_file()
 
+    from tests.docker_runtime_allowlist import AMO01A_DOCKER_RUNTIME_PATHS
+
+    for rel in AMO01A_DOCKER_RUNTIME_PATHS:
+        assert f"!{rel}" in allow_rules
+        assert is_included_in_docker_build_context(rel, lines) is True
+        assert (_REPO_ROOT / rel).is_file()
+
     # Behavioral: real static import closure of the factory / master-command
     # runtime must be in the Docker build context (not only CURSOR28 path list).
     factory_runtime_modules = collect_app_import_graph_modules(

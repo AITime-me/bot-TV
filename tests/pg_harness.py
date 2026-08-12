@@ -126,6 +126,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_amocrm_chat_bindings = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.amocrm_chat_bindings') "
+                    "IS NOT NULL"
+                )
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
@@ -147,6 +153,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "external_identity_links")
             if has_canonical_identities:
                 tables.insert(0, "canonical_identities")
+            if has_amocrm_chat_bindings:
+                tables.insert(0, "amocrm_chat_bindings")
             if has_worker_heartbeats:
                 tables.insert(0, "worker_heartbeats")
             if has_ingress:

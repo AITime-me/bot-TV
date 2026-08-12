@@ -30,6 +30,14 @@ class IngressEventType(str, enum.Enum):
     """Normalized event types accepted at the durable ingress boundary."""
 
     SYNTHETIC_MESSAGE = "SYNTHETIC_MESSAGE"
+    AMOCRM_MANAGER_MESSAGE = "AMOCRM_MANAGER_MESSAGE"
+
+
+class IngressChannel(str, enum.Enum):
+    """Channels allowed on ingress_events (broader than conversation Channel)."""
+
+    SYNTHETIC = "synthetic"
+    AMOCRM = "amocrm"
 
 
 class IngressStatus(str, enum.Enum):
@@ -91,12 +99,17 @@ class IngressEvent(Base):
             name="uq_ingress_channel_external_event_id",
         ),
         CheckConstraint(
-            "channel IN ('synthetic')",
+            "channel IN ('synthetic', 'amocrm')",
             name="ck_ingress_channel",
         ),
         CheckConstraint(
-            "event_type IN ('SYNTHETIC_MESSAGE')",
+            "event_type IN ('SYNTHETIC_MESSAGE', 'AMOCRM_MANAGER_MESSAGE')",
             name="ck_ingress_event_type",
+        ),
+        CheckConstraint(
+            "(channel = 'synthetic' AND event_type = 'SYNTHETIC_MESSAGE') OR "
+            "(channel = 'amocrm' AND event_type = 'AMOCRM_MANAGER_MESSAGE')",
+            name="ck_ingress_channel_event_pairing",
         ),
         CheckConstraint(
             "status IN ('RECEIVED', 'PROCESSING', 'PROCESSED', 'FAILED', 'DEAD')",
@@ -126,7 +139,7 @@ class IngressEvent(Base):
         default=uuid.uuid4,
     )
     channel: Mapped[str] = mapped_column(String(32), nullable=False)
-    external_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    external_event_id: Mapped[str] = mapped_column(String(256), nullable=False)
     external_conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(

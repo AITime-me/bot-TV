@@ -19,6 +19,7 @@ from app.models.amocrm_mirror import (
     reply_plan_state_mirror_key,
     safe_mirror_payload,
 )
+from app.models.amocrm_chat_binding import AmocrmChatBinding, AmocrmChatBindingStatus
 from app.models.conversation import (
     Channel,
     Conversation,
@@ -45,6 +46,7 @@ from app.models.inbox import (
 )
 from app.models.ingress import (
     INGRESS_TRANSITIONS,
+    IngressChannel,
     IngressEvent,
     IngressEventType,
     IngressStatus,
@@ -103,6 +105,8 @@ __all__ = [
     "AmoCrmMirrorSkipReason",
     "AmoCrmMirrorStatus",
     "AmoCrmMirrorSubjectKind",
+    "AmocrmChatBinding",
+    "AmocrmChatBindingStatus",
     "Channel",
     "Conversation",
     "ConversationOpsEvent",
@@ -120,6 +124,7 @@ __all__ = [
     "DeliveryStatus",
     "DestinationType",
     "InboxMessage",
+    "IngressChannel",
     "IngressEvent",
     "IngressEventType",
     "IngressStatus",

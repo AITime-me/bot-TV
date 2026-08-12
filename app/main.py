@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
 
+from app.amocrm_chat_webhook import build_amocrm_chat_router
 from app.channels.vk_master_config import VkMasterAdapterConfig, VkMasterConfigError
 from app.channels.vk_master_http import NullVkMasterSender, VkMasterHttpSender
 from app.closed_test_router import (
@@ -16,6 +17,7 @@ from app.closed_test_router import (
     install_closed_test_validation_handler,
 )
 from app.config import Settings
+from app.core.amocrm_chat_config import AmoCrmChatConfig, AmoCrmChatConfigError
 from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
     build_booking_s2s_clients,
@@ -213,6 +215,13 @@ def create_app(
         engine=engine,
     )
 
+    # AMO-01A: amoCRM Chat manager webhook → durable ingress (default-off).
+    _register_amocrm_chat_routes(
+        application,
+        settings=loaded_settings,
+        engine=engine,
+    )
+
     return application
 
 
@@ -239,6 +248,30 @@ def _register_closed_test_routes(
         build_closed_test_router(config=config, session_factory=session_factory)
     )
     install_closed_test_validation_handler(application)
+
+
+def _register_amocrm_chat_routes(
+    application: FastAPI,
+    *,
+    settings: Settings,
+    engine: AsyncEngine | None,
+) -> None:
+    """Register `/webhooks/amocrm/chat` only when fully configured.
+
+    Enabled + incomplete/invalid config fails closed (raises). Disabled → no
+    routes. Never registers a half-active surface. No outbound amoCRM HTTP.
+    """
+
+    config = AmoCrmChatConfig.from_env()
+    if not config.enabled:
+        return
+    if engine is None or settings.database_url is None:
+        raise AmoCrmChatConfigError("AMOCRM_CHAT_DATABASE_REQUIRED") from None
+
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    application.include_router(
+        build_amocrm_chat_router(config=config, session_factory=session_factory)
+    )
 
 
 def _register_vk_master_route(

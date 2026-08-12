@@ -50,6 +50,7 @@ _FOUNDATION_TABLES = (
     "conversation_ops_events",
     "ephemeral_pii_values",
     "attachment_spool_objects",
+    "amocrm_chat_bindings",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -220,8 +221,22 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "lease_token",
         frozenset({"PROCESSING"}),
     ),
-    "ck_ingress_channel": ("channel", frozenset({"synthetic"})),
-    "ck_ingress_event_type": ("event_type", frozenset({"SYNTHETIC_MESSAGE"})),
+    "ck_ingress_channel": ("channel", frozenset({"synthetic", "amocrm"})),
+    "ck_ingress_event_type": (
+        "event_type",
+        frozenset({"SYNTHETIC_MESSAGE", "AMOCRM_MANAGER_MESSAGE"}),
+    ),
+    "ck_ingress_channel_event_pairing": (
+        "channel",
+        frozenset(
+            {
+                "synthetic",
+                "SYNTHETIC_MESSAGE",
+                "amocrm",
+                "AMOCRM_MANAGER_MESSAGE",
+            }
+        ),
+    ),
     "ck_ingress_status": (
         "status",
         frozenset({"RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "DEAD"}),
@@ -229,6 +244,11 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     "ck_ingress_attempt_count_nonnegative": ("attempt_count", frozenset()),
     "ck_ingress_max_attempts_positive": ("max_attempts", frozenset()),
     "ck_ingress_lease_version_nonnegative": ("lease_version", frozenset()),
+    "ck_amocrm_chat_bindings_status": (
+        "status",
+        frozenset({"ACTIVE", "REVOKED"}),
+    ),
+    "ck_amocrm_chat_bindings_chat_id_nonempty": ("amocrm_chat_id", frozenset()),
     "ck_reply_plans_plan_type": (
         "plan_type",
         frozenset({"CLIENT_REPLY", "SERVICE_SIGNAL"}),
@@ -376,6 +396,8 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
     "uq_ephemeral_pii_values_reference_digest": ("reference_digest",),
     "uq_attachment_spool_objects_reference_digest": ("reference_digest",),
     "uq_attachment_spool_objects_object_id": ("object_id",),
+    "uq_amocrm_chat_bindings_conversation_id": ("conversation_id",),
+    "uq_amocrm_chat_bindings_amocrm_chat_id": ("amocrm_chat_id",),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -414,6 +436,7 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "ix_attachment_spool_objects_leased_expires_at": ("lease_expires_at",),
     "ix_attachment_spool_objects_object_expiry_purge": ("expires_at",),
     "uq_attachment_spool_objects_lease_token_digest": ("lease_token_digest",),
+    "ix_amocrm_chat_bindings_status": ("status",),
 }
 
 
