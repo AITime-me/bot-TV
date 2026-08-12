@@ -112,7 +112,7 @@ class ManagerMessage(Base):
         nullable=False,
     )
     channel: Mapped[str] = mapped_column(String(32), nullable=False)
-    external_message_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    external_message_id: Mapped[str] = mapped_column(String(256), nullable=False)
     provider_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     provider_occurred_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

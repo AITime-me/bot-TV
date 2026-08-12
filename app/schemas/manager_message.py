@@ -21,7 +21,7 @@ class SyntheticManagerMessageEvent(BaseModel):
 
     channel: Literal["synthetic"] = "synthetic"
     external_conversation_id: str = Field(min_length=1, max_length=128)
-    external_message_id: str = Field(min_length=1, max_length=128)
+    external_message_id: str = Field(min_length=1, max_length=256)
     provider_sequence: int | None = Field(
         default=None,
         ge=0,
@@ -30,11 +30,21 @@ class SyntheticManagerMessageEvent(BaseModel):
     provider_occurred_at: datetime | None = None
     text: str = Field(min_length=1, max_length=4000, repr=False)
 
-    @field_validator("external_conversation_id", "external_message_id")
+    @field_validator("external_conversation_id")
     @classmethod
-    def _safe_external_id(cls, value: str) -> str:
+    def _safe_conversation_id(cls, value: str) -> str:
         if not value.replace("-", "").replace("_", "").isalnum():
             raise ValueError("external id must be alphanumeric with -/_")
+        return value
+
+    @field_validator("external_message_id")
+    @classmethod
+    def _safe_external_message_id(cls, value: str) -> str:
+        # Allow ':' so AMO-01A can store namespaced amo:{chat}:{message} keys
+        # without migrating manager_messages.channel off synthetic.
+        stripped = value.replace("-", "").replace("_", "").replace(":", "")
+        if not stripped.isalnum():
+            raise ValueError("external id must be alphanumeric with -/_/:")
         return value
 
     @field_validator("text")
