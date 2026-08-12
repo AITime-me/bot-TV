@@ -124,11 +124,12 @@ async def test_success_and_idempotent_enqueue(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Seed binding while egress is OFF so the fixture inbound does not enqueue.
+    conversation = await _seed_bound(session_factory)
     monkeypatch.setenv("AMOCRM_CHAT_EGRESS_ENABLED", "true")
     monkeypatch.setenv("AMOCRM_CHAT_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("AMOCRM_CHAT_SCOPE_ID", _SCOPE)
 
-    conversation = await _seed_bound(session_factory)
     async with session_scope(session_factory) as session:
         accepted = await InboundService(session).accept(
             SyntheticInboundEvent(
@@ -370,10 +371,13 @@ async def test_ambiguous_send_reconcile_no_blind_resend(
             amocrm_message_id="amo-from-history",
         )
     )
-    claim2 = await worker.claim_one()
+    # Transient fail schedules next_attempt_at (+DEFAULT_RETRY_DELAY_SECONDS).
+    # Advance claim clock past that fence; do not sleep or weaken production delay.
+    later = datetime.now(timezone.utc) + timedelta(seconds=2)
+    claim2 = await worker.claim_one(now=later)
     assert claim2 is not None
     assert claim2.attempt_count >= 2
-    result = await worker.process_claimed(claim2)
+    result = await worker.process_claimed(claim2, now=later)
     assert result.projected is True
     assert fake.send_calls == 1
     assert fake.history_calls == 1
