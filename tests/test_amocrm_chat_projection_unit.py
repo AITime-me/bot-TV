@@ -338,6 +338,8 @@ def test_worker_reuses_amocrm_mirror_loop_without_fsm_change() -> None:
 
     source = inspect.getsource(runtime.build_default_loop_specs)
     assert "AmocrmChatProjectionWorker" in source
+    assert "CrmRestMirrorAdapter" in source
+    assert "AmoCrmMirrorRejected" in source
     assert "AMOCRM_MIRROR_LOOP" in source
     assert "handoff_pause_seconds" in source
     assert "load_chat_egress_config_fail_closed" in inspect.getsource(

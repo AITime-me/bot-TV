@@ -52,6 +52,9 @@ Thumbs.db
 !alembic/versions/20260812_20_amocrm_mgr_ingress.py
 !alembic/versions/20260812_21_amocrm_chat_proj.py
 !alembic/versions/20260812_22_amo_chat_integ_cid.py
+!alembic/versions/20260813_23_amocrm_crm_oauth.py
+!alembic/versions/20260813_24_amo_entity_links.py
+!alembic/versions/20260813_25_amo_deal_reserve.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -94,6 +97,13 @@ Thumbs.db
 !app/core/amocrm_chat_signature.py
 !app/core/amocrm_chat_egress_config.py
 !app/core/amocrm_chat_egress_http.py
+!app/core/amocrm_crm_oauth_types.py
+!app/core/amocrm_crm_oauth_keys.py
+!app/core/amocrm_crm_oauth_crypto.py
+!app/core/amocrm_crm_rest_config.py
+!app/core/amocrm_crm_rest_http.py
+!app/core/amocrm_crm_deal_create_config.py
+!app/core/amocrm_crm_leads_http.py
 !app/core/amocrm_manager_ids.py
 !app/core/master_channel_binding.py
 !app/core/identity_resolution.py
@@ -119,6 +129,8 @@ Thumbs.db
 !app/models/amocrm_mirror.py
 !app/models/amocrm_chat_binding.py
 !app/models/amocrm_message_projection.py
+!app/models/amocrm_crm_oauth_token.py
+!app/models/amocrm_entity_link.py
 !app/models/conversation.py
 !app/models/conversation_ops_event.py
 !app/models/ephemeral_pii.py
@@ -137,6 +149,8 @@ Thumbs.db
 !app/repositories/amocrm_mirror.py
 !app/repositories/amocrm_chat_bindings.py
 !app/repositories/amocrm_message_projections.py
+!app/repositories/amocrm_crm_oauth_tokens.py
+!app/repositories/amocrm_entity_links.py
 !app/repositories/conversations.py
 !app/repositories/ephemeral_pii.py
 !app/repositories/attachment_spool.py
@@ -163,6 +177,8 @@ Thumbs.db
 !app/services/amocrm_mirror.py
 !app/services/amocrm_manager_ingress.py
 !app/services/amocrm_chat_projection.py
+!app/services/amocrm_technical_deal.py
+!app/services/amocrm_crm_mirror_adapter.py
 !app/services/dialog_context.py
 !app/services/ephemeral_pii_store.py
 !app/services/attachment_spool_store.py

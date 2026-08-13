@@ -89,10 +89,11 @@ Statuses: `PENDING → PROCESSING → MIRRORED | SKIPPED | FAILED | DEAD`, plus
 `FAILED → PROCESSING` (retry) and `FAILED → DEAD` (exhausted). Terminals are
 `MIRRORED`, `SKIPPED`, `DEAD`.
 
-- `MIRRORED` means *accepted by the local in-process no-op sink*. It carries no
-  external effect whatsoever — the same restraint `DeliveryStatus.DELIVERED`
-  uses for the synthetic outbound sink. It must never be read as "present in
-  amoCRM".
+- `MIRRORED` means *required amoCRM entity state for this mirror job
+  converged successfully*. It is not "message content copied to CRM".
+  When CRM REST / deal-create is disabled or fail-closed invalid, the
+  adapter performs zero CRM HTTP and the job may still reach `MIRRORED`
+  because no CRM writes were required.
 - `SKIPPED` is a deliberate refusal to mirror a stale event, not an error.
 - `DEAD` is terminal on this stage.
 
@@ -135,8 +136,11 @@ second job. Repeated processing of one job is prevented by the
 A job is validated against live state *at claim time*, under the conversation
 lock, before the sink is called. The worker first re-locks the job row and
 proves `(status, lease_token, lease_version, lease_owner)` still match the
-claim — a superseded lease raises `StaleAmoCrmMirrorLeaseError` with no adapter
-call. Divergence of live domain state produces a terminal `SKIPPED` with a
+claim — a superseded lease *before* the adapter raises
+`StaleAmoCrmMirrorLeaseError` with no adapter call (and therefore no CRM HTTP).
+After that fence check the DB lock is released for CRM HTTP; the mirror lease
+may be reclaimed mid-flight. Stale completion/`fail` remains fenced. Divergence
+of live domain state produces a terminal `SKIPPED` with a
 fixed `skip_reason`:
 
 - `MANAGER_TAKEOVER` — ownership became `MANAGER` or `manager_takeover_at` is set.
@@ -201,23 +205,73 @@ One new revision, `20260728_09_amocrm_mirror`, on top of
 
 ### Out of scope
 
-Real amoCRM API client, OAuth and token refresh, HTTP/webhooks/public endpoints,
-external entity tables and external ids, lead/contact/note/task mapping, reverse
-`amoCRM → bot-TV` flow, automatic retention and anonymization, operator replay of
-`DEAD`, mirroring of message text or contacts, VK/MAX/Telegram/site adapters, AI,
-client writes, `online-zapis-tv` access, using the mirror as a message transport,
-and any change to the source of truth.
+CURSOR-09 originally deferred the real API client. AMO-01B2 adds CRM REST OAuth
+and TECHNICAL_DEAL convergence only. Still out of scope: notes/tasks, mirroring
+of message text, contact create/guess, reverse `amoCRM → bot-TV` flow, automatic
+retention and anonymization, operator replay of `DEAD`, VK/MAX/Telegram/site
+adapters, AI, client writes, `online-zapis-tv` access, using the mirror as a
+message transport, and any change to the source of truth.
 
 ### Deferred requirements before a production amoCRM connection
 
-1. Real adapter stage: HTTP client, OAuth, error taxonomy, rate limits, and the
-   domain-event → amoCRM entity mapping.
-2. `amocrm_entity_links` (or equivalent) implementing the internal/external
-   identity contract above, with a defined backfill.
+1. ~~Real adapter stage: HTTP client, OAuth, error taxonomy, rate limits, and the
+   domain-event → amoCRM entity mapping.~~ **AMO-01B2 (partial):** CRM REST
+   OAuth + TECHNICAL_DEAL convergence on the existing `amocrm_mirror_jobs`
+   worker. Notes/tasks and message-text mirroring remain out of scope.
+2. ~~`amocrm_entity_links` (or equivalent) implementing the internal/external
+   identity contract above.~~ **Shipped** for `TECHNICAL_DEAL` and deterministic
+   `CONTACT` reuse. Contact create/guess is forbidden.
 3. Retention and anonymization policy for `amocrm_mirror_jobs`, which is de facto
    a durable domain journal. Unresolved and mandatory before production.
 4. Safe operator replay/requeue for `DEAD` jobs, with a new lease and audit.
 5. Reverse flow design, if it is ever needed.
+6. Operator resolution of `RECONCILE_REQUIRED` entity links after an ambiguous
+   create (5xx / transport / uncertain POST). Blind resend is forbidden.
+
+## AMO-01B2 amendment: CRM REST entity convergence
+
+Accepted for AMO-01B2 on top of CURSOR-09.
+
+**MIRRORED** is defined as: "required amoCRM entity state for this mirror job converged successfully"
+— not "message content copied to CRM".
+
+The existing `amocrm_mirror_jobs` queue, lease, and fencing stay the only
+drain path. No second queue. The worker revalidates the claimed job/fence
+under the conversation lock, **then** releases that lock before CRM HTTP.
+Mirror lease may be reclaimed mid-flight while CRM HTTP is in progress; a
+stale worker cannot `complete`/`fail` the job (lease fence). Concurrent
+`ensure_technical_deal` still preserves exactly one open `TECHNICAL_DEAL`
+via reservation + unique open index (no second blind create).
+
+`CrmRestMirrorAdapter` calls `ensure_technical_deal`: exactly one
+`TECHNICAL_DEAL` per conversation; reuse an existing deterministic `CONTACT`
+link and attach it if needed; never create or guess a contact; never write
+notes, tasks, or message text.
+
+CRM REST and deal-create remain **disabled by default**. Invalid config or
+missing tokens produce zero CRM entity writes. Chat HMAC (`AMOCRM_CHAT_*`)
+is never used on this path.
+
+HTTP taxonomy:
+
+| Status | Existing deal GET | Deal create POST |
+| ------ | ----------------- | ---------------- |
+| 2xx | ENSURED; attach CONTACT if needed | ACTIVE + id |
+| 404 | revoke stale link; may recreate | explicit 4xx; release reservation; no RECONCILE |
+| 401 | refresh once under token-store fencing, retry that request once; still 401 → TRANSIENT, no revoke | same; then release reservation for a later retry |
+| 402 / 403 / 429 / 5xx / transport | TRANSIENT; do **not** revoke or create a replacement | `RECONCILE_REQUIRED`; never a second blind POST |
+
+Proactive OAuth refresh runs when the stored access token is expired or within
+60s of expiry. Concurrent refresh is fenced by the token-store lease. Before
+the remote refresh POST the worker renews/validates that lease; after HTTP 200
+with a valid pair it persists immediately under fencing (bounded local retries;
+guarded recovery only if the DB still holds the exact pre-refresh pair). The
+remote refresh POST is never retried after a successful 200. Unrecoverable
+post-200 local persist fails closed with
+`AMOCRM_CRM_OAUTH_ROTATE_PERSIST_FAILED` / `…_ROTATE_SUPERSEDED` — never a
+silent “healthy” auth state. Residual window: crash between remote 200 and the
+first durable local write can still require operator re-seed; that dual-write
+gap is not claimed eliminated.
 
 ## Consequences
 
@@ -225,6 +279,6 @@ Domain progress becomes durably queued and replay-safe without any external
 call, so the real adapter stage can be built and tested against a populated
 queue. Workers recover after a crash through leased rows, and stale workers can
 neither mirror superseded events nor resurrect terminal jobs. The cost is a
-growing journal table with an explicitly deferred retention policy, and a
-`MIRRORED` status that must be read as "handed to a local no-op sink" until the
-real adapter exists.
+growing journal table with an explicitly deferred retention policy.
+`MIRRORED` means required amoCRM entity state for that job converged
+successfully — not that message content was copied to CRM.

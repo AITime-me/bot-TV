@@ -30,8 +30,8 @@ DEFAULT_MIRROR_MAX_ATTEMPTS = 5
 class AmoCrmMirrorJobType(str, enum.Enum):
     """bot-TV domain events queued for mirroring — not amoCRM entities.
 
-    CURSOR-09 fixes no lead/contact/note/task semantics; translating a domain
-    event into amoCRM entities belongs to the future real-adapter stage.
+    Job types stay in bot-TV vocabulary. AMO-01B2 converges required CRM
+    entity state (one TECHNICAL_DEAL) in the adapter — not via new job types.
     """
 
     CLIENT_MESSAGE_RECEIVED_META = "CLIENT_MESSAGE_RECEIVED_META"
@@ -52,7 +52,8 @@ class AmoCrmMirrorSubjectKind(str, enum.Enum):
 class AmoCrmMirrorStatus(str, enum.Enum):
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
-    # MIRRORED means accepted by the local no-op sink — never present in amoCRM.
+    # MIRRORED: required amoCRM entity state for this mirror job converged successfully.
+    # Not "message content copied to CRM".
     MIRRORED = "MIRRORED"
     SKIPPED = "SKIPPED"
     FAILED = "FAILED"
@@ -213,9 +214,9 @@ class AmoCrmMirrorJob(Base):
     """Transactional outbox of bot-TV → amoCRM domain events (CURSOR-09).
 
     Enqueued inside the domain transaction that produced the event and drained
-    by a leased worker through an in-process no-op adapter. No amoCRM API, no
-    HTTP, no external identifiers, and no client text or contacts.
-    __repr__ intentionally omits payload contents.
+    by a leased worker. ``MIRRORED`` means required amoCRM entity state for
+    this job converged successfully, not that message text was copied to CRM.
+    Payload stays metadata-only. __repr__ intentionally omits payload contents.
     """
 
     __tablename__ = "amocrm_mirror_jobs"

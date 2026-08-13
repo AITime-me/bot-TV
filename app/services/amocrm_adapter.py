@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol
 
 
 class AmoCrmMirrorOutcome(str, Enum):
@@ -12,7 +13,7 @@ class AmoCrmMirrorOutcome(str, Enum):
 
 @dataclass(frozen=True, repr=False)
 class AmoCrmMirrorRequest:
-    """Technical descriptor of one mirror job handed to the local sink.
+    """Technical descriptor of one mirror job handed to the sink.
 
     Carries internal identifiers only: no client text, contacts, or amoCRM
     entity references. Payload is never included in repr/logs.
@@ -44,12 +45,18 @@ class AmoCrmMirrorAdapterResult:
     error_code: str | None = None
 
 
-class NoopAmoCrmMirrorAdapter:
-    """In-process no-op amoCRM sink.
+class AmoCrmMirrorAdapter(Protocol):
+    """Sink that converges required amoCRM entity state for one mirror job."""
 
-    Confirms orchestration only: no network client, no credential or authorization
-    flow, no amoCRM entity creation, and no client-facing send. A successful call
-    means the job was accepted locally — never that anything reached amoCRM.
+    async def mirror(self, request: AmoCrmMirrorRequest) -> AmoCrmMirrorAdapterResult:
+        ...
+
+
+class NoopAmoCrmMirrorAdapter:
+    """In-process no-op amoCRM sink (unit tests).
+
+    Production worker injects ``CrmRestMirrorAdapter``. A successful no-op
+    call is not "message content copied to CRM".
     """
 
     def __init__(
@@ -60,7 +67,7 @@ class NoopAmoCrmMirrorAdapter:
         self._forced_outcome = forced_outcome
         self.calls: list[AmoCrmMirrorRequest] = []
 
-    def mirror(self, request: AmoCrmMirrorRequest) -> AmoCrmMirrorAdapterResult:
+    async def mirror(self, request: AmoCrmMirrorRequest) -> AmoCrmMirrorAdapterResult:
         self.calls.append(request)
         if self._forced_outcome is AmoCrmMirrorOutcome.SUCCESS:
             return AmoCrmMirrorAdapterResult(outcome=AmoCrmMirrorOutcome.SUCCESS)

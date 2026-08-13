@@ -138,6 +138,18 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_amocrm_oauth = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.amocrm_crm_oauth_tokens') "
+                    "IS NOT NULL"
+                )
+            )
+            has_amocrm_entity_links = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.amocrm_entity_links') "
+                    "IS NOT NULL"
+                )
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
@@ -163,6 +175,10 @@ async def truncate_foundation_tables(
                 tables.insert(0, "amocrm_message_projections")
             if has_amocrm_chat_bindings:
                 tables.insert(0, "amocrm_chat_bindings")
+            if has_amocrm_entity_links:
+                tables.insert(0, "amocrm_entity_links")
+            if has_amocrm_oauth:
+                tables.insert(0, "amocrm_crm_oauth_tokens")
             if has_worker_heartbeats:
                 tables.insert(0, "worker_heartbeats")
             if has_ingress:

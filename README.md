@@ -92,10 +92,11 @@ takeover, допуск synthetic outbound) ставятся в очередь в
 `conversations → inbox_messages → reply_plans → outbox_messages →
 amocrm_mirror_jobs`. Worker захватывает job через lease с fencing token,
 перепроверяет живое состояние диалога под блокировкой и переводит устаревшее
-событие в терминальный `SKIPPED`. Adapter — локальный no-op sink: реального
-amoCRM API, OAuth, внешних идентификаторов, entity-семантики (lead/contact/
-note/task) и клиентского текста в этапе нет; payload собирается только по
-whitelist технических полей (см. `docs/adr/004-amocrm-mirror.md`).
+событие в терминальный `SKIPPED`. `MIRRORED` значит: требуемое состояние
+сущностей amoCRM для этого job успешно сошлось — не «текст сообщения скопирован
+в CRM». При выключенном/невалидном CRM REST адаптер не делает CRM HTTP.
+Очередь, lease и fencing остаются `amocrm_mirror_jobs` (см.
+`docs/adr/004-amocrm-mirror.md`).
 
 Attempt exhaustion (BOT-TV-10): `max_attempts` хранится в каждой durable-записи
 и является единственным лимитом для claim/fail/recovery. Перед обычным claim

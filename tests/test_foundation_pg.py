@@ -52,6 +52,8 @@ _FOUNDATION_TABLES = (
     "attachment_spool_objects",
     "amocrm_chat_bindings",
     "amocrm_message_projections",
+    "amocrm_crm_oauth_tokens",
+    "amocrm_entity_links",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -291,6 +293,36 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "integration_conversation_id",
         frozenset(),
     ),
+    "ck_amocrm_crm_oauth_tokens_scope_len": ("connection_scope", frozenset()),
+    "ck_amocrm_crm_oauth_tokens_crypto_version": ("crypto_version", frozenset()),
+    "ck_amocrm_crm_oauth_tokens_access_nonce_len": ("access_nonce", frozenset()),
+    "ck_amocrm_crm_oauth_tokens_refresh_nonce_len": ("refresh_nonce", frozenset()),
+    "ck_amocrm_crm_oauth_tokens_access_ct_len": ("access_ciphertext", frozenset()),
+    "ck_amocrm_crm_oauth_tokens_refresh_ct_len": ("refresh_ciphertext", frozenset()),
+    "ck_amocrm_crm_oauth_tokens_key_id": (
+        "key_id",
+        frozenset({"^[A-Z0-9_]{1,64}$"}),
+    ),
+    "ck_amocrm_crm_oauth_tokens_lease_version_nonnegative": (
+        "lease_version",
+        frozenset(),
+    ),
+    "ck_amocrm_entity_links_entity_kind": (
+        "entity_kind",
+        frozenset({"CONTACT", "TECHNICAL_DEAL"}),
+    ),
+    "ck_amocrm_entity_links_status": (
+        "status",
+        frozenset({"ACTIVE", "REVOKED", "RESERVED", "RECONCILE_REQUIRED"}),
+    ),
+    "ck_amocrm_entity_links_external_id_state": (
+        "external_id",
+        frozenset({"RESERVED", "RECONCILE_REQUIRED", "ACTIVE", "REVOKED"}),
+    ),
+    "ck_amocrm_entity_links_lease_version_nonnegative": (
+        "lease_version",
+        frozenset(),
+    ),
     "ck_reply_plans_plan_type": (
         "plan_type",
         frozenset({"CLIENT_REPLY", "SERVICE_SIGNAL"}),
@@ -443,6 +475,7 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
     "uq_amocrm_message_projections_source": ("source_kind", "source_id"),
     "uq_amocrm_message_projections_integration_msgid": ("integration_msgid",),
     "uq_amocrm_message_projections_amocrm_message_id": ("amocrm_message_id",),
+    "uq_amocrm_crm_oauth_tokens_connection_scope": ("connection_scope",),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -491,6 +524,15 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     ),
     "ix_amocrm_message_projections_lease_until": ("lease_until",),
     "ix_amocrm_message_projections_conversation_id": ("conversation_id",),
+    "ix_amocrm_crm_oauth_tokens_lease_until": ("lease_until",),
+    "ix_amocrm_entity_links_conversation_id": ("conversation_id",),
+    "ix_amocrm_entity_links_status": ("status",),
+    "ix_amocrm_entity_links_lease_until": ("lease_until",),
+    "uq_amocrm_entity_links_open_conversation_kind": (
+        "conversation_id",
+        "entity_kind",
+    ),
+    "uq_amocrm_entity_links_active_kind_external": ("entity_kind", "external_id"),
 }
 
 

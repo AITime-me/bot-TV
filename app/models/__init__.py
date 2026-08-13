@@ -20,6 +20,12 @@ from app.models.amocrm_mirror import (
     safe_mirror_payload,
 )
 from app.models.amocrm_chat_binding import AmocrmChatBinding, AmocrmChatBindingStatus
+from app.models.amocrm_crm_oauth_token import AmocrmCrmOauthToken
+from app.models.amocrm_entity_link import (
+    AmocrmEntityKind,
+    AmocrmEntityLink,
+    AmocrmEntityLinkStatus,
+)
 from app.models.amocrm_message_projection import (
     AmocrmMessageProjection,
     AmocrmProjectionSkipReason,
@@ -113,6 +119,10 @@ __all__ = [
     "AmoCrmMirrorSubjectKind",
     "AmocrmChatBinding",
     "AmocrmChatBindingStatus",
+    "AmocrmCrmOauthToken",
+    "AmocrmEntityKind",
+    "AmocrmEntityLink",
+    "AmocrmEntityLinkStatus",
     "AmocrmMessageProjection",
     "AmocrmProjectionSkipReason",
     "AmocrmProjectionSourceKind",

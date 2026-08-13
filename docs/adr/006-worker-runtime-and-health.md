@@ -8,7 +8,8 @@
 
 API и worker запускаются разными процессами. Worker содержит пять обязательных
 циклов: ingress, handoff expiry, ReplyPlan, outbound и локальный amoCRM mirror.
-Реальные channel/amoCRM adapters по-прежнему не подключены.
+Реальные channel adapters по-прежнему не подключены. AMO-01B2 подключает
+CRM REST entity convergence в существующий mirror-цикл (default-off).
 
 При каждом старте создаётся новый случайный `generation_id`. Все пять строк
 `worker_heartbeats` перерегистрируются одной транзакцией. Любое последующее
@@ -55,6 +56,12 @@ recovery/fencing правилам, а handoff expiry повторно выбир
 ## Не входит
 
 - production/staging deploy;
-- реальные VK/MAX/amoCRM/AI adapters;
+- реальные VK/MAX/AI adapters и Chat/B1b;
 - интеграция control-plane режимов `online-zapis-tv`;
 - автоматическое разрешение клиентского outbound.
+
+## Поправка AMO-01B2
+
+Цикл `amocrm_mirror` остаётся одним из пяти обязательных. В него подключён
+`CrmRestMirrorAdapter` (CRM REST entity convergence, default-off). Это не
+меняет набор циклов, heartbeat и не подключает Chat HMAC, VK/MAX или AI.
