@@ -138,7 +138,10 @@ def _arbiter_claim(
         lease_version=lease_version,
         lease_until=_FIXED_NOW + timedelta(seconds=30),
         correlation_id=uuid.uuid4(),
-        payload_json={"schema": "synthetic.outbound.v1"},
+        payload_json={
+            "schema": "synthetic.outbound.v1",
+            "text": "durable-reply-body",
+        },
     )
 
 
@@ -202,7 +205,10 @@ async def test_arbiter_admits_dispatched_and_rejects_other_plan_statuses(
     outbound.manager_epoch = 0
     outbound.event_seq_hwm = 0
     outbound.correlation_id = claim.correlation_id
-    outbound.payload_json = {"schema": "synthetic.outbound.v1"}
+    outbound.payload_json = {
+        "schema": "synthetic.outbound.v1",
+        "text": "durable-reply-body",
+    }
 
     admitted = MagicMock()
     admitted.id = outbound_id
@@ -210,7 +216,10 @@ async def test_arbiter_admits_dispatched_and_rejects_other_plan_statuses(
     admitted.reply_plan_id = reply_plan_id
     admitted.context_version = 1
     admitted.correlation_id = claim.correlation_id
-    admitted.payload_json = {"schema": "synthetic.outbound.v1"}
+    admitted.payload_json = {
+        "schema": "synthetic.outbound.v1",
+        "text": "durable-reply-body",
+    }
 
     monkeypatch.setattr(
         "app.services.outbound_arbiter.resolve_moment",

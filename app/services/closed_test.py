@@ -45,6 +45,7 @@ _SAFE_RESULT_KEYS: Final[frozenset[str]] = frozenset(
         "booking_studio_today",
         "booking_offered_slot_ids",
         "booking_offered_slots",
+        "client_message_kind",
     }
 )
 
@@ -77,6 +78,9 @@ def project_safe_synthetic_result(payload: object) -> dict[str, Any] | None:
     plan_type = payload.get("plan_type")
     if type(plan_type) is str and plan_type:
         out["plan_type"] = plan_type
+    kind = payload.get("client_message_kind")
+    if type(kind) is str and kind:
+        out["client_message_kind"] = kind
 
     if "booking_action" in payload:
         booking = sanitize_booking_result_fields(payload)
@@ -84,7 +88,8 @@ def project_safe_synthetic_result(payload: object) -> dict[str, Any] | None:
             if key in _SAFE_RESULT_KEYS:
                 out[key] = value
 
-    # Drop any accidental non-allowlisted keys (defense in depth).
+    # Drop any accidental non-allowlisted keys (defense in depth), including
+    # authoritative user-facing ``text`` which must never appear on this surface.
     return {k: v for k, v in out.items() if k in _SAFE_RESULT_KEYS}
 
 

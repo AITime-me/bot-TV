@@ -17,6 +17,7 @@ from app.core.booking_availability_remote import (
 from app.core.booking_types import (
     AvailableDaysOfferDecision,
     AvailableSlot,
+    BookingClientMessageKind,
     BookingDialogAction,
     BookingDomainError,
     BookingInternalReasonCode,
@@ -33,6 +34,10 @@ from app.schemas.booking_input import (
     SyntheticBookingInput,
 )
 from app.services.booking_flow import BookingFlowService
+from app.services.outbound_reply_text import (
+    OutboundReplyTextError,
+    render_text_for_booking_fields,
+)
 
 BOOKING_RESOLUTION_STARTED_KEY: Final[str] = "booking_resolution_started"
 BOOKING_RESOLUTION_RESULT_KEY: Final[str] = "booking_resolution_result"
@@ -55,6 +60,14 @@ _OFFER_SLOTS_LEGACY_KEYS: Final[frozenset[str]] = frozenset(
         "booking_offered_slot_ids",
     }
 )
+_OFFER_SLOTS_LEGACY_KEYS_WITH_KIND: Final[frozenset[str]] = frozenset(
+    {
+        "booking_action",
+        "booking_reason",
+        "booking_offered_slot_ids",
+        "client_message_kind",
+    }
+)
 _OFFER_SLOTS_NEW_KEYS: Final[frozenset[str]] = frozenset(
     {
         "booking_action",
@@ -63,8 +76,23 @@ _OFFER_SLOTS_NEW_KEYS: Final[frozenset[str]] = frozenset(
         "booking_offered_slots",
     }
 )
+_OFFER_SLOTS_NEW_KEYS_WITH_KIND: Final[frozenset[str]] = frozenset(
+    {
+        "booking_action",
+        "booking_reason",
+        "booking_offered_slot_ids",
+        "booking_offered_slots",
+        "client_message_kind",
+    }
+)
 _OFFERED_SLOT_OBJECT_KEYS: Final[frozenset[str]] = frozenset(
     {"slot_id", "starts_at"}
+)
+_HANDOFF_MESSAGE_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        BookingClientMessageKind.HANDOFF_DURING_MANAGER_HOURS.value,
+        BookingClientMessageKind.HANDOFF_OUTSIDE_MANAGER_HOURS.value,
+    }
 )
 
 _ALLOWED_BOOKING_REASONS: Final[frozenset[str]] = frozenset(
@@ -244,11 +272,20 @@ def _sanitize_offer_days_fields(raw: dict[str, Any]) -> dict[str, Any] | None:
 
 def _sanitize_offer_slots_fields(raw: dict[str, Any]) -> dict[str, Any] | None:
     keys = set(raw)
-    if keys == _OFFER_SLOTS_LEGACY_KEYS:
+    if keys in {_OFFER_SLOTS_LEGACY_KEYS, _OFFER_SLOTS_LEGACY_KEYS_WITH_KIND}:
         return _sanitize_offer_slots_legacy(raw)
-    if keys == _OFFER_SLOTS_NEW_KEYS:
+    if keys in {_OFFER_SLOTS_NEW_KEYS, _OFFER_SLOTS_NEW_KEYS_WITH_KIND}:
         return _sanitize_offer_slots_new_shape(raw)
     return None
+
+
+def _optional_offer_slots_kind(raw: dict[str, Any]) -> str | None:
+    kind = raw.get("client_message_kind")
+    if kind is None:
+        return None
+    if kind != BookingClientMessageKind.OFFER_SLOTS.value:
+        return None
+    return kind
 
 
 def _sanitize_slot_ids_list(raw: object) -> list[str] | None:
@@ -277,11 +314,17 @@ def _sanitize_offer_slots_legacy(raw: dict[str, Any]) -> dict[str, Any] | None:
     slot_ids = _sanitize_slot_ids_list(raw.get("booking_offered_slot_ids"))
     if slot_ids is None:
         return None
-    return {
+    fields: dict[str, Any] = {
         "booking_action": BookingDialogAction.OFFER_SLOTS.value,
         "booking_reason": None,
         "booking_offered_slot_ids": list(slot_ids),
     }
+    kind = _optional_offer_slots_kind(raw)
+    if "client_message_kind" in raw and kind is None:
+        return None
+    if kind is not None:
+        fields["client_message_kind"] = kind
+    return fields
 
 
 def _sanitize_offer_slots_new_shape(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -295,7 +338,7 @@ def _sanitize_offer_slots_new_shape(raw: dict[str, Any]) -> dict[str, Any] | Non
     offered = _sanitize_offered_slots_new(slot_ids, raw.get("booking_offered_slots"))
     if offered is None:
         return None
-    return {
+    fields: dict[str, Any] = {
         "booking_action": BookingDialogAction.OFFER_SLOTS.value,
         "booking_reason": None,
         "booking_offered_slot_ids": list(slot_ids),
@@ -304,10 +347,21 @@ def _sanitize_offer_slots_new_shape(raw: dict[str, Any]) -> dict[str, Any] | Non
             for item in offered
         ],
     }
+    kind = _optional_offer_slots_kind(raw)
+    if "client_message_kind" in raw and kind is None:
+        return None
+    if kind is not None:
+        fields["client_message_kind"] = kind
+    return fields
 
 
 def decision_to_outbound_fields(decision: object) -> dict[str, Any]:
-    """Map a booking decision to safe synthetic outbound fields."""
+    """Map a booking decision to safe synthetic outbound fields.
+
+    ``client_message_kind`` is persisted for MANAGER_HANDOFF so outbound text
+    can be re-derived deterministically before INSERT without re-evaluating
+    manager hours.
+    """
 
     if type(decision) is SlotOfferDecision:
         offered = [
@@ -322,6 +376,7 @@ def decision_to_outbound_fields(decision: object) -> dict[str, Any]:
             "booking_reason": None,
             "booking_offered_slot_ids": [slot.slot_id for slot in decision.offered_slots],
             "booking_offered_slots": offered,
+            "client_message_kind": decision.client_message_kind.value,
         }
     if type(decision) is AvailableDaysOfferDecision:
         return {
@@ -334,15 +389,20 @@ def decision_to_outbound_fields(decision: object) -> dict[str, Any]:
         return {
             "booking_action": BookingDialogAction.MANAGER_HANDOFF.value,
             "booking_reason": _allowlisted_reason(decision.internal_reason_code),
+            "client_message_kind": decision.client_message_kind.value,
         }
     if type(decision) is ServiceUnavailableDecision:
         return {
             "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,
             "booking_reason": _allowlisted_reason(decision.internal_reason_code),
+            "client_message_kind": decision.client_message_kind.value,
         }
     return {
         "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,
         "booking_reason": BookingInternalReasonCode.UNKNOWN_OUTCOME.value,
+        "client_message_kind": (
+            BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
+        ),
     }
 
 
@@ -353,6 +413,9 @@ def interrupted_booking_fields() -> dict[str, Any]:
         "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,
         "booking_reason": (
             BookingInternalReasonCode.BOOKING_RESOLUTION_INTERRUPTED.value
+        ),
+        "client_message_kind": (
+            BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
         ),
     }
 
@@ -382,6 +445,25 @@ def sanitize_booking_result_fields(raw: object) -> dict[str, Any]:
         "booking_action": action,
         "booking_reason": _allowlisted_reason(raw.get("booking_reason")),
     }
+    kind = raw.get("client_message_kind")
+    if action == BookingDialogAction.MANAGER_HANDOFF.value:
+        if type(kind) is not str or kind not in _HANDOFF_MESSAGE_KINDS:
+            return interrupted_booking_fields()
+        fields["client_message_kind"] = kind
+    elif action == BookingDialogAction.SERVICE_UNAVAILABLE.value:
+        if kind is None:
+            fields["client_message_kind"] = (
+                BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
+            )
+        elif (
+            kind
+            == BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
+        ):
+            fields["client_message_kind"] = kind
+        else:
+            return interrupted_booking_fields()
+    elif kind is not None:
+        return interrupted_booking_fields()
     return fields
 
 
@@ -431,11 +513,17 @@ def resolve_booking_outbound_fields(
         return {
             "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,
             "booking_reason": BookingInternalReasonCode.MALFORMED_ELIGIBILITY.value,
+            "client_message_kind": (
+                BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
+            ),
         }
     if fixture is None:
         return {
             "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,
             "booking_reason": BookingInternalReasonCode.MALFORMED_ELIGIBILITY.value,
+            "client_message_kind": (
+                BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
+            ),
         }
 
     try:
@@ -484,13 +572,19 @@ def resolve_booking_outbound_fields(
         return {
             "booking_action": BookingDialogAction.SERVICE_UNAVAILABLE.value,
             "booking_reason": BookingInternalReasonCode.ELIGIBILITY_SERVICE_UNAVAILABLE.value,
+            "client_message_kind": (
+                BookingClientMessageKind.SERVICE_TEMPORARILY_UNAVAILABLE.value
+            ),
         }
 
     return decision_to_outbound_fields(decision)
 
 
 def base_synthetic_outbound_payload(plan_payload: dict[str, Any]) -> dict[str, Any]:
-    """Token-only outbound envelope (non-booking shape)."""
+    """Token metadata outbound envelope (non-booking shape).
+
+    ``synthetic_token`` remains technical metadata only — never user-facing body.
+    """
 
     return {
         "schema": "synthetic.outbound.v1",
@@ -506,22 +600,44 @@ def build_synthetic_outbound_payload(
     booking_fields: dict[str, Any] | None = None,
     booking_flow: BookingFlowService | None = None,
 ) -> dict[str, Any]:
-    """Build synthetic.outbound.v1 payload.
+    """Build synthetic.outbound.v1 payload with authoritative ``text`` when renderable.
 
     Prefer explicit ``booking_fields`` (durable result). Legacy ``booking_flow``
     path resolves synchronously and is reserved for unit helpers — workers must
     resolve off-transaction via ``resolve_booking_outbound_fields``.
+
+    User-facing ``text`` is rendered from the booking domain path before INSERT.
+    Machine-only ``OFFER_DAYS`` omits ``text`` (no invented copy). Non-booking
+    plans raise ``OutboundReplyTextError`` rather than manufacturing a body or
+    falling back to inbound/draft/token content.
     """
 
     payload = base_synthetic_outbound_payload(plan_payload)
+    resolved_fields: dict[str, Any]
     if booking_fields is not None:
-        payload.update(sanitize_booking_result_fields(booking_fields))
-        return payload
-    if booking_flow is None:
-        return payload
-    payload.update(
-        resolve_booking_outbound_fields(plan_payload, booking_flow=booking_flow)
-    )
+        resolved_fields = sanitize_booking_result_fields(booking_fields)
+    elif booking_flow is not None:
+        resolved_fields = resolve_booking_outbound_fields(
+            plan_payload, booking_flow=booking_flow
+        )
+        if not resolved_fields:
+            raise OutboundReplyTextError("OUTBOUND_REPLY_TEXT_MISSING")
+        resolved_fields = sanitize_booking_result_fields(resolved_fields)
+    else:
+        raise OutboundReplyTextError("OUTBOUND_REPLY_TEXT_MISSING")
+
+    payload.update(resolved_fields)
+    try:
+        payload["text"] = render_text_for_booking_fields(resolved_fields)
+    except OutboundReplyTextError as exc:
+        if (
+            exc.code == "OUTBOUND_REPLY_TEXT_NOT_RENDERABLE"
+            and resolved_fields.get("booking_action")
+            == BookingDialogAction.OFFER_DAYS.value
+        ):
+            # Machine-only durable wire: keep booking fields, no client copy.
+            return payload
+        raise
     return payload
 
 
