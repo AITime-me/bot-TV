@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
 from sqlalchemy import func, select, update
@@ -18,6 +18,7 @@ from app.models.conversation import (
 from app.models.manager_message import ManagerMessage, ManagerMessageStatus
 from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
+from app.schemas.booking_input import SyntheticBookingInput, SyntheticBookingSlot
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.manager_message import SyntheticManagerMessageEvent
 from app.services.dialog_context import DialogContextService
@@ -41,11 +42,38 @@ async def manager_handoff_row_cleanup(
     await truncate_foundation_tables(session_factory)
 
 
+def _pipeline_booking() -> SyntheticBookingInput:
+    return SyntheticBookingInput(
+        service_id="11111111-1111-4111-8111-111111111111",
+        master_id="22222222-2222-4222-8222-222222222222",
+        include_alternatives=False,
+        alternate_master_consent=False,
+        slots=(
+            SyntheticBookingSlot(
+                slot_id="handoff-s1",
+                starts_at=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+                master_id="22222222-2222-4222-8222-222222222222",
+                service_id="11111111-1111-4111-8111-111111111111",
+            ),
+        ),
+        decision_at=datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5))),
+    )
+
+
 def _client(message_id: str, text: str) -> SyntheticInboundEvent:
     return SyntheticInboundEvent(
         external_conversation_id="handoff-conv",
         external_message_id=message_id,
         text=text,
+    )
+
+
+def _client_booking(message_id: str, text: str) -> SyntheticInboundEvent:
+    return SyntheticInboundEvent(
+        external_conversation_id="handoff-conv",
+        external_message_id=message_id,
+        text=text,
+        booking=_pipeline_booking(),
     )
 
 
@@ -447,7 +475,7 @@ async def test_handoff_resume_keeps_dialog_context_out_of_transport_payload(
     async with session_factory() as session:
         async with session.begin():
             paused = await InboundService(session).accept(
-                _client("client-context", "Клиентский вопрос")
+                _client_booking("client-context", "Клиентский вопрос")
             )
             assert paused.reply_plan is not None
             plan_id = paused.reply_plan.id

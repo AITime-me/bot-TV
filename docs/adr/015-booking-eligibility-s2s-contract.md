@@ -72,7 +72,13 @@ SyntheticIngress/Inbound (optional typed booking fixture)
                    legacy slots fixture:
                      BookingFlowService.resolve
        Txn2: re-fence + persist booking_resolution_result + idempotent outbound
-  → synthetic.outbound.v1 { booking_action, booking_reason?, date_keys?/slot_ids? }
+  → synthetic.outbound.v1 {
+       text?,                      # authoritative rendered client copy (BOT-REPLY-DURABLE-01)
+       synthetic_token,            # technical metadata only — never user-facing body
+       booking_action, booking_reason?,
+       client_message_kind?,       # required for MANAGER_HANDOFF re-derive before INSERT
+       date_keys?/slot_ids?
+     }
 ```
 
 Durable state in existing `ReplyPlan.payload_json` (no migration):
@@ -96,8 +102,12 @@ Guarantees:
 - `booking_flow.resolve*` never runs inside a DB transaction or while holding
   conversation/reply-plan locks. The worker schedules
   `resolve_booking_outbound_fields` via `asyncio.to_thread`.
-- Non-booking CLIENT_REPLY plans keep the prior single-transaction
-  synthetic_token-only outbound path.
+- Renderable booking decisions persist domain-rendered `text` on
+  `SYNTHETIC_OUTBOUND.payload_json` before INSERT; delivery/retry reuse that
+  body only (no re-render, no inbound/draft/token fallback).
+- `OFFER_DAYS` remains machine-only on outbound (no invented client copy).
+- Non-booking CLIENT_REPLY plans fail closed at outbound build when no
+  renderable domain decision exists (no manufactured body).
 - Booking intent/service/master are **never** parsed from free-form text.
 - Worker composition injects `BookingFlowService` without reading `app.state`.
 

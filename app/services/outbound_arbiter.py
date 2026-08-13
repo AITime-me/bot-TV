@@ -23,6 +23,11 @@ from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.repositories.outbound import OutboundClaim, StaleOutboundLeaseError
 from app.services.amocrm_mirror import enqueue_outbound_delivered
+from app.services.outbound_reply_text import (
+    OutboundReplyTextError,
+    is_machine_only_outbound_payload,
+    require_persisted_outbound_text,
+)
 from app.services.synthetic_outbound import (
     SyntheticOutboundAdapter,
     SyntheticOutboundOutcome,
@@ -324,6 +329,16 @@ class OutboundArbiter:
 
 
 def _request_from_outbound(outbound: OutboxMessage) -> SyntheticOutboundRequest:
+    """Build sink request from the immutable outbound row only — never re-render."""
+
+    payload = outbound.payload_json if isinstance(outbound.payload_json, dict) else {}
+    try:
+        text = require_persisted_outbound_text(payload)
+    except OutboundReplyTextError:
+        if is_machine_only_outbound_payload(payload):
+            text = None
+        else:
+            raise OutboundArbiterDenied("OUTBOUND_REPLY_TEXT_MISSING") from None
     return SyntheticOutboundRequest(
         outbound_id=str(outbound.id),
         conversation_id=str(outbound.conversation_id),
@@ -334,7 +349,8 @@ def _request_from_outbound(outbound: OutboxMessage) -> SyntheticOutboundRequest:
         correlation_id=(
             str(outbound.correlation_id) if outbound.correlation_id else None
         ),
-        _payload_schema=str(outbound.payload_json.get("schema", "unknown")),
+        _payload_schema=str(payload.get("schema", "unknown")),
+        _text=text,
     )
 
 

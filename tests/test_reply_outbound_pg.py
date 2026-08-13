@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -29,6 +29,7 @@ from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.repositories.outbound import StaleOutboundLeaseError
 from app.repositories.reply_plans import StaleReplyPlanLeaseError
+from app.schemas.booking_input import SyntheticBookingInput, SyntheticBookingSlot
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.manager_message import SyntheticManagerMessageEvent
 from app.services.inbound import InboundService
@@ -43,6 +44,31 @@ from app.services.synthetic_outbound import (
 from app.services.takeover import ManagerTakeoverService
 from tests.pg_harness import truncate_foundation_tables
 
+_BOOKING_SERVICE = "11111111-1111-4111-8111-111111111111"
+_BOOKING_MASTER = "22222222-2222-4222-8222-222222222222"
+
+
+def _pipeline_booking() -> SyntheticBookingInput:
+    """Renderable booking fixture for tests that need SYNTHETIC_OUTBOUND text."""
+
+    return SyntheticBookingInput(
+        service_id=_BOOKING_SERVICE,
+        master_id=_BOOKING_MASTER,
+        include_alternatives=False,
+        alternate_master_consent=False,
+        slots=(
+            SyntheticBookingSlot(
+                slot_id="reply-s1",
+                starts_at=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+                master_id=_BOOKING_MASTER,
+                service_id=_BOOKING_SERVICE,
+            ),
+        ),
+        decision_at=datetime(
+            2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5))
+        ),
+    )
+
 
 def _inbound(
     event_id: str,
@@ -50,11 +76,30 @@ def _inbound(
     text: str = "synth-text",
     received_at: datetime | None = None,
 ) -> SyntheticInboundEvent:
+    """Default non-booking inbound (unrenderable outbound path)."""
+
     return SyntheticInboundEvent(
         external_conversation_id=conv,
         external_message_id=event_id,
         text=text,
         received_at=received_at,
+    )
+
+
+def _inbound_booking(
+    event_id: str,
+    conv: str = "reply-conv",
+    text: str = "synth-text",
+    received_at: datetime | None = None,
+) -> SyntheticInboundEvent:
+    """Booking inbound for paths that must persist rendered outbound text."""
+
+    return SyntheticInboundEvent(
+        external_conversation_id=conv,
+        external_message_id=event_id,
+        text=text,
+        received_at=received_at,
+        booking=_pipeline_booking(),
     )
 
 
@@ -462,7 +507,7 @@ async def test_legacy_takeover_cancels_unadmitted_outbound_preserves_admitted(
     """Legacy takeover must mirror manager-message cancel semantics for outbound."""
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("legacy-takeover-unadmitted")
+            _inbound_booking("legacy-takeover-unadmitted")
         )
         assert inbound.reply_plan is not None
         conversation_id = inbound.conversation.id
@@ -495,7 +540,7 @@ async def test_legacy_takeover_cancels_unadmitted_outbound_preserves_admitted(
 
     async with session_scope(session_factory) as session:
         admitted_inbound = await InboundService(session).accept(
-            _inbound("legacy-takeover-admitted", conv="legacy-admitted-conv")
+            _inbound_booking("legacy-takeover-admitted", conv="legacy-admitted-conv")
         )
         assert admitted_inbound.reply_plan is not None
         admitted_conv_id = admitted_inbound.conversation.id
@@ -548,7 +593,7 @@ async def test_manager_message_after_plan_claim_fences_dispatch(
 ) -> None:
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("manager-after-plan-claim")
+            _inbound_booking("manager-after-plan-claim")
         )
         assert inbound.reply_plan is not None
         due = inbound.reply_plan.not_before + timedelta(seconds=1)
@@ -584,7 +629,7 @@ async def test_one_reply_plan_one_outbound_and_arbiter_success(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-out"))
+        result = await InboundService(session).accept(_inbound_booking("msg-out"))
         assert result.reply_plan is not None
         not_before = result.reply_plan.not_before
         now = not_before + timedelta(seconds=1)
@@ -635,7 +680,7 @@ async def test_manager_before_admission_cancels_without_sink(
 ) -> None:
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("admission-manager-first")
+            _inbound_booking("admission-manager-first")
         )
         assert inbound.reply_plan is not None
         due = inbound.reply_plan.not_before + timedelta(seconds=1)
@@ -681,7 +726,7 @@ async def test_admission_before_manager_is_irreversible(
 ) -> None:
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("admission-bot-first")
+            _inbound_booking("admission-bot-first")
         )
         assert inbound.reply_plan is not None
         due = inbound.reply_plan.not_before + timedelta(seconds=1)
@@ -736,7 +781,7 @@ async def test_admitted_row_recovers_after_crash_even_at_claim_limit(
 ) -> None:
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("admitted-crash-recovery")
+            _inbound_booking("admitted-crash-recovery")
         )
         assert inbound.reply_plan is not None
         inbound.reply_plan.max_attempts = 1
@@ -790,7 +835,7 @@ async def test_client_message_cancels_unadmitted_dispatched_outbound(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        first = await InboundService(session).accept(_inbound("client-before-admit-1"))
+        first = await InboundService(session).accept(_inbound_booking("client-before-admit-1"))
         assert first.reply_plan is not None
         due = first.reply_plan.not_before + timedelta(seconds=1)
 
@@ -808,7 +853,7 @@ async def test_client_message_cancels_unadmitted_dispatched_outbound(
 
     async with session_scope(session_factory) as session:
         second = await InboundService(session).accept(
-            _inbound("client-before-admit-2")
+            _inbound_booking("client-before-admit-2")
         )
         assert second.reply_plan is not None
         assert second.reply_plan.id != plan_claim.plan_id
@@ -828,7 +873,7 @@ async def test_concurrent_manager_and_admission_have_one_linearized_winner(
 ) -> None:
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("concurrent-manager-admission")
+            _inbound_booking("concurrent-manager-admission")
         )
         assert inbound.reply_plan is not None
         due = inbound.reply_plan.not_before + timedelta(seconds=1)
@@ -882,7 +927,7 @@ async def test_new_context_cancels_old_outbound_before_arbiter_claim(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        first = await InboundService(session).accept(_inbound("msg-arb-1"))
+        first = await InboundService(session).accept(_inbound_booking("msg-arb-1"))
         assert first.reply_plan is not None
         now = first.reply_plan.not_before + timedelta(seconds=1)
         conversation_id = first.conversation.id
@@ -894,7 +939,7 @@ async def test_new_context_cancels_old_outbound_before_arbiter_claim(
 
     # New message bumps context while outbound still carries old version.
     async with session_scope(session_factory) as session:
-        await InboundService(session).accept(_inbound("msg-arb-2"))
+        await InboundService(session).accept(_inbound_booking("msg-arb-2"))
 
     out_worker = OutboundWorker(
         session_factory,
@@ -916,7 +961,7 @@ async def test_legacy_takeover_cancels_unadmitted_outbound_and_blocks_reclaim(
 ) -> None:
     """Legacy takeover cancels claimed unadmitted outbound; reclaim is empty."""
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-mgr-owned"))
+        result = await InboundService(session).accept(_inbound_booking("msg-mgr-owned"))
         assert result.reply_plan is not None
         due = result.reply_plan.not_before + timedelta(seconds=1)
         conversation_id = result.conversation.id
@@ -952,7 +997,7 @@ async def test_legacy_takeover_with_explicit_now_cancels_unadmitted_without_sink
 ) -> None:
     """Legacy takeover with explicit now cancels unadmitted outbound; no sink."""
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-mgr-ts"))
+        result = await InboundService(session).accept(_inbound_booking("msg-mgr-ts"))
         assert result.reply_plan is not None
         due = result.reply_plan.not_before + timedelta(seconds=1)
         conversation_id = result.conversation.id
@@ -994,7 +1039,7 @@ async def test_legacy_takeover_stale_processing_claim_cannot_admit_or_deliver(
     """
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("legacy-stale-processing")
+            _inbound_booking("legacy-stale-processing")
         )
         assert inbound.reply_plan is not None
         conversation_id = inbound.conversation.id
@@ -1078,7 +1123,7 @@ async def test_arbiter_process_claimed_denies_non_dispatched_plan_status(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-plan-status"))
+        result = await InboundService(session).accept(_inbound_booking("msg-plan-status"))
         assert result.reply_plan is not None
         due = result.reply_plan.not_before + timedelta(seconds=1)
 
@@ -1110,7 +1155,7 @@ async def test_outbound_fencing_and_early_not_before(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-fence"))
+        result = await InboundService(session).accept(_inbound_booking("msg-fence"))
         assert result.reply_plan is not None
         not_before = result.reply_plan.not_before
         due = not_before + timedelta(seconds=1)
@@ -1169,7 +1214,7 @@ async def test_expired_final_outbound_lease_recovers_to_dead_without_sink(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-final-out-lease"))
+        result = await InboundService(session).accept(_inbound_booking("msg-final-out-lease"))
         assert result.reply_plan is not None
         result.reply_plan.max_attempts = 1
         await session.flush()
@@ -1243,7 +1288,7 @@ async def test_outbound_persisted_custom_max_attempts_controls_claim_and_failure
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-out-custom-max"))
+        result = await InboundService(session).accept(_inbound_booking("msg-out-custom-max"))
         assert result.reply_plan is not None
         result.reply_plan.max_attempts = 2
         await session.flush()
@@ -1303,7 +1348,7 @@ async def test_db_rejects_sent_and_duplicate_idempotency(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound("msg-db"))
+        result = await InboundService(session).accept(_inbound_booking("msg-db"))
         assert result.reply_plan is not None
         due = result.reply_plan.not_before + timedelta(seconds=1)
     worker = ReplyPlanWorker(session_factory, worker_id="db-w")
@@ -1345,7 +1390,7 @@ async def test_db_enforces_admission_and_lease_state_combinations(
 ) -> None:
     async with session_scope(session_factory) as session:
         inbound = await InboundService(session).accept(
-            _inbound("db-admission-constraints")
+            _inbound_booking("db-admission-constraints")
         )
         assert inbound.reply_plan is not None
         due = inbound.reply_plan.not_before + timedelta(seconds=1)
@@ -1434,16 +1479,17 @@ async def test_dispatch_locks_conversation_before_outbox_no_deadlock_with_inboun
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Inbound waits on Conversation while dispatch holds it; no deadlock.
+    """Inbound waits on Conversation while finalize holds it; no deadlock.
 
-    Deterministic barriers prove dispatch takes Conversation FOR UPDATE before
-    the outbox INSERT. Removing that lock from dispatch_claimed makes
-    ``dispatch_holds_conversation`` never fire and fails this test.
+    Booking dispatch is two-phase: phase1 commits before remote resolve; phase2
+    takes Conversation FOR UPDATE before the outbox INSERT. Barriers prove that
+    finalize lock precedes INSERT. Non-booking fails closed before INSERT and
+    cannot exercise this race.
     """
     conv_key = "race-dispatch-inbound"
     async with session_scope(session_factory) as session:
         first = await InboundService(session).accept(
-            _inbound("race-base", conv=conv_key)
+            _inbound_booking("race-base", conv=conv_key)
         )
         assert first.reply_plan is not None
         due = first.reply_plan.not_before + timedelta(seconds=1)
@@ -1467,20 +1513,23 @@ async def test_dispatch_locks_conversation_before_outbox_no_deadlock_with_inboun
 
     async def gated_lock(session, *, conversation_id):  # type: ignore[no-untyped-def]
         lock_calls["n"] += 1
-        if lock_calls["n"] == 1:
+        if lock_calls["n"] == 2:
+            # Phase2 finalize: hold Conversation until INSERT barriers observe it.
             conversation = await original_lock(
                 session, conversation_id=conversation_id
             )
             dispatch_holds_conversation.set()
             await allow_dispatch_past_lock.wait()
             return conversation
-        inbound_reached_lock.set()
+        if lock_calls["n"] > 2:
+            # Inbound entered lock_for_update while finalize still holds the row.
+            inbound_reached_lock.set()
         return await original_lock(session, conversation_id=conversation_id)
 
     async def gated_insert(*args, **kwargs):  # type: ignore[no-untyped-def]
         if not dispatch_holds_conversation.is_set():
             raise AssertionError(
-                "outbox INSERT ran before Conversation FOR UPDATE in dispatch"
+                "outbox INSERT ran before Conversation FOR UPDATE in finalize"
             )
         insert_after_lock["ok"] = True
         insert_started.set()
@@ -1508,7 +1557,7 @@ async def test_dispatch_locks_conversation_before_outbox_no_deadlock_with_inboun
     async def _inbound_accept() -> int:
         async with session_scope(session_factory) as session:
             accepted = await InboundService(session).accept(
-                _inbound("race-concurrent", conv=conv_key)
+                _inbound_booking("race-concurrent", conv=conv_key)
             )
             return accepted.context_version
 

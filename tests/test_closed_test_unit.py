@@ -301,15 +301,19 @@ def test_project_safe_synthetic_result_allowlist() -> None:
             "plan_type": "CLIENT_REPLY",
             "secret_token": "LEAK",
             "raw_text": "nope",
+            "text": "user-facing-must-not-leak",
             "booking_action": "SERVICE_UNAVAILABLE",
             "booking_reason": "ELIGIBILITY_CLIENT_UNAVAILABLE",
+            "client_message_kind": "SERVICE_TEMPORARILY_UNAVAILABLE",
         }
     )
     assert safe is not None
     assert safe["synthetic_token"] == "SYNTHETIC_OK"
     assert "secret_token" not in safe
     assert "raw_text" not in safe
+    assert "text" not in safe
     assert safe.get("booking_action") == "SERVICE_UNAVAILABLE"
+    assert safe.get("client_message_kind") == "SERVICE_TEMPORARILY_UNAVAILABLE"
     assert project_safe_synthetic_result({"schema": "other"}) is None
 
 

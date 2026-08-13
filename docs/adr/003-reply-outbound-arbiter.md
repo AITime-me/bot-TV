@@ -68,6 +68,13 @@ Statuses: `PENDING → READY → PROCESSING → DISPATCHED`, with
 - Idempotency key `synthetic-outbound:reply-plan:{plan_id}` is unique.
 - `ADMITTED` is the durable cancellation boundary; `DELIVERED` means acceptance
   by the synthetic sink only. `SENT` remains forbidden.
+- Authoritative user-facing bot reply body is `outbox_messages.payload_json.text`
+  (BOT-REPLY-DURABLE-01). It is rendered from the booking domain client-message
+  path and written into the immutable outbound payload **before** INSERT.
+  Delivery and retry read only that persisted `text` — they never re-render and
+  never fall back to inbound text, `INTERNAL_DRAFT`/`draft_text`, manager hints,
+  or `synthetic_token` (token remains technical metadata only). Machine-only
+  `OFFER_DAYS` may omit `text`; missing/invalid text otherwise fails closed.
 
 ### Outbound Arbiter
 The only path to move `SYNTHETIC_OUTBOUND` through

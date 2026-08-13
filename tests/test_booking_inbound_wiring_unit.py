@@ -417,13 +417,14 @@ def test_missing_flow_and_non_booking_helpers() -> None:
         outbound["booking_reason"]
         == BookingInternalReasonCode.BOOKING_FLOW_UNAVAILABLE.value
     )
+    assert outbound["text"] == (
+        "Сейчас не могу завершить запись самостоятельно. "
+        "Передаю ваш запрос менеджеру."
+    )
     plain = client_reply_plan_payload(inbox_id="i1", booking=None)
-    assert build_synthetic_outbound_payload(plain) == {
-        "schema": "synthetic.outbound.v1",
-        "source_schema": "synthetic.reply_plan.v1",
-        "plan_type": "CLIENT_REPLY",
-        "synthetic_token": "SYNTHETIC_OK",
-    }
+    with pytest.raises(Exception) as exc:
+        build_synthetic_outbound_payload(plain)
+    assert "OUTBOUND_REPLY_TEXT_MISSING" in str(exc.value)
 
 
 def test_interrupted_fields_are_allowlisted() -> None:
@@ -659,6 +660,9 @@ async def test_existing_saved_result_skips_resolve() -> None:
     plan[BOOKING_RESOLUTION_RESULT_KEY] = {
         "booking_action": BookingDialogAction.MANAGER_HANDOFF.value,
         "booking_reason": "MANAGER_ONLY",
+        "client_message_kind": (
+            BookingClientMessageKind.HANDOFF_DURING_MANAGER_HOURS.value
+        ),
     }
     claim = _claim_with_plan(plan)
     store = _PlanStore(payload=dict(plan))
@@ -695,15 +699,13 @@ async def test_lease_race_on_phase2_does_not_publish_stale_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_booking_path_single_transaction_unchanged() -> None:
+async def test_non_booking_path_fails_closed_without_rendered_text() -> None:
+    from app.services.outbound_reply_text import OutboundReplyTextError
+
     flow = BookingFlowService(BookingEligibilityFlowService(FakeEligibilityClient()))
     plan = client_reply_plan_payload(inbox_id="i1", booking=None)
     claim = _claim_with_plan(plan)
     conversation = _conversation_for(claim)
-    completed = _completed_for(claim)
-    outbound_row = MagicMock()
-    outbound_row.id = uuid.uuid4()
-    inserted: list[dict[str, Any]] = []
     scopes = 0
 
     @asynccontextmanager
@@ -712,9 +714,13 @@ async def test_non_booking_path_single_transaction_unchanged() -> None:
         scopes += 1
         yield AsyncMock()
 
-    async def capture_insert(_session: object, **kwargs: Any):
-        inserted.append(kwargs["payload_json"])
-        return outbound_row, True
+    plan_row = _plan_row_for(claim, _PlanStore(payload=dict(plan)))
+    failed_row = MagicMock()
+    failed_row.id = claim.plan_id
+    failed_row.status = ReplyPlanStatus.FAILED.value
+    failed_row.conversation_id = claim.conversation_id
+    failed_row.context_version = claim.context_version
+    failed_row.correlation_id = claim.correlation_id
 
     with (
         patch("app.services.reply_outbound.session_scope", fake_scope),
@@ -724,7 +730,7 @@ async def test_non_booking_path_single_transaction_unchanged() -> None:
         ),
         patch(
             "app.services.reply_outbound.reply_plan_repo.get_by_id",
-            AsyncMock(return_value=_plan_row_for(claim, _PlanStore(payload=dict(plan)))),
+            AsyncMock(return_value=plan_row),
         ),
         patch(
             "app.services.reply_outbound.outbound_repo.get_by_idempotency_key",
@@ -732,12 +738,12 @@ async def test_non_booking_path_single_transaction_unchanged() -> None:
         ),
         patch(
             "app.services.reply_outbound.outbound_repo.insert_synthetic_outbound_if_absent",
-            side_effect=capture_insert,
+            side_effect=AssertionError("must not insert without text"),
         ),
         patch(
-            "app.services.reply_outbound.reply_plan_repo.complete_dispatched_with_lease",
-            AsyncMock(return_value=completed),
-        ),
+            "app.services.reply_outbound.reply_plan_repo.fail_with_lease",
+            AsyncMock(return_value=failed_row),
+        ) as fail_lease,
         patch(
             "app.services.reply_outbound.enqueue_reply_plan_state_changed",
             AsyncMock(),
@@ -752,18 +758,12 @@ async def test_non_booking_path_single_transaction_unchanged() -> None:
         ),
     ):
         worker = ReplyPlanWorker(AsyncMock(), worker_id="unit", booking_flow=flow)
-        result = await worker.dispatch_claimed(claim)
+        with pytest.raises(OutboundReplyTextError):
+            await worker.dispatch_claimed(claim)
 
-    assert result.outbound_created is True
-    assert scopes == 1
-    assert inserted == [
-        {
-            "schema": "synthetic.outbound.v1",
-            "source_schema": "synthetic.reply_plan.v1",
-            "plan_type": "CLIENT_REPLY",
-            "synthetic_token": "SYNTHETIC_OK",
-        }
-    ]
+    assert scopes >= 1
+    fail_lease.assert_awaited()
+    assert fail_lease.await_args.kwargs["error_code"] == "OutboundReplyTextError"
 
 
 def test_worker_source_guarantees_two_phase_and_to_thread() -> None:

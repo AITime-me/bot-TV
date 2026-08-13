@@ -384,6 +384,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "!app/services/booking_eligibility_flow.py",
         "!app/services/booking_flow.py",
         "!app/services/booking_synthetic.py",
+        "!app/services/outbound_reply_text.py",
         "!app/schemas/booking_input.py",
         "!alembic/versions/20260807_17_master_bindings.py",
         "!alembic/versions/20260808_18_master_commands.py",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -39,6 +39,7 @@ from app.repositories.amocrm_mirror import (
     AmoCrmMirrorClaim,
     StaleAmoCrmMirrorLeaseError,
 )
+from app.schemas.booking_input import SyntheticBookingInput, SyntheticBookingSlot
 from app.schemas.inbound import SyntheticInboundEvent
 from app.services.amocrm_adapter import (
     AmoCrmMirrorOutcome,
@@ -65,6 +66,35 @@ def _inbound(
         external_conversation_id=conv,
         external_message_id=event_id,
         text=text,
+    )
+
+
+def _inbound_booking(
+    event_id: str,
+    conv: str = "mirror-conv",
+    text: str = "synth-text",
+) -> SyntheticInboundEvent:
+    return SyntheticInboundEvent(
+        external_conversation_id=conv,
+        external_message_id=event_id,
+        text=text,
+        booking=SyntheticBookingInput(
+            service_id="11111111-1111-4111-8111-111111111111",
+            master_id="22222222-2222-4222-8222-222222222222",
+            include_alternatives=False,
+            alternate_master_consent=False,
+            slots=(
+                SyntheticBookingSlot(
+                    slot_id="mirror-s1",
+                    starts_at=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+                    master_id="22222222-2222-4222-8222-222222222222",
+                    service_id="11111111-1111-4111-8111-111111111111",
+                ),
+            ),
+            decision_at=datetime(
+                2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5))
+            ),
+        ),
     )
 
 
@@ -131,7 +161,9 @@ async def _dispatch_first_plan(
     event_id: str = "mirror-msg-1",
 ) -> tuple[Conversation, ReplyPlan, datetime]:
     async with session_scope(session_factory) as session:
-        result = await InboundService(session).accept(_inbound(event_id, conv=conv))
+        result = await InboundService(session).accept(
+            _inbound_booking(event_id, conv=conv)
+        )
         assert result.reply_plan is not None
         conversation = result.conversation
         plan = result.reply_plan

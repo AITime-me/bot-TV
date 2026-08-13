@@ -17,8 +17,11 @@ class SyntheticOutboundRequest:
     reply_plan_id: str | None
     context_version: int | None
     correlation_id: str | None
-    # Payload is never included in repr/logs.
+    # Payload / reply body are never included in repr/logs.
     _payload_schema: str
+    # Authoritative persisted user-facing body (outbound payload ``text``).
+    # None only for machine-only OFFER_DAYS envelopes.
+    _text: str | None = None
 
     def __repr__(self) -> str:
         return (

@@ -186,6 +186,7 @@ Thumbs.db
 !app/services/booking_eligibility_flow.py
 !app/services/booking_flow.py
 !app/services/booking_synthetic.py
+!app/services/outbound_reply_text.py
 !app/services/closed_test.py
 !app/services/handoff_expiry.py
 !app/services/inbound.py

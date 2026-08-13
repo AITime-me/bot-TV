@@ -282,6 +282,11 @@ async def test_lease_expiry_during_resolve_no_second_remote_no_stale_offer(
         assert outbound.payload_json.get("booking_reason") == (
             BookingInternalReasonCode.BOOKING_RESOLUTION_INTERRUPTED.value
         )
+        assert outbound.payload_json.get("text") == (
+            "Сейчас не могу завершить запись самостоятельно. "
+            "Передаю ваш запрос менеджеру."
+        )
+        assert outbound.payload_json.get("text") != "booking-fixture-placeholder"
         plan = await reply_plan_repo.get_by_id(session, plan_id=plan_id)
         assert plan is not None
         assert plan.status == ReplyPlanStatus.DISPATCHED.value

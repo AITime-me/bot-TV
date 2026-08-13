@@ -24,6 +24,7 @@ from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.services.ingress import IngressWorker
 from app.services.outbound_arbiter import OutboundArbiter
+from app.services.outbound_reply_text import OutboundReplyTextError
 from app.services.reply_outbound import OutboundWorker, ReplyPlanWorker
 from app.services.synthetic_outbound import SyntheticOutboundAdapter
 from tests.foundation_test_db import SecretDatabaseUrl
@@ -158,12 +159,17 @@ async def test_get_unknown_404_and_received_pending(
 
 
 @pytest.mark.asyncio
-async def test_closed_test_e2e_durable_pipeline_to_synthetic_delivery(
+async def test_closed_test_e2e_plain_request_fails_closed_without_delivered_outbound(
     monkeypatch: pytest.MonkeyPatch,
     session_factory: async_sessionmaker[AsyncSession],
     pg_database_url: SecretDatabaseUrl,
 ) -> None:
-    """HTTP closed-test → durable ingress → workers → SYNTHETIC_OUTBOUND DELIVERED."""
+    """HTTP closed-test plain text is unrenderable → no fabricated DELIVERED body.
+
+    Closed-test HTTP has no booking field. BOT-REPLY-DURABLE-01 fails closed
+    rather than manufacturing outbound text from client echo/token. Successful
+    durable-text delivery is covered by ``test_outbound_reply_text_pg``.
+    """
 
     with _app_client(monkeypatch, database_url=pg_database_url.reveal()) as client:
         post = client.post(
@@ -199,13 +205,15 @@ async def test_closed_test_e2e_durable_pipeline_to_synthetic_delivery(
             plan = next(
                 p for p in plans if p.payload_json.get("inbox_id") == str(inbox.id)
             )
+            plan_id = plan.id
             due = plan.not_before + timedelta(seconds=1)
+            assert "booking" not in plan.payload_json
 
         plan_worker = ReplyPlanWorker(session_factory, worker_id="closed-plan")
         plan_claim = await plan_worker.claim_one(now=due)
         assert plan_claim is not None
-        dispatched = await plan_worker.dispatch_claimed(plan_claim)
-        assert dispatched.plan_status == ReplyPlanStatus.DISPATCHED.value
+        with pytest.raises(OutboundReplyTextError):
+            await plan_worker.dispatch_claimed(plan_claim)
 
         sink = SyntheticOutboundAdapter()
         outbound_worker = OutboundWorker(
@@ -213,12 +221,8 @@ async def test_closed_test_e2e_durable_pipeline_to_synthetic_delivery(
             worker_id="closed-out",
             arbiter=OutboundArbiter(session_factory, sink=sink),
         )
-        out_claim = await outbound_worker.claim_one(now=due)
-        assert out_claim is not None
-        admit = await outbound_worker.process_claimed(out_claim, now=due)
-        assert admit.admitted is True
-        assert admit.delivery_status == DeliveryStatus.DELIVERED.value
-        assert len(sink.calls) == 1
+        assert await outbound_worker.claim_one(now=due) is None
+        assert sink.calls == []
 
         # Duplicate request does not create a second business path.
         dup = client.post(
@@ -243,14 +247,12 @@ async def test_closed_test_e2e_durable_pipeline_to_synthetic_delivery(
                     await session.scalar(select(func.count()).select_from(InboxMessage))
                     == 1
                 )
-                assert (
-                    await session.scalar(
-                        select(func.count())
-                        .select_from(ReplyPlan)
-                        .where(ReplyPlan.status != ReplyPlanStatus.SUPERSEDED.value)
-                    )
-                    == 1
-                )
+                plan_row = await session.get(ReplyPlan, plan_id)
+                assert plan_row is not None
+                assert plan_row.status in {
+                    ReplyPlanStatus.FAILED.value,
+                    ReplyPlanStatus.DEAD.value,
+                }
                 synth_count = await session.scalar(
                     select(func.count())
                     .select_from(OutboxMessage)
@@ -259,14 +261,20 @@ async def test_closed_test_e2e_durable_pipeline_to_synthetic_delivery(
                         == DestinationType.SYNTHETIC_OUTBOUND.value
                     )
                 )
-                assert synth_count == 1
+                assert synth_count == 0
+                delivered = await session.scalar(
+                    select(func.count())
+                    .select_from(OutboxMessage)
+                    .where(
+                        OutboxMessage.delivery_status
+                        == DeliveryStatus.DELIVERED.value
+                    )
+                )
+                assert delivered == 0
                 destinations = (
                     await session.scalars(select(OutboxMessage.destination_type))
                 ).all()
-                assert set(destinations) <= {
-                    DestinationType.INTERNAL_DRAFT.value,
-                    DestinationType.SYNTHETIC_OUTBOUND.value,
-                }
+                assert set(destinations) <= {DestinationType.INTERNAL_DRAFT.value}
 
         status = client.get(
             f"/internal/closed-test/events/{event_id}",
@@ -277,13 +285,12 @@ async def test_closed_test_e2e_durable_pipeline_to_synthetic_delivery(
         assert body["ingress"]["status"] == IngressStatus.PROCESSED.value
         assert body["inbound"] is not None
         assert body["reply_plan"] is not None
-        assert body["reply_plan"]["status"] == ReplyPlanStatus.DISPATCHED.value
-        assert body["outbound"] is not None
-        assert body["outbound"]["destination_type"] == "SYNTHETIC_OUTBOUND"
-        assert body["outbound"]["delivery_status"] == DeliveryStatus.DELIVERED.value
-        assert body["synthetic_result"] is not None
-        assert body["synthetic_result"]["schema"] == "synthetic.outbound.v1"
-        assert body["synthetic_result"]["synthetic_token"] == "SYNTHETIC_OK"
+        assert body["reply_plan"]["status"] in {
+            ReplyPlanStatus.FAILED.value,
+            ReplyPlanStatus.DEAD.value,
+        }
+        assert body["outbound"] is None
+        assert body["synthetic_result"] is None
         assert "e2e-closed-test-text" not in status.text
         assert _TOKEN not in status.text
 
