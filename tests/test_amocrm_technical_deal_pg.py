@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import secrets
+import uuid
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ from app.repositories.amocrm_entity_links import AmocrmEntityLinkStaleLeaseError
 from app.services.amocrm_technical_deal import (
     TechnicalDealOutcome,
     TechnicalDealProjectionService,
+    coerce_conversation_uuid,
 )
 from tests.pg_harness import truncate_foundation_tables
 
@@ -124,6 +126,47 @@ def _lead_get(lead_id: int = 9001) -> S2sHttpResponse:
         headers={},
         body=json.dumps({"id": lead_id}).encode(),
     )
+
+
+@pytest.mark.asyncio
+async def test_pg_loaded_conversation_id_is_accepted_by_ensure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression: asyncpg UUID subclass must not trip CONVERSATION_ID_INVALID."""
+
+    await _seed_oauth(session_factory)
+    async with session_scope(session_factory) as session:
+        conv = await _seed_conversation(session)
+        conv_id = conv.id
+        # Force a round-trip load so the value is whatever the PG driver returns.
+        raw = (
+            await session.execute(
+                text("SELECT id FROM conversations WHERE id = :id"),
+                {"id": conv_id},
+            )
+        ).scalar_one()
+
+    coerced = coerce_conversation_uuid(raw)
+    assert coerced is not None
+    assert type(coerced) is uuid.UUID
+    # Driver may return a subclass; exact-type check must not gate ensure.
+    if type(raw) is not uuid.UUID:
+        assert isinstance(raw, uuid.UUID)
+
+    transport = _FakeTransport()
+    transport.responses.append(_lead_created(9001))
+    service = TechnicalDealProjectionService(
+        session_factory=session_factory,
+        config=_deal_config(),
+        key_provider=_provider(),
+        transport=transport,
+        worker_id="pg-uuid",
+    )
+    result = await service.ensure_technical_deal(raw)  # type: ignore[arg-type]
+    assert result.outcome is TechnicalDealOutcome.ENSURED
+    assert result.external_deal_id == "9001"
+    assert result.error_code != "CONVERSATION_ID_INVALID"
+    assert len([c for c in transport.calls if c.method == "POST"]) == 1
 
 
 @pytest.mark.asyncio

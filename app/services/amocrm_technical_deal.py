@@ -46,11 +46,38 @@ __all__ = (
     "TechnicalDealEnsureResult",
     "TechnicalDealOutcome",
     "TechnicalDealProjectionService",
+    "coerce_conversation_uuid",
     "load_deal_create_config_fail_closed",
 )
 
 _REFRESH_SKEW = timedelta(seconds=60)
 _T = TypeVar("_T")
+
+
+def coerce_conversation_uuid(value: object) -> uuid.UUID | None:
+    """Normalize a conversation id from ORM/asyncpg without guessing.
+
+    Accepts ``uuid.UUID`` and UUID subclasses returned by PostgreSQL drivers
+    (asyncpg). Rejects ints, bools, arbitrary objects, and malformed strings.
+    """
+
+    if type(value) is uuid.UUID:
+        return value
+    if isinstance(value, uuid.UUID):
+        # asyncpg.pgproto.UUID subclasses uuid.UUID; normalize to stdlib UUID.
+        # Hostile/broken subclasses must fail closed, not leak exceptions.
+        try:
+            return uuid.UUID(int=value.int)
+        except Exception:
+            return None
+    if type(value) is str:
+        if not value or any(ch.isspace() for ch in value):
+            return None
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
 
 
 class TechnicalDealOutcome(str, Enum):
@@ -117,11 +144,13 @@ class TechnicalDealProjectionService:
         self,
         conversation_id: uuid.UUID,
     ) -> TechnicalDealEnsureResult:
-        if type(conversation_id) is not uuid.UUID:
+        normalized_id = coerce_conversation_uuid(conversation_id)
+        if normalized_id is None:
             return TechnicalDealEnsureResult(
                 outcome=TechnicalDealOutcome.PERMANENT_ERROR,
                 error_code="CONVERSATION_ID_INVALID",
             )
+        conversation_id = normalized_id
         if not self._config.enabled:
             return TechnicalDealEnsureResult(outcome=TechnicalDealOutcome.DISABLED)
         try:

@@ -19,6 +19,7 @@ from app.core.s2s_http_transport import S2sHttpRequest, S2sHttpResponse
 from app.services.amocrm_technical_deal import (
     TechnicalDealOutcome,
     TechnicalDealProjectionService,
+    coerce_conversation_uuid,
 )
 from tests.docker_runtime_allowlist import (
     AMO01B2_DOCKER_RUNTIME_PATHS,
@@ -86,6 +87,126 @@ async def test_disabled_ensure_zero_http() -> None:
         transport=transport,
     )
     result = await service.ensure_technical_deal(uuid4())
+    assert result.outcome is TechnicalDealOutcome.DISABLED
+    assert transport.calls == []
+
+
+def test_coerce_conversation_uuid_accepts_stdlib_and_subclass() -> None:
+    import uuid as uuid_mod
+
+    std = uuid_mod.uuid4()
+    assert coerce_conversation_uuid(std) == std
+    assert type(coerce_conversation_uuid(std)) is uuid_mod.UUID
+
+    class _DriverUuid(uuid_mod.UUID):
+        """Stand-in for asyncpg.pgproto.UUID (subclass, not exact type)."""
+
+    driver = _DriverUuid(str(std))
+    assert type(driver) is not uuid_mod.UUID
+    coerced = coerce_conversation_uuid(driver)
+    assert coerced == std
+    assert type(coerced) is uuid_mod.UUID
+    assert coerce_conversation_uuid(str(std)) == std
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        "",
+        "not-a-uuid",
+        " 11111111-1111-1111-1111-111111111111",
+        12345,
+        True,
+        False,
+        b"11111111-1111-1111-1111-111111111111",
+        {"id": "x"},
+        object(),
+    ],
+)
+def test_coerce_conversation_uuid_rejects_malformed(bad: object) -> None:
+    assert coerce_conversation_uuid(bad) is None
+
+
+@pytest.mark.asyncio
+async def test_hostile_uuid_subclass_int_raises_fail_closed_zero_http() -> None:
+    import uuid as uuid_mod
+
+    class _HostileUuid(uuid_mod.UUID):
+        def __getattribute__(self, name: str) -> object:
+            if name == "int":
+                raise RuntimeError("hostile-int")
+            return super().__getattribute__(name)
+
+    hostile = _HostileUuid("00000000-0000-0000-0000-000000000000")
+    assert isinstance(hostile, uuid_mod.UUID)
+    assert type(hostile) is not uuid_mod.UUID
+    assert coerce_conversation_uuid(hostile) is None
+
+    transport = _FakeTransport()
+    service = TechnicalDealProjectionService(
+        session_factory=object(),  # type: ignore[arg-type]
+        config=AmoCrmDealCreateConfig(
+            enabled=True,
+            pipeline_id=1,
+            status_id=2,
+            rest=AmoCrmCrmRestConfig(
+                enabled=True,
+                client_id="c",
+                client_secret="secret12",
+                api_base_url="https://example.amocrm.ru",
+            ),
+        ),
+        transport=transport,
+    )
+    result = await service.ensure_technical_deal(hostile)
+    assert result.outcome is TechnicalDealOutcome.PERMANENT_ERROR
+    assert result.error_code == "CONVERSATION_ID_INVALID"
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad",
+    [None, "", "not-a-uuid", 12345, True, object()],
+)
+async def test_ensure_rejects_invalid_conversation_id_fail_closed(bad: object) -> None:
+    transport = _FakeTransport()
+    service = TechnicalDealProjectionService(
+        session_factory=object(),  # type: ignore[arg-type]
+        config=AmoCrmDealCreateConfig(
+            enabled=True,
+            pipeline_id=1,
+            status_id=2,
+            rest=AmoCrmCrmRestConfig(
+                enabled=True,
+                client_id="c",
+                client_secret="secret12",
+                api_base_url="https://example.amocrm.ru",
+            ),
+        ),
+        transport=transport,
+    )
+    result = await service.ensure_technical_deal(bad)  # type: ignore[arg-type]
+    assert result.outcome is TechnicalDealOutcome.PERMANENT_ERROR
+    assert result.error_code == "CONVERSATION_ID_INVALID"
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_accepts_uuid_subclass_without_crm_when_disabled() -> None:
+    import uuid as uuid_mod
+
+    class _DriverUuid(uuid_mod.UUID):
+        pass
+
+    transport = _FakeTransport()
+    service = TechnicalDealProjectionService(
+        session_factory=object(),  # type: ignore[arg-type]
+        config=AmoCrmDealCreateConfig(enabled=False),
+        transport=transport,
+    )
+    result = await service.ensure_technical_deal(_DriverUuid(str(uuid4())))
     assert result.outcome is TechnicalDealOutcome.DISABLED
     assert transport.calls == []
 

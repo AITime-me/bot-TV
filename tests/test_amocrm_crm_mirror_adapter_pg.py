@@ -445,9 +445,10 @@ async def test_stale_lease_after_claim_zero_crm_http(
 async def test_mid_flight_reclaim_crm_ran_stale_cannot_complete_one_deal(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """CRM may run after fence; mid-flight reclaim blocks stale complete;
+    """CRM may run after fence; mid-flight RECLAIM blocks stale complete;
 
     second worker converges via GET on the one ACTIVE deal (no second POST).
+    Expiry alone is not enough: reclaim must supersede lease_token/version.
     """
 
     await _seed_oauth(session_factory)
@@ -464,8 +465,9 @@ async def test_mid_flight_reclaim_crm_ran_stale_cannot_complete_one_deal(
     assert claim is not None
 
     original_mirror = first.adapter.mirror  # type: ignore[attr-defined]
+    reclaimed_box: dict[str, object] = {}
 
-    async def _mirror_expire_lease(request):  # type: ignore[no-untyped-def]
+    async def _mirror_expire_and_reclaim(request):  # type: ignore[no-untyped-def]
         result = await original_mirror(request)
         async with session_scope(session_factory) as session:
             expired = await db_now(session) - timedelta(seconds=5)
@@ -474,15 +476,24 @@ async def test_mid_flight_reclaim_crm_ran_stale_cannot_complete_one_deal(
                 .where(AmoCrmMirrorJob.id == claim.job_id)
                 .values(lease_until=expired)
             )
+        second_worker = _worker(session_factory, transport, worker_id="crm-mid-b")
+        reclaimed = await second_worker.claim_one()
+        assert reclaimed is not None
+        assert reclaimed.job_id == claim.job_id
+        assert reclaimed.lease_token != claim.lease_token
+        assert reclaimed.lease_version == claim.lease_version + 1
+        reclaimed_box["claim"] = reclaimed
+        reclaimed_box["worker"] = second_worker
         return result
 
-    first.adapter.mirror = _mirror_expire_lease  # type: ignore[method-assign]
+    first.adapter.mirror = _mirror_expire_and_reclaim  # type: ignore[method-assign]
 
     with pytest.raises(StaleAmoCrmMirrorLeaseError):
         await first.process_claimed(claim)
 
     assert len(_lead_posts(transport)) == 1
     assert len(first.adapter.calls) == 1  # type: ignore[attr-defined]
+    assert "claim" in reclaimed_box
 
     async with session_scope(session_factory) as session:
         open_row = await entity_links.get_open(
@@ -497,11 +508,9 @@ async def test_mid_flight_reclaim_crm_ran_stale_cannot_complete_one_deal(
         assert job is not None
         assert job.status == AmoCrmMirrorStatus.PROCESSING.value
 
-    second = _worker(session_factory, transport, worker_id="crm-mid-b")
-    reclaimed = await second.claim_one()
-    assert reclaimed is not None
-    assert reclaimed.job_id == claim.job_id
-    result = await second.process_claimed(reclaimed)
+    second = reclaimed_box["worker"]
+    reclaimed = reclaimed_box["claim"]
+    result = await second.process_claimed(reclaimed)  # type: ignore[attr-defined]
     assert result.status == AmoCrmMirrorStatus.MIRRORED.value
     assert len(_lead_posts(transport)) == 1
     assert any("/api/v4/leads/4242" in c.url for c in transport.calls)
