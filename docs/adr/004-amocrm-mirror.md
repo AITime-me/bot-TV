@@ -227,6 +227,10 @@ message transport, and any change to the source of truth.
 5. Reverse flow design, if it is ever needed.
 6. Operator resolution of `RECONCILE_REQUIRED` entity links after an ambiguous
    create (5xx / transport / uncertain POST). Blind resend is forbidden.
+   **AMO-01B2-OPS:** offline CLI `python -B -m app.amocrm_crm_ops` supports
+   OAuth bootstrap (insert-if-absent), fenced reseed (lease + rotate, no remote
+   OAuth), and `resolve-reconcile` (CRM GET validate confirmed deal id, then
+   atomic `RECONCILE_REQUIRED → ACTIVE`). Zero lead-create POST on the ops path.
 
 ## AMO-01B2 amendment: CRM REST entity convergence
 
@@ -272,6 +276,26 @@ post-200 local persist fails closed with
 silent “healthy” auth state. Residual window: crash between remote 200 and the
 first durable local write can still require operator re-seed; that dual-write
 gap is not claimed eliminated.
+
+### AMO-01B2-OPS (offline operator CLI)
+
+`python -B -m app.amocrm_crm_ops` is the only operator surface for:
+
+- **bootstrap** — encrypt access/refresh from getpass/stdin; insert if the
+  connection scope is absent; refuse without overwrite when a row exists.
+  `AMOCRM_CRM_CONNECTION_SCOPE` is resolved independently of
+  `AMOCRM_CRM_REST_ENABLED` (disabled CRM must not force `default` when an
+  explicit valid scope is set; invalid scope fails closed). CLI reports the
+  selected scope safely (identifier only, never tokens).
+- **reseed** — require an existing row; `claim_refresh_lease` then
+  `rotate_tokens_with_lease`; refuse on stale/held lease; no remote OAuth
+  HTTP and no blind `upsert_token_pair`. Same independent scope resolution.
+- **resolve-reconcile** — CLI may carry only conversation UUID + confirmed
+  numeric deal id; require open `TECHNICAL_DEAL` in `RECONCILE_REQUIRED`;
+  validate via CRM GET (401 may refresh once under the existing fence);
+  on GET success atomically activate; on any other GET outcome leave
+  `RECONCILE_REQUIRED`. Never POSTs `/api/v4/leads`. CRM REST remains
+  default-off. Tokens never appear in argv, logs, or plaintext DB.
 
 ## Consequences
 

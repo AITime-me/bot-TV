@@ -124,6 +124,75 @@ def _encrypt_pair(
     return active.key_id, access_ct, refresh_ct
 
 
+async def insert_token_pair_if_absent(
+    session: AsyncSession,
+    *,
+    access_token: str,
+    refresh_token: str,
+    key_provider: AmoCrmOauthKeyProvider,
+    connection_scope: str = DEFAULT_CONNECTION_SCOPE,
+    access_expires_at: datetime | None = None,
+    now: datetime | None = None,
+) -> tuple[AmocrmCrmOauthToken, bool]:
+    """Encrypt and insert a token pair only when the scope row is absent.
+
+    Returns ``(row, inserted)``. Existing scope => ``inserted=False`` and no
+    overwrite (operator bootstrap refuse path). Never clears a live refresh lease.
+    """
+
+    if type(access_token) is not str or not access_token:
+        raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_VALUE_INVALID")
+    if type(refresh_token) is not str or not refresh_token:
+        raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_VALUE_INVALID")
+    if any(ch.isspace() for ch in access_token) or any(
+        ch.isspace() for ch in refresh_token
+    ):
+        raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_VALUE_INVALID")
+
+    moment = await resolve_moment(session, now)
+    key_id, access_ct, refresh_ct = _encrypt_pair(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        connection_scope=connection_scope,
+        key_provider=key_provider,
+    )
+    new_id = uuid.uuid4()
+    stmt = (
+        insert(AmocrmCrmOauthToken)
+        .values(
+            id=new_id,
+            connection_scope=connection_scope,
+            key_id=key_id,
+            crypto_version=CRYPTO_VERSION_V1,
+            access_nonce=access_ct.nonce,
+            access_ciphertext=access_ct.ciphertext,
+            refresh_nonce=refresh_ct.nonce,
+            refresh_ciphertext=refresh_ct.ciphertext,
+            access_expires_at=access_expires_at,
+            lease_owner=None,
+            lease_token=None,
+            lease_version=0,
+            lease_until=None,
+            created_at=moment,
+            updated_at=moment,
+        )
+        .on_conflict_do_nothing(
+            constraint="uq_amocrm_crm_oauth_tokens_connection_scope"
+        )
+        .returning(AmocrmCrmOauthToken.id)
+    )
+    row_id = await session.scalar(stmt)
+    if row_id is None:
+        existing = await get_by_scope(session, connection_scope=connection_scope)
+        if existing is None:
+            raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_STORE_FAILED")
+        return existing, False
+    row = await session.get(AmocrmCrmOauthToken, row_id)
+    if row is None:
+        raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_STORE_FAILED")
+    return row, True
+
+
 async def upsert_token_pair(
     session: AsyncSession,
     *,

@@ -15,6 +15,7 @@ __all__ = (
     "AmoCrmCrmRestConfig",
     "AmoCrmCrmRestConfigError",
     "DEFAULT_AMOCRM_CRM_API_BASE_URL",
+    "connection_scope_from_env",
     "load_crm_rest_config_fail_closed",
 )
 
@@ -55,6 +56,25 @@ def _require_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def connection_scope_from_env(
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve ``AMOCRM_CRM_CONNECTION_SCOPE`` independently of REST enabled.
+
+    Missing → ``default``. Invalid explicit value fails closed
+    (``AMOCRM_CRM_CONNECTION_SCOPE_INVALID``).
+    """
+
+    source = os.environ if environ is None else environ
+    scope_raw = source.get("AMOCRM_CRM_CONNECTION_SCOPE", "default")
+    return _require_nonempty_token(
+        scope_raw,
+        code="AMOCRM_CRM_CONNECTION_SCOPE_INVALID",
+        min_len=1,
+        max_len=64,
+    )
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class AmoCrmCrmRestConfig:
     enabled: bool = False
@@ -84,9 +104,10 @@ class AmoCrmCrmRestConfig:
         environ: Mapping[str, str] | None = None,
     ) -> AmoCrmCrmRestConfig:
         source = os.environ if environ is None else environ
+        connection_scope = connection_scope_from_env(source)
         enabled_raw = source.get("AMOCRM_CRM_REST_ENABLED", "false")
         if enabled_raw == "false":
-            return cls(enabled=False)
+            return cls(enabled=False, connection_scope=connection_scope)
         if enabled_raw != "true":
             raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REST_CONFIG_INVALID") from None
 
@@ -115,13 +136,6 @@ class AmoCrmCrmRestConfig:
             source.get("AMOCRM_BASE_URL", DEFAULT_AMOCRM_CRM_API_BASE_URL),
         )
         api_base_url = _require_base_url(base_raw)
-        scope_raw = source.get("AMOCRM_CRM_CONNECTION_SCOPE", "default")
-        connection_scope = _require_nonempty_token(
-            scope_raw,
-            code="AMOCRM_CRM_CONNECTION_SCOPE_INVALID",
-            min_len=1,
-            max_len=64,
-        )
         return cls(
             enabled=True,
             client_id=client_id,
@@ -134,7 +148,16 @@ class AmoCrmCrmRestConfig:
 def load_crm_rest_config_fail_closed(
     environ: Mapping[str, str] | None = None,
 ) -> AmoCrmCrmRestConfig:
+    source = os.environ if environ is None else environ
     try:
         return AmoCrmCrmRestConfig.from_env(environ)
-    except AmoCrmCrmRestConfigError:
-        return AmoCrmCrmRestConfig(enabled=False)
+    except AmoCrmCrmRestConfigError as exc:
+        code = str(exc.args[0]) if exc.args else ""
+        # Invalid explicit scope must not be silently rewritten to default.
+        if code == "AMOCRM_CRM_CONNECTION_SCOPE_INVALID":
+            raise
+        try:
+            scope = connection_scope_from_env(source)
+        except AmoCrmCrmRestConfigError:
+            scope = "default"
+        return AmoCrmCrmRestConfig(enabled=False, connection_scope=scope)
