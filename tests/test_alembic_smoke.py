@@ -14,6 +14,8 @@ from app.db.base import Base
 from app.models import (
     AmoCrmMirrorJob,
     AmocrmChatBinding,
+    AmocrmCrmOauthToken,
+    AmocrmEntityLink,
     AmocrmMessageProjection,
     AttachmentSpoolObject,
     CanonicalIdentity,
@@ -100,6 +102,53 @@ _EXPECTED_CHECKS_22 = {
         "integration_conversation_id IS NULL OR "
         "char_length(integration_conversation_id) >= 1"
     ),
+}
+
+_EXPECTED_CHECKS_23 = {
+    "ck_amocrm_crm_oauth_tokens_scope_len": (
+        "char_length(connection_scope) BETWEEN 1 AND 64"
+    ),
+    "ck_amocrm_crm_oauth_tokens_crypto_version": "crypto_version = 1",
+    "ck_amocrm_crm_oauth_tokens_access_nonce_len": (
+        "octet_length(access_nonce) = 12"
+    ),
+    "ck_amocrm_crm_oauth_tokens_refresh_nonce_len": (
+        "octet_length(refresh_nonce) = 12"
+    ),
+    "ck_amocrm_crm_oauth_tokens_access_ct_len": (
+        "octet_length(access_ciphertext) >= 16"
+    ),
+    "ck_amocrm_crm_oauth_tokens_refresh_ct_len": (
+        "octet_length(refresh_ciphertext) >= 16"
+    ),
+    "ck_amocrm_crm_oauth_tokens_key_id": "key_id ~ '^[A-Z0-9_]{1,64}$'",
+    "ck_amocrm_crm_oauth_tokens_lease_version_nonnegative": "lease_version >= 0",
+}
+
+_EXPECTED_UNIQUES_23 = {
+    "uq_amocrm_crm_oauth_tokens_connection_scope",
+}
+
+_EXPECTED_CHECKS_24 = {
+    "ck_amocrm_entity_links_entity_kind": (
+        "entity_kind IN ('CONTACT', 'TECHNICAL_DEAL')"
+    ),
+}
+
+_EXPECTED_CHECKS_25 = {
+    "ck_amocrm_entity_links_status": (
+        "status IN ('ACTIVE', 'REVOKED', 'RESERVED', 'RECONCILE_REQUIRED')"
+    ),
+    "ck_amocrm_entity_links_external_id_state": (
+        "("
+        "status IN ('RESERVED', 'RECONCILE_REQUIRED') "
+        "AND (external_id IS NULL OR char_length(external_id) >= 1)"
+        ") OR ("
+        "status IN ('ACTIVE', 'REVOKED') "
+        "AND external_id IS NOT NULL AND char_length(external_id) >= 1"
+        ")"
+    ),
+    "ck_amocrm_entity_links_lease_version_nonnegative": "lease_version >= 0",
 }
 
 _EXPECTED_CHECKS_01B = {
@@ -233,6 +282,8 @@ def test_alembic_metadata_imports() -> None:
     assert ExternalIdentityLink.__tablename__ == "external_identity_links"
     assert AmocrmChatBinding.__tablename__ == "amocrm_chat_bindings"
     assert AmocrmMessageProjection.__tablename__ == "amocrm_message_projections"
+    assert AmocrmCrmOauthToken.__tablename__ == "amocrm_crm_oauth_tokens"
+    assert AmocrmEntityLink.__tablename__ == "amocrm_entity_links"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -252,6 +303,8 @@ def test_alembic_metadata_imports() -> None:
         "external_identity_links",
         "amocrm_chat_bindings",
         "amocrm_message_projections",
+        "amocrm_crm_oauth_tokens",
+        "amocrm_entity_links",
     }
 
 
@@ -322,6 +375,21 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260812_22_amo_chat_integ_cid"].down_revision
         == "20260812_21_amocrm_chat_proj"
     )
+    assert "20260813_23_amocrm_crm_oauth" in by_id
+    assert (
+        by_id["20260813_23_amocrm_crm_oauth"].down_revision
+        == "20260812_22_amo_chat_integ_cid"
+    )
+    assert "20260813_24_amo_entity_links" in by_id
+    assert (
+        by_id["20260813_24_amo_entity_links"].down_revision
+        == "20260813_23_amocrm_crm_oauth"
+    )
+    assert "20260813_25_amo_deal_reserve" in by_id
+    assert (
+        by_id["20260813_25_amo_deal_reserve"].down_revision
+        == "20260813_24_amo_entity_links"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -338,6 +406,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260812_20_amocrm_mgr_ingress",
         "20260812_21_amocrm_chat_proj",
         "20260812_22_amo_chat_integ_cid",
+        "20260813_23_amocrm_crm_oauth",
+        "20260813_24_amo_entity_links",
+        "20260813_25_amo_deal_reserve",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -365,7 +436,13 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260812_21_amocrm_chat_proj") <= 32
     assert "20260812_22_amo_chat_integ_cid" in revision_ids
     assert len("20260812_22_amo_chat_integ_cid") <= 32
-    assert heads == ["20260812_22_amo_chat_integ_cid"]
+    assert "20260813_23_amocrm_crm_oauth" in revision_ids
+    assert len("20260813_23_amocrm_crm_oauth") <= 32
+    assert "20260813_24_amo_entity_links" in revision_ids
+    assert len("20260813_24_amo_entity_links") <= 32
+    assert "20260813_25_amo_deal_reserve" in revision_ids
+    assert len("20260813_25_amo_deal_reserve") <= 32
+    assert heads == ["20260813_25_amo_deal_reserve"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -444,6 +521,15 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_22 = (
         root / "alembic" / "versions" / "20260812_22_amo_chat_integ_cid.py"
     ).read_text(encoding="utf-8")
+    migration_23 = (
+        root / "alembic" / "versions" / "20260813_23_amocrm_crm_oauth.py"
+    ).read_text(encoding="utf-8")
+    migration_24 = (
+        root / "alembic" / "versions" / "20260813_24_amo_entity_links.py"
+    ).read_text(encoding="utf-8")
+    migration_25 = (
+        root / "alembic" / "versions" / "20260813_25_amo_deal_reserve.py"
+    ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
     model_uniques: set[str] = set()
@@ -471,6 +557,10 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert set(_EXPECTED_CHECKS_21) <= set(model_checks)
     assert _EXPECTED_UNIQUES_21 <= model_uniques
     assert set(_EXPECTED_CHECKS_22) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_23) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_23 <= model_uniques
+    assert set(_EXPECTED_CHECKS_24) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_25) <= set(model_checks)
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -589,6 +679,43 @@ def test_model_migration_check_and_unique_parity() -> None:
         ):
             assert token in migration_22
     assert "integration_conversation_id" in migration_22
+
+    for name, sql in _EXPECTED_CHECKS_23.items():
+        assert name in migration_23
+        assert model_checks[name] == sql
+        if "'" in sql:
+            for token in re.findall(r"'[^']*'", sql):
+                assert token in migration_23, f"{name} missing {token}"
+        else:
+            assert sql in migration_23
+    for name in _EXPECTED_UNIQUES_23:
+        assert name in migration_23
+    assert "amocrm_crm_oauth_tokens" in migration_23
+    for forbidden in ("AMOCRM_CHAT", "channel_secret", "body_text"):
+        assert forbidden not in migration_23
+
+    for name, sql in _EXPECTED_CHECKS_24.items():
+        assert name in migration_24
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_24, f"{name} missing {token}"
+    assert "amocrm_entity_links" in migration_24
+    assert "uq_amocrm_entity_links_active_conversation_kind" in migration_24
+    assert "uq_amocrm_entity_links_active_kind_external" in migration_24
+    for forbidden in ("create_contact", "create_deal", "booking"):
+        assert forbidden not in migration_24
+
+    for name, sql in _EXPECTED_CHECKS_25.items():
+        assert name in migration_25
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_25, f"{name} missing {token}"
+        if "'" not in sql:
+            assert sql in migration_25
+    assert "RESERVED" in migration_25
+    assert "RECONCILE_REQUIRED" in migration_25
+    assert "create_submitted_at" in migration_25
+    assert "uq_amocrm_entity_links_open_conversation_kind" in migration_25
 
     for complex_check in (
         "ck_conversations_handoff_consistency",

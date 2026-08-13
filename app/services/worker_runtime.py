@@ -28,7 +28,8 @@ from app.repositories.amocrm_message_projections import StaleAmocrmProjectionLea
 from app.repositories.ingress import StaleIngressLeaseError
 from app.repositories.outbound import StaleOutboundLeaseError
 from app.repositories.reply_plans import StaleReplyPlanLeaseError
-from app.services.amocrm_mirror import AmoCrmMirrorWorker
+from app.services.amocrm_crm_mirror_adapter import CrmRestMirrorAdapter
+from app.services.amocrm_mirror import AmoCrmMirrorRejected, AmoCrmMirrorWorker
 from app.services.amocrm_chat_projection import AmocrmChatProjectionWorker
 from app.services.booking_flow import BookingFlowService
 from app.services.handoff_expiry import HandoffExpiryWorker
@@ -291,9 +292,14 @@ def build_default_loop_specs(
         worker_id=_lease_worker_id(worker_id, "outbound"),
         arbiter=arbiter,
     )
+    mirror_lease_owner = _lease_worker_id(worker_id, "amocrm")
     mirror = AmoCrmMirrorWorker(
         session_factory,
-        worker_id=_lease_worker_id(worker_id, "amocrm"),
+        worker_id=mirror_lease_owner,
+        adapter=CrmRestMirrorAdapter(
+            session_factory,
+            worker_id=mirror_lease_owner,
+        ),
     )
     chat_projection = AmocrmChatProjectionWorker(
         session_factory,
@@ -345,6 +351,9 @@ def build_default_loop_specs(
             try:
                 await mirror.process_claimed(claim)
             except StaleAmoCrmMirrorLeaseError:
+                continue
+            except AmoCrmMirrorRejected:
+                # Transient/permanent CRM outcomes already persisted on the job.
                 continue
         for _ in range(settings.worker_batch_size):
             claim = await chat_projection.claim_one()

@@ -30,6 +30,7 @@ from app.repositories.amocrm_mirror import (
     StaleAmoCrmMirrorLeaseError,
 )
 from app.services.amocrm_adapter import (
+    AmoCrmMirrorAdapter,
     AmoCrmMirrorOutcome,
     AmoCrmMirrorRequest,
     NoopAmoCrmMirrorAdapter,
@@ -179,11 +180,12 @@ async def enqueue_outbound_delivered(
 
 
 class AmoCrmMirrorWorker:
-    """Drains amocrm_mirror_jobs through the in-process no-op sink.
+    """Drains amocrm_mirror_jobs through a CRM entity-convergence adapter.
 
     Each claimed job is revalidated against live dialog state under the
-    conversation lock before the sink is called, so an outdated event ends as
-    terminal SKIPPED instead of MIRRORED.
+    conversation lock *before* the adapter runs.
+    MIRRORED means required amoCRM entity state for this mirror job converged successfully
+    — not that message content was copied to CRM.
     """
 
     def __init__(
@@ -191,7 +193,7 @@ class AmoCrmMirrorWorker:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         worker_id: str,
-        adapter: NoopAmoCrmMirrorAdapter | None = None,
+        adapter: AmoCrmMirrorAdapter | None = None,
         lease_seconds: int = mirror_repo.DEFAULT_LEASE_SECONDS,
         retry_delay_seconds: int = mirror_repo.DEFAULT_RETRY_DELAY_SECONDS,
     ) -> None:
@@ -202,7 +204,7 @@ class AmoCrmMirrorWorker:
         self._retry_delay_seconds = retry_delay_seconds
 
     @property
-    def adapter(self) -> NoopAmoCrmMirrorAdapter:
+    def adapter(self) -> AmoCrmMirrorAdapter:
         return self._adapter
 
     async def claim_one(
@@ -224,11 +226,24 @@ class AmoCrmMirrorWorker:
         *,
         now: datetime | None = None,
     ) -> AmoCrmMirrorProcessResult:
+        request = AmoCrmMirrorRequest(
+            job_id=str(claim.job_id),
+            job_type=claim.job_type,
+            subject_kind=claim.subject_kind,
+            subject_id=str(claim.subject_id),
+            conversation_id=str(claim.conversation_id),
+            context_version=claim.context_version,
+            correlation_id=str(claim.correlation_id),
+            _payload_schema=str(claim.payload_json.get("schema", "unknown")),
+        )
         try:
             async with session_scope(self._session_factory) as session:
                 # Lock order: conversations first, then the mirror job row.
-                # Lease fencing is checked under that lock *before* the sink,
-                # so a reclaimed token never produces an adapter side-effect.
+                # Fence is required *before* any CRM side effect. The DB lock is
+                # then released for the adapter call: mirror lease may be
+                # reclaimed mid-flight while CRM HTTP runs. Stale completion is
+                # still fenced by lease_token/version; deal reservation/fence
+                # preserves at-most-one TECHNICAL_DEAL create semantics.
                 conversation = await conversation_repo.get_by_id_for_update(
                     session,
                     conversation_id=claim.conversation_id,
@@ -257,25 +272,17 @@ class AmoCrmMirrorWorker:
                         skip_reason=job.skip_reason,
                     )
 
-                result = self._adapter.mirror(
-                    AmoCrmMirrorRequest(
-                        job_id=str(claim.job_id),
-                        job_type=claim.job_type,
-                        subject_kind=claim.subject_kind,
-                        subject_id=str(claim.subject_id),
-                        conversation_id=str(claim.conversation_id),
-                        context_version=claim.context_version,
-                        correlation_id=str(claim.correlation_id),
-                        _payload_schema=str(
-                            claim.payload_json.get("schema", "unknown")
-                        ),
-                    )
+            result = await self._adapter.mirror(request)
+            if result.outcome is not AmoCrmMirrorOutcome.SUCCESS:
+                raise AmoCrmMirrorRejected(
+                    result.error_code or "AMOCRM_MIRROR_REJECTED"
                 )
-                if result.outcome is not AmoCrmMirrorOutcome.SUCCESS:
-                    raise AmoCrmMirrorRejected(
-                        result.error_code or "AMOCRM_MIRROR_REJECTED"
-                    )
 
+            async with session_scope(self._session_factory) as session:
+                await conversation_repo.get_by_id_for_update(
+                    session,
+                    conversation_id=claim.conversation_id,
+                )
                 job = await mirror_repo.complete_with_lease(
                     session,
                     job_id=claim.job_id,

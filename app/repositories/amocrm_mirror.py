@@ -362,7 +362,7 @@ async def complete_with_lease(
     lease_version: int,
     now: datetime | None = None,
 ) -> AmoCrmMirrorJob:
-    """PROCESSING → MIRRORED: accepted by the local no-op sink only."""
+    """PROCESSING → MIRRORED: required amoCRM entity state converged."""
     moment = await resolve_moment(session, now)
     return await _terminate_with_lease(
         session,

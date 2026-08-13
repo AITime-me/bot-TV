@@ -327,7 +327,8 @@ async def test_enqueue_refuses_invalid_mirror_key(mirror_key: str) -> None:
     session.scalar.assert_not_awaited()
 
 
-def test_noop_adapter_records_calls_and_has_no_external_effect() -> None:
+@pytest.mark.asyncio
+async def test_noop_adapter_records_calls_and_has_no_external_effect() -> None:
     adapter = NoopAmoCrmMirrorAdapter()
     request = AmoCrmMirrorRequest(
         job_id=str(uuid.uuid4()),
@@ -339,7 +340,7 @@ def test_noop_adapter_records_calls_and_has_no_external_effect() -> None:
         correlation_id=str(uuid.uuid4()),
         _payload_schema=MIRROR_PAYLOAD_SCHEMA,
     )
-    result = adapter.mirror(request)
+    result = await adapter.mirror(request)
     assert result.outcome is AmoCrmMirrorOutcome.SUCCESS
     assert result.error_code is None
     assert adapter.calls == [request]
@@ -347,6 +348,7 @@ def test_noop_adapter_records_calls_and_has_no_external_effect() -> None:
     assert MIRROR_PAYLOAD_SCHEMA not in repr(request)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("forced", "error_code"),
     [
@@ -354,12 +356,12 @@ def test_noop_adapter_records_calls_and_has_no_external_effect() -> None:
         (AmoCrmMirrorOutcome.PERMANENT_ERROR, "AMOCRM_MIRROR_PERMANENT"),
     ],
 )
-def test_noop_adapter_failure_outcomes(
+async def test_noop_adapter_failure_outcomes(
     forced: AmoCrmMirrorOutcome,
     error_code: str,
 ) -> None:
     adapter = NoopAmoCrmMirrorAdapter(forced_outcome=forced)
-    result = adapter.mirror(
+    result = await adapter.mirror(
         AmoCrmMirrorRequest(
             job_id=str(uuid.uuid4()),
             job_type=AmoCrmMirrorJobType.OUTBOUND_DELIVERED_META.value,
