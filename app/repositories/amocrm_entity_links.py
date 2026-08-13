@@ -194,6 +194,78 @@ async def rebind_active(
     return row
 
 
+async def activate_reconcile_required(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    external_id: str,
+    now: datetime | None = None,
+) -> AmocrmEntityLink:
+    """RECONCILE_REQUIRED → ACTIVE with a confirmed external deal id.
+
+    Caller must have already validated the deal via CRM GET. Never creates.
+    Conflicting ACTIVE external id fails closed.
+    """
+
+    if type(external_id) is not str or not external_id.strip():
+        raise ValueError("EXTERNAL_ID_INVALID")
+    external_id = external_id.strip()
+    if not external_id.isdigit():
+        raise ValueError("EXTERNAL_ID_INVALID")
+
+    moment = await resolve_moment(session, now)
+    open_row = await get_open(
+        session,
+        conversation_id=conversation_id,
+        entity_kind=AmocrmEntityKind.TECHNICAL_DEAL,
+    )
+    if open_row is None:
+        raise AmocrmEntityLinkConflictError("ENTITY_LINK_RECONCILE_MISSING")
+    if open_row.status != AmocrmEntityLinkStatus.RECONCILE_REQUIRED.value:
+        raise AmocrmEntityLinkConflictError("ENTITY_LINK_NOT_RECONCILE_REQUIRED")
+
+    conflict = await session.scalar(
+        select(AmocrmEntityLink).where(
+            AmocrmEntityLink.entity_kind == AmocrmEntityKind.TECHNICAL_DEAL.value,
+            AmocrmEntityLink.status == AmocrmEntityLinkStatus.ACTIVE.value,
+            AmocrmEntityLink.external_id == external_id,
+            AmocrmEntityLink.conversation_id != conversation_id,
+        )
+    )
+    if conflict is not None:
+        raise AmocrmEntityLinkConflictError("ENTITY_LINK_EXTERNAL_ACTIVE_CONFLICT")
+
+    stmt = (
+        update(AmocrmEntityLink)
+        .where(
+            AmocrmEntityLink.id == open_row.id,
+            AmocrmEntityLink.status == AmocrmEntityLinkStatus.RECONCILE_REQUIRED.value,
+            AmocrmEntityLink.conversation_id == conversation_id,
+            AmocrmEntityLink.entity_kind == AmocrmEntityKind.TECHNICAL_DEAL.value,
+        )
+        .values(
+            status=AmocrmEntityLinkStatus.ACTIVE.value,
+            external_id=external_id,
+            lease_owner=None,
+            lease_token=None,
+            lease_until=None,
+            create_submitted_at=None,
+            updated_at=moment,
+        )
+        .returning(AmocrmEntityLink.id)
+    )
+    try:
+        row_id = await session.scalar(stmt)
+    except IntegrityError as exc:
+        raise AmocrmEntityLinkConflictError("ENTITY_LINK_EXTERNAL_ACTIVE_CONFLICT") from exc
+    if row_id is None:
+        raise AmocrmEntityLinkConflictError("ENTITY_LINK_NOT_RECONCILE_REQUIRED")
+    row = await session.get(AmocrmEntityLink, row_id)
+    if row is None:
+        raise AmocrmEntityLinkConflictError("ENTITY_LINK_LOOKUP_FAILED")
+    return row
+
+
 async def claim_deal_create_reservation(
     session: AsyncSession,
     *,

@@ -82,6 +82,54 @@ class _FakeTransport:
 def test_crm_rest_default_off() -> None:
     config = AmoCrmCrmRestConfig.from_env({})
     assert config.enabled is False
+    assert config.connection_scope == "default"
+
+
+def test_crm_rest_disabled_preserves_explicit_connection_scope() -> None:
+    config = AmoCrmCrmRestConfig.from_env(
+        {
+            "AMOCRM_CRM_REST_ENABLED": "false",
+            "AMOCRM_CRM_CONNECTION_SCOPE": "prod-scope",
+        }
+    )
+    assert config.enabled is False
+    assert config.connection_scope == "prod-scope"
+    closed = load_crm_rest_config_fail_closed(
+        {
+            "AMOCRM_CRM_REST_ENABLED": "false",
+            "AMOCRM_CRM_CONNECTION_SCOPE": "prod-scope",
+        }
+    )
+    assert closed.enabled is False
+    assert closed.connection_scope == "prod-scope"
+
+
+def test_crm_rest_invalid_connection_scope_fail_closed() -> None:
+    with pytest.raises(AmoCrmCrmRestConfigError, match="CONNECTION_SCOPE_INVALID"):
+        AmoCrmCrmRestConfig.from_env(
+            {
+                "AMOCRM_CRM_REST_ENABLED": "false",
+                "AMOCRM_CRM_CONNECTION_SCOPE": "bad scope",
+            }
+        )
+    with pytest.raises(AmoCrmCrmRestConfigError, match="CONNECTION_SCOPE_INVALID"):
+        load_crm_rest_config_fail_closed(
+            {
+                "AMOCRM_CRM_REST_ENABLED": "false",
+                "AMOCRM_CRM_CONNECTION_SCOPE": "bad scope",
+            }
+        )
+
+
+def test_fail_closed_preserves_scope_when_credentials_missing() -> None:
+    config = load_crm_rest_config_fail_closed(
+        {
+            "AMOCRM_CRM_REST_ENABLED": "true",
+            "AMOCRM_CRM_CONNECTION_SCOPE": "ops-scope",
+        }
+    )
+    assert config.enabled is False
+    assert config.connection_scope == "ops-scope"
 
 
 def test_crm_rest_enabled_missing_credentials_raises() -> None:
