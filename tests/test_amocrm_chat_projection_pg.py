@@ -988,6 +988,12 @@ async def test_b1b_ambiguous_retry_reconcile_at_most_one_remote(
             )
             await worker.process_claimed(claim)
             continue
+
+        # Baselines after CLIENT_INBOUND drain; BOT_OUTBOUND deltas only.
+        sends_before = fake.send_calls
+        history_before = fake.history_calls
+        texts_before = len(fake.send_texts)
+
         fake.send_results.append(
             AmoCrmChatSendResult(
                 outcome=AmoCrmChatEgressOutcome.TRANSIENT_ERROR,
@@ -996,9 +1002,10 @@ async def test_b1b_ambiguous_retry_reconcile_at_most_one_remote(
         )
         with pytest.raises(RuntimeError):
             await worker.process_claimed(claim)
-        assert fake.send_calls == 1
-        assert fake.history_calls == 0
-        assert fake.send_texts == [durable]
+        assert fake.send_calls == sends_before + 1
+        assert fake.history_calls == history_before
+        assert len(fake.send_texts) == texts_before + 1
+        assert fake.send_texts[-1] == durable
 
         fake.scan_results.append(
             AmoCrmChatHistoryScanResult(
@@ -1013,8 +1020,11 @@ async def test_b1b_ambiguous_retry_reconcile_at_most_one_remote(
         assert claim2.attempt_count >= 2
         result = await worker.process_claimed(claim2, now=later)
         assert result.projected is True
-        assert fake.send_calls == 1
-        assert fake.history_calls == 1
+        # History reconcile: no second BOT_OUTBOUND POST.
+        assert fake.send_calls == sends_before + 1
+        assert fake.history_calls == history_before + 1
+        assert len(fake.send_texts) == texts_before + 1
+        assert fake.send_texts[-1] == durable
         break
     else:
         raise AssertionError("BOT_OUTBOUND claim missing")
