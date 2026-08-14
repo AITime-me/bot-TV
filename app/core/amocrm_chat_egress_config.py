@@ -1,6 +1,7 @@
-"""amoCRM Chat egress gate (AMO-01B1a).
+"""amoCRM Chat egress gate (AMO-01B1).
 
-Default-off. CLIENT_INBOUND projection only. BOT_OUTBOUND deferred.
+Default-off. CLIENT_INBOUND (B1a) and BOT_OUTBOUND (B1b) share this gate.
+BOT_OUTBOUND projects durable ``payload_json.text`` only after DELIVERED.
 Reuses AMOCRM_CHAT_CHANNEL_SECRET. No OAuth / CRM REST.
 """
 

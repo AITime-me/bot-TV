@@ -56,12 +56,21 @@ recovery/fencing правилам, а handoff expiry повторно выбир
 ## Не входит
 
 - production/staging deploy;
-- реальные VK/MAX/AI adapters и Chat/B1b;
+- реальные VK/MAX/AI adapters;
 - интеграция control-plane режимов `online-zapis-tv`;
 - автоматическое разрешение клиентского outbound.
+
+## Поправка AMO-01B1b
+
+Chat projection worker (`AmocrmChatProjectionWorker`) дренируется внутри
+цикла `amocrm_mirror`: после commit `DELIVERED` (+ mirror) бот-ответ с durable
+`payload_json.text` может ставиться в очередь проекции **отдельной**
+транзакцией. Сбой enqueue не откатывает `DELIVERED` и не вызывает sink снова.
+Catch-up — только id-scoped repair по `outbound_id` (без bulk backfill и без
+Chat HTTP в repair). Machine-only / non-DELIVERED → без projection row.
 
 ## Поправка AMO-01B2
 
 Цикл `amocrm_mirror` остаётся одним из пяти обязательных. В него подключён
 `CrmRestMirrorAdapter` (CRM REST entity convergence, default-off). Это не
-меняет набор циклов, heartbeat и не подключает Chat HMAC, VK/MAX или AI.
+меняет набор циклов, heartbeat и не подключает VK/MAX или AI.

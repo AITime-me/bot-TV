@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,7 @@ from app.repositories import conversations as conversation_repo
 from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
 from app.repositories.outbound import OutboundClaim, StaleOutboundLeaseError
+from app.services.amocrm_chat_projection import enqueue_bot_outbound_projection
 from app.services.amocrm_mirror import enqueue_outbound_delivered
 from app.services.outbound_reply_text import (
     OutboundReplyTextError,
@@ -33,6 +35,8 @@ from app.services.synthetic_outbound import (
     SyntheticOutboundOutcome,
     SyntheticOutboundRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class OutboundArbiterDenied(RuntimeError):
@@ -158,23 +162,46 @@ class OutboundArbiter:
                 lease_version=claim.lease_version,
                 now=now,
             )
+            correlation_id = (
+                delivered.correlation_id
+                if delivered.correlation_id is not None
+                else uuid.uuid4()
+            )
             await enqueue_outbound_delivered(
                 session,
                 conversation_id=delivered.conversation_id,
                 outbound_id=delivered.id,
                 context_version=delivered.context_version,
-                correlation_id=(
-                    delivered.correlation_id
-                    if delivered.correlation_id is not None
-                    else uuid.uuid4()
-                ),
+                correlation_id=correlation_id,
             )
-            # AMO-01B1a: BOT_OUTBOUND Chat projection deferred — token-only
-            # SYNTHETIC_OUTBOUND must never enqueue amo projection here.
+            # Commit authoritative DELIVERED (+ mirror) before Chat projection.
+            # Projection must not share this transaction (B1).
+            delivered_id = delivered.id
+            delivered_conversation_id = delivered.conversation_id
+            delivered_status = delivered.delivery_status
+
+        # AMO-01B1b: post-commit BOT_OUTBOUND projection enqueue only.
+        # Failure here must never roll back DELIVERED or re-invoke the sink.
+        try:
+            async with session_scope(self._session_factory) as session:
+                await enqueue_bot_outbound_projection(
+                    session,
+                    conversation_id=delivered_conversation_id,
+                    outbound_id=delivered_id,
+                    correlation_id=correlation_id,
+                )
+        except Exception as exc:
+            logger.error(
+                "amocrm bot outbound projection enqueue failed "
+                "outbound_id=%s error_code=%s",
+                delivered_id,
+                type(exc).__name__,
+            )
+
         return ArbiterAdmitResult(
             admitted=True,
-            outbound_id=delivered.id,
-            delivery_status=delivered.delivery_status,
+            outbound_id=delivered_id,
+            delivery_status=delivered_status,
         )
 
     async def _admit_in_session(

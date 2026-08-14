@@ -1,4 +1,4 @@
-"""AMO-01B1a Chat projection unit/static coverage (CLIENT_INBOUND only)."""
+"""AMO-01B1 Chat projection unit/static coverage (CLIENT_INBOUND + BOT_OUTBOUND)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import hmac
 import inspect
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -25,6 +25,7 @@ from app.core.amocrm_chat_egress_http import (
     find_msgid_in_history_body,
     parse_history_page_for_msgid,
 )
+from app.core.booking_types import BookingDialogAction
 from app.core.s2s_http_transport import S2sHttpRequest, S2sHttpResponse
 from app.models.amocrm_message_projection import (
     AmocrmMessageProjection,
@@ -263,10 +264,16 @@ def test_webhook_lifts_message_conversation_client_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bot_outbound_rejects_synthetic_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_bot_outbound_rejects_synthetic_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Outbox:
-        payload_json = {"schema": "synthetic.outbound.v1", "synthetic_token": "SYNTHETIC_OK"}
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "synthetic_token": "SYNTHETIC_OK",
+        }
         created_at = None
+        delivery_status = "DELIVERED"
 
     class _Session:
         async def get(self, model: object, source_id: object) -> object:
@@ -281,29 +288,210 @@ async def test_bot_outbound_rejects_synthetic_token(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_enqueue_bot_outbound_deferred_noop(
+async def test_bot_outbound_load_text_uses_payload_text_only() -> None:
+    durable = "durable bot reply for chat"
+
+    class _Outbox:
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "synthetic_token": "SYNTHETIC_OK",
+            "draft_text": "INTERNAL_DRAFT must not project",
+            "text": durable,
+        }
+        created_at = None
+        delivery_status = "DELIVERED"
+
+    class _Session:
+        async def get(self, model: object, source_id: object) -> object:
+            return _Outbox()
+
+    text, _ts = await _load_source_text(
+        _Session(),  # type: ignore[arg-type]
+        source_kind=AmocrmProjectionSourceKind.BOT_OUTBOUND.value,
+        source_id=uuid4(),
+    )
+    assert text == durable
+
+
+@pytest.mark.asyncio
+async def test_bot_outbound_ignores_draft_text_without_text() -> None:
+    class _Outbox:
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "draft_text": "manager hint only",
+            "synthetic_token": "SYNTHETIC_OK",
+        }
+        created_at = None
+        delivery_status = "DELIVERED"
+
+    class _Session:
+        async def get(self, model: object, source_id: object) -> object:
+            return _Outbox()
+
+    text, _ts = await _load_source_text(
+        _Session(),  # type: ignore[arg-type]
+        source_kind=AmocrmProjectionSourceKind.BOT_OUTBOUND.value,
+        source_id=uuid4(),
+    )
+    assert text == ""
+
+
+@pytest.mark.asyncio
+async def test_bot_outbound_load_text_rejects_non_delivered() -> None:
+    class _Outbox:
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "text": "valid text but not delivered",
+        }
+        created_at = None
+        delivery_status = "ADMITTED"
+
+    class _Session:
+        async def get(self, model: object, source_id: object) -> object:
+            return _Outbox()
+
+    text, _ts = await _load_source_text(
+        _Session(),  # type: ignore[arg-type]
+        source_kind=AmocrmProjectionSourceKind.BOT_OUTBOUND.value,
+        source_id=uuid4(),
+    )
+    assert text == ""
+
+
+@pytest.mark.asyncio
+async def test_enqueue_bot_outbound_requires_persisted_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AMOCRM_CHAT_EGRESS_ENABLED", "true")
     monkeypatch.setenv("AMOCRM_CHAT_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("AMOCRM_CHAT_SCOPE_ID", _SCOPE)
     assert chat_egress_enabled() is True
+
+    outbound_id = uuid4()
+    conversation_id = uuid4()
+    correlation_id = uuid4()
+
+    class _TokenOnly:
+        delivery_status = "DELIVERED"
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "synthetic_token": "SYNTHETIC_OK",
+        }
+
+    class _MachineOnly:
+        delivery_status = "DELIVERED"
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "synthetic_token": "SYNTHETIC_OK",
+            "booking_action": BookingDialogAction.OFFER_DAYS.value,
+        }
+
+    class _AdmittedWithText:
+        delivery_status = "ADMITTED"
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "synthetic_token": "SYNTHETIC_OK",
+            "text": "valid but not delivered",
+        }
+
+    class _WithText:
+        delivery_status = "DELIVERED"
+        payload_json = {
+            "schema": "synthetic.outbound.v1",
+            "synthetic_token": "SYNTHETIC_OK",
+            "text": "project this exact body",
+        }
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=_TokenOnly())
+    assert (
+        await enqueue_bot_outbound_projection(
+            session,
+            conversation_id=conversation_id,
+            outbound_id=outbound_id,
+            correlation_id=correlation_id,
+            egress_enabled=True,
+        )
+        is None
+    )
+
+    session.get = AsyncMock(return_value=_MachineOnly())
+    assert (
+        await enqueue_bot_outbound_projection(
+            session,
+            conversation_id=conversation_id,
+            outbound_id=outbound_id,
+            correlation_id=correlation_id,
+            egress_enabled=True,
+        )
+        is None
+    )
+
+    session.get = AsyncMock(return_value=_AdmittedWithText())
+    assert (
+        await enqueue_bot_outbound_projection(
+            session,
+            conversation_id=conversation_id,
+            outbound_id=outbound_id,
+            correlation_id=correlation_id,
+            egress_enabled=True,
+        )
+        is None
+    )
+
+    enqueued = MagicMock()
+    enqueue_mock = AsyncMock(return_value=(enqueued, True))
+    monkeypatch.setattr(
+        "app.services.amocrm_chat_projection.projection_repo.enqueue_if_absent",
+        enqueue_mock,
+    )
+    session.get = AsyncMock(return_value=_WithText())
     result = await enqueue_bot_outbound_projection(
-        MagicMock(),  # type: ignore[arg-type]
-        conversation_id=uuid4(),
-        outbound_id=uuid4(),
-        correlation_id=uuid4(),
+        session,
+        conversation_id=conversation_id,
+        outbound_id=outbound_id,
+        correlation_id=correlation_id,
         egress_enabled=True,
     )
-    assert result is None
+    assert result == (enqueued, True)
+    enqueue_mock.assert_awaited_once()
+    kwargs = enqueue_mock.await_args.kwargs
+    assert kwargs["source_kind"] is AmocrmProjectionSourceKind.BOT_OUTBOUND
+    assert kwargs["source_id"] == outbound_id
+    assert kwargs["conversation_id"] == conversation_id
 
 
-def test_outbound_arbiter_does_not_enqueue_bot_projection() -> None:
+def test_outbound_arbiter_enqueues_bot_projection_after_delivered_commit() -> None:
     source = (_REPO / "app" / "services" / "outbound_arbiter.py").read_text(
         encoding="utf-8"
     )
-    assert "enqueue_bot_outbound_projection" not in source
-    assert "amocrm_chat_projection" not in source
+    assert "enqueue_bot_outbound_projection" in source
+    assert "amocrm_chat_projection" in source
+    assert "await outbound_repo.mark_delivered_with_lease" in source
+    delivered_idx = source.index("await outbound_repo.mark_delivered_with_lease")
+    project_idx = source.index("await enqueue_bot_outbound_projection")
+    assert delivered_idx < project_idx
+    # Projection enqueue is outside the DELIVERED session block (post-commit).
+    delivered_block = source[delivered_idx:project_idx]
+    assert "enqueue_outbound_delivered" in delivered_block
+    assert "projection enqueue failed" in source
+    assert "except Exception" in source[project_idx : project_idx + 400]
+
+
+def test_repair_bot_outbound_is_id_scoped_no_chat_http() -> None:
+    from app.services.amocrm_chat_projection import repair_bot_outbound_projection
+
+    source = inspect.getsource(repair_bot_outbound_projection)
+    assert "outbound_id" in source
+    assert "DELIVERED" in source
+    assert "persisted_outbound_reply_text" in source
+    assert "enqueue_bot_outbound_projection" in source
+    assert "send_silent_text" not in source
+    assert "scan_msgid" not in source
+    cli = (_REPO / "app" / "amocrm_chat_projection_ops.py").read_text(encoding="utf-8")
+    assert "repair-bot-outbound" in cli
+    assert "send_silent_text" not in cli
+    assert "bulk" not in cli.lower() or "No bulk" in cli
 
 
 def test_projection_model_has_no_text_columns() -> None:
@@ -321,6 +509,11 @@ def test_projection_model_has_no_text_columns() -> None:
     assert msgid.startswith("c")
     assert len(msgid) == 33
     assert msgid == f"c{source_id.hex}"
+    bot_msgid = integration_msgid_for_source(
+        source_kind=AmocrmProjectionSourceKind.BOT_OUTBOUND,
+        source_id=source_id,
+    )
+    assert bot_msgid == f"b{source_id.hex}"
 
 
 def test_docker_allowlist_includes_amo01b1() -> None:
@@ -330,6 +523,17 @@ def test_docker_allowlist_includes_amo01b1() -> None:
         assert f"!{rel}" in EXPECTED_DOCKER_ALLOW_RULES
         assert is_included_in_docker_build_context(rel, lines, repo_root=_REPO) is True
         assert (_REPO / rel).is_file()
+
+
+def test_docker_allowlist_excludes_chat_projection_ops_cli() -> None:
+    from tests.docker_runtime_allowlist import is_included_in_docker_build_context
+
+    assert is_included_in_docker_build_context(
+        "app/amocrm_chat_projection_ops.py",
+        dockerignore_lines(_REPO),
+        repo_root=_REPO,
+    ) is False
+    assert "app/amocrm_chat_projection_ops.py" not in AMO01B1_DOCKER_RUNTIME_PATHS
 
 
 def test_worker_reuses_amocrm_mirror_loop_without_fsm_change() -> None:

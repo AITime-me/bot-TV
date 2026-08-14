@@ -1,8 +1,8 @@
-"""Durable amoCRM Chat message projection queue + ledger (AMO-01B1a).
+"""Durable amoCRM Chat message projection queue + ledger (AMO-01B1).
 
-Stores no message text. Text is loaded from inbox at claim-time for
-CLIENT_INBOUND. BOT_OUTBOUND remains a schema placeholder until a durable
-rendered reply body exists; 01B1a runtime does not enqueue it.
+Stores no message text. Text is loaded at claim-time from inbox
+(CLIENT_INBOUND / B1a) or ``outbox_messages.payload_json.text``
+(BOT_OUTBOUND / B1b). Projection is not a client-delivery path.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ class AmocrmProjectionSkipReason(str, enum.Enum):
     )
     SOURCE_MISSING = "SOURCE_MISSING"
     SOURCE_EMPTY_TEXT = "SOURCE_EMPTY_TEXT"
+    SOURCE_NOT_DELIVERED = "SOURCE_NOT_DELIVERED"
     EGRESS_DISABLED = "EGRESS_DISABLED"
 
 

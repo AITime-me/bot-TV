@@ -1,8 +1,9 @@
-"""AMO-01B1a Chat projection enqueue + durable worker.
+"""AMO-01B1 Chat projection enqueue + durable worker.
 
-Scope: CLIENT_INBOUND only. BOT_OUTBOUND projection is deferred until a durable
-rendered user-facing reply body exists (token-only SYNTHETIC_OUTBOUND must never
-enqueue or send). Schema may still list BOT_OUTBOUND for a future slice.
+CLIENT_INBOUND (B1a) and BOT_OUTBOUND (B1b). BOT_OUTBOUND enqueues only after
+authoritative DELIVERED and only when ``outbox_messages.payload_json.text`` is
+durable user-facing copy — never synthetic_token, draft_text, inbound text, or
+re-render. Projection is not a second client-delivery path.
 
 HTTP only from this worker. No OAuth/CRM REST. No text in projection rows.
 """
@@ -36,7 +37,7 @@ from app.models.amocrm_message_projection import (
     AmocrmProjectionStatus,
 )
 from app.models.inbox import InboxMessage
-from app.models.outbox import OutboxMessage
+from app.models.outbox import DeliveryStatus, OutboxMessage
 from app.repositories import amocrm_message_projections as projection_repo
 from app.repositories import conversations as conversation_repo
 from app.repositories.amocrm_chat_bindings import AmocrmChatBindingAmbiguousError
@@ -44,6 +45,7 @@ from app.repositories.amocrm_message_projections import (
     AmocrmProjectionClaim,
     StaleAmocrmProjectionLeaseError,
 )
+from app.services.outbound_reply_text import persisted_outbound_reply_text
 
 logger = logging.getLogger(__name__)
 
@@ -101,15 +103,122 @@ async def enqueue_bot_outbound_projection(
     correlation_id: uuid.UUID,
     egress_enabled: bool | None = None,
 ) -> tuple[AmocrmMessageProjection, bool] | None:
-    """AMO-01B1a deferred: never enqueue BOT_OUTBOUND projections.
+    """Enqueue BOT_OUTBOUND after authoritative DELIVERED (AMO-01B1b).
 
-    Kept as a named no-op so call sites cannot silently reintroduce token-only
-    Chat projection. Re-enable only when delivered outbound carries durable
-    user-facing ``draft_text``/``text`` (not ``synthetic_token``).
+    Source of truth: ``outbox_messages.payload_json.text`` only via
+    ``persisted_outbound_reply_text``. Requires ``delivery_status == DELIVERED``.
+    Missing, invalid, token-echo, machine-only, or non-DELIVERED sources create
+    no projection row (zero Chat HTTP).
     """
 
-    _ = (session, conversation_id, outbound_id, correlation_id, egress_enabled)
-    return None
+    enabled = chat_egress_enabled() if egress_enabled is None else egress_enabled
+    if not enabled:
+        return None
+    outbound = await session.get(OutboxMessage, outbound_id)
+    if outbound is None:
+        return None
+    if outbound.delivery_status != DeliveryStatus.DELIVERED.value:
+        return None
+    payload = outbound.payload_json if isinstance(outbound.payload_json, dict) else {}
+    if persisted_outbound_reply_text(payload) is None:
+        return None
+    return await projection_repo.enqueue_if_absent(
+        session,
+        conversation_id=conversation_id,
+        source_kind=AmocrmProjectionSourceKind.BOT_OUTBOUND,
+        source_id=outbound_id,
+        correlation_id=correlation_id,
+    )
+
+
+@dataclass(frozen=True, repr=False)
+class BotOutboundProjectionRepairResult:
+    outbound_id: uuid.UUID
+    enqueued: bool
+    created: bool
+    projection_id: uuid.UUID | None = None
+    error_code: str | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "BotOutboundProjectionRepairResult("
+            f"outbound_id={self.outbound_id!r}, "
+            f"enqueued={self.enqueued!r}, "
+            f"created={self.created!r}, "
+            f"projection_id={self.projection_id!r}, "
+            f"error_code={self.error_code!r})"
+        )
+
+
+async def repair_bot_outbound_projection(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    outbound_id: uuid.UUID,
+    egress_enabled: bool | None = None,
+) -> BotOutboundProjectionRepairResult:
+    """Id-scoped catch-up: restore BOT_OUTBOUND projection row only.
+
+    No bulk backfill. No Chat HTTP. Enqueues only when the source outbox is
+    DELIVERED and has valid persisted ``payload_json.text``. Duplicate repair
+    is idempotent via ``uq_amocrm_message_projections_source``.
+    """
+
+    async with session_scope(session_factory) as session:
+        outbound = await session.get(OutboxMessage, outbound_id)
+        if outbound is None:
+            return BotOutboundProjectionRepairResult(
+                outbound_id=outbound_id,
+                enqueued=False,
+                created=False,
+                error_code="OUTBOUND_MISSING",
+            )
+        if outbound.delivery_status != DeliveryStatus.DELIVERED.value:
+            return BotOutboundProjectionRepairResult(
+                outbound_id=outbound_id,
+                enqueued=False,
+                created=False,
+                error_code="OUTBOUND_NOT_DELIVERED",
+            )
+        payload = (
+            outbound.payload_json if isinstance(outbound.payload_json, dict) else {}
+        )
+        if persisted_outbound_reply_text(payload) is None:
+            return BotOutboundProjectionRepairResult(
+                outbound_id=outbound_id,
+                enqueued=False,
+                created=False,
+                error_code="OUTBOUND_REPLY_TEXT_MISSING",
+            )
+        await conversation_repo.lock_for_update(
+            session,
+            conversation_id=outbound.conversation_id,
+        )
+        correlation_id = (
+            outbound.correlation_id
+            if outbound.correlation_id is not None
+            else uuid.uuid4()
+        )
+        result = await enqueue_bot_outbound_projection(
+            session,
+            conversation_id=outbound.conversation_id,
+            outbound_id=outbound.id,
+            correlation_id=correlation_id,
+            egress_enabled=egress_enabled,
+        )
+        if result is None:
+            return BotOutboundProjectionRepairResult(
+                outbound_id=outbound_id,
+                enqueued=False,
+                created=False,
+                error_code="EGRESS_DISABLED",
+            )
+        row, created = result
+        return BotOutboundProjectionRepairResult(
+            outbound_id=outbound_id,
+            enqueued=True,
+            created=created,
+            projection_id=row.id,
+        )
 
 
 @dataclass(frozen=True, repr=False)
@@ -487,6 +596,43 @@ class AmocrmChatProjectionWorker:
                     )
                 )
 
+            if claim.source_kind == AmocrmProjectionSourceKind.BOT_OUTBOUND.value:
+                outbound_row = await session.get(OutboxMessage, claim.source_id)
+                if outbound_row is None:
+                    row = await projection_repo.skip_with_lease(
+                        session,
+                        projection_id=claim.projection_id,
+                        lease_token=claim.lease_token,
+                        lease_version=claim.lease_version,
+                        skip_reason=AmocrmProjectionSkipReason.SOURCE_MISSING,
+                        now=now,
+                    )
+                    raise _ProjectionSkip(
+                        AmocrmProjectionProcessResult(
+                            projection_id=row.id,
+                            status=row.status,
+                            projected=False,
+                            skip_reason=row.skip_reason,
+                        )
+                    )
+                if outbound_row.delivery_status != DeliveryStatus.DELIVERED.value:
+                    row = await projection_repo.skip_with_lease(
+                        session,
+                        projection_id=claim.projection_id,
+                        lease_token=claim.lease_token,
+                        lease_version=claim.lease_version,
+                        skip_reason=AmocrmProjectionSkipReason.SOURCE_NOT_DELIVERED,
+                        now=now,
+                    )
+                    raise _ProjectionSkip(
+                        AmocrmProjectionProcessResult(
+                            projection_id=row.id,
+                            status=row.status,
+                            projected=False,
+                            skip_reason=row.skip_reason,
+                        )
+                    )
+
             text, timestamp_unix = await _load_source_text(
                 session,
                 source_kind=claim.source_kind,
@@ -621,15 +767,18 @@ async def _load_source_text(
     outbound = await session.get(OutboxMessage, source_id)
     if outbound is None:
         return None, None
+    if outbound.delivery_status != DeliveryStatus.DELIVERED.value:
+        # Fail closed: non-DELIVERED must never supply Chat body.
+        return "", None
     payload = outbound.payload_json if isinstance(outbound.payload_json, dict) else {}
-    # 01B1a / future BOT_OUTBOUND: never send synthetic_token placeholders.
-    # Runtime enqueue is deferred; if a BOT_OUTBOUND row appears, require real text.
-    text = payload.get("draft_text")
-    if type(text) is not str or not text.strip():
-        text = payload.get("text")
-    if type(text) is not str or not text.strip():
+    # AMO-01B1b: authoritative body is payload_json.text only — never draft_text,
+    # synthetic_token, inbound echo, or re-render.
+    text = persisted_outbound_reply_text(payload)
+    if text is None:
         return "", None
     ts = outbound.created_at
+    if ts is None:
+        return text, None
     unix = (
         int(ts.replace(tzinfo=timezone.utc).timestamp())
         if ts.tzinfo is None

@@ -75,6 +75,12 @@ Statuses: `PENDING → READY → PROCESSING → DISPATCHED`, with
   never fall back to inbound text, `INTERNAL_DRAFT`/`draft_text`, manager hints,
   or `synthetic_token` (token remains technical metadata only). Machine-only
   `OFFER_DAYS` may omit `text`; missing/invalid text otherwise fails closed.
+  After authoritative `DELIVERED` commits (with mirror meta), AMO-01B1b may
+  enqueue a Chat projection of that same persisted `text` in a **separate**
+  post-commit transaction (not a second client-delivery path). Projection
+  enqueue failure must not roll back `DELIVERED` or re-invoke the sink.
+  Id-scoped repair (`repair-bot-outbound --outbound-id`) may restore a missing
+  projection row only; no bulk backfill and no Chat HTTP from the repair itself.
 
 ### Outbound Arbiter
 The only path to move `SYNTHETIC_OUTBOUND` through
