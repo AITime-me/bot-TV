@@ -345,13 +345,16 @@ def test_offer_days_omits_text_keeps_machine_wire() -> None:
     assert outbound["booking_available_date_keys"] == ["2026-08-06", "2026-08-07"]
 
 
-def test_enqueue_bot_outbound_projection_remains_noop() -> None:
+def test_enqueue_bot_outbound_projection_uses_persisted_text_only() -> None:
     from app.services.amocrm_chat_projection import enqueue_bot_outbound_projection
     import inspect
 
     source = inspect.getsource(enqueue_bot_outbound_projection)
-    assert "return None" in source
-    assert "draft_text" in source or "text" in source
+    assert "persisted_outbound_reply_text" in source
+    assert "BOT_OUTBOUND" in source
+    assert "DELIVERED" in source
+    assert "draft_text" not in source
+    assert "synthetic_token" not in source or "never" in source.lower()
 
 
 @pytest.mark.asyncio
