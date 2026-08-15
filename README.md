@@ -258,7 +258,8 @@ Immediate rollback будущего включения: остановить т�
    Conflict/repoint of non-null integ or conversation/chat mismatch → fail
    closed, zero mutation.
 4. **Staged enablement** (по одному, с проверкой):
-   - `AMOCRM_CHAT_WEBHOOK_ENABLED=true` + channel secret → manager ingress;
+   - `AMOCRM_CHAT_WEBHOOK_ENABLED=true` + channel secret + scope → manager
+     ingress (`POST /webhooks/amocrm/chat/{scope_id}`);
    - `AMOCRM_CHAT_EGRESS_ENABLED=true` + scope → CLIENT_INBOUND / BOT_OUTBOUND
      projection;
    - `AMOCRM_CRM_REST_ENABLED=true` + client id/secret + API base +

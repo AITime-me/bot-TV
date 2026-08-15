@@ -256,7 +256,7 @@ def _register_amocrm_chat_routes(
     settings: Settings,
     engine: AsyncEngine | None,
 ) -> None:
-    """Register `/webhooks/amocrm/chat` only when fully configured.
+    """Register `/webhooks/amocrm/chat/{scope_id}` only when fully configured.
 
     Enabled + incomplete/invalid config fails closed (raises). Disabled → no
     routes. Never registers a half-active surface. No outbound amoCRM HTTP.

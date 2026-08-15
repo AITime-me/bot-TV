@@ -1,6 +1,6 @@
 """amoCRM Chat manager webhook (AMO-01A).
 
-Verify HMAC-SHA1 → durable ingress commit → ACK.
+Verify path scope_id + HMAC-SHA1 → durable ingress commit → ACK.
 Handler does not apply manager FSM and does not perform outbound HTTP.
 
 Validation errors are handled in-route (no global exception handler) so this
@@ -29,7 +29,13 @@ from app.services.amocrm_manager_ingress import (
 )
 from app.services.ingress import IngressPersistError
 
-AMOCRM_CHAT_WEBHOOK_PATH = "/webhooks/amocrm/chat"
+AMOCRM_CHAT_WEBHOOK_PATH = "/webhooks/amocrm/chat/{scope_id}"
+
+
+def amocrm_chat_webhook_path(scope_id: str) -> str:
+    """Concrete POST path for a configured/registered scope_id."""
+
+    return f"/webhooks/amocrm/chat/{scope_id}"
 
 
 def build_amocrm_chat_router(
@@ -44,6 +50,7 @@ def build_amocrm_chat_router(
     @router.post(AMOCRM_CHAT_WEBHOOK_PATH)
     async def amocrm_chat_webhook(
         request: Request,
+        scope_id: str,
         x_signature: Annotated[
             str | None, Header(alias=AMOCRM_CHAT_SIGNATURE_HEADER)
         ] = None,
@@ -54,6 +61,11 @@ def build_amocrm_chat_router(
             provided_signature=x_signature,
             config=config,
         ):
+            return PlainTextResponse(
+                content="unauthorized",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+        if not config.matches_scope_id(scope_id):
             return PlainTextResponse(
                 content="unauthorized",
                 status_code=status.HTTP_401_UNAUTHORIZED,
