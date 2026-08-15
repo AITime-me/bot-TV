@@ -11,6 +11,29 @@ x-runtime-environment: &runtime-environment
   WORKER_HEARTBEAT_STALE_SECONDS: ${WORKER_HEARTBEAT_STALE_SECONDS:-45}
   WORKER_MAX_CONSECUTIVE_FAILURES: ${WORKER_MAX_CONSECUTIVE_FAILURES:-3}
 
+# amoCRM feature gates for api/worker. All enable flags default false.
+# Secret/key material is never inlined: CHANNEL_SECRET / CLIENT_* come from
+# host env (empty default), OAuth AEAD key bytes from optional env_file only.
+x-amocrm-environment: &amocrm-environment
+  AMOCRM_CHAT_WEBHOOK_ENABLED: ${AMOCRM_CHAT_WEBHOOK_ENABLED:-false}
+  AMOCRM_CHAT_CHANNEL_SECRET: ${AMOCRM_CHAT_CHANNEL_SECRET:-}
+  AMOCRM_CHAT_EGRESS_ENABLED: ${AMOCRM_CHAT_EGRESS_ENABLED:-false}
+  AMOCRM_CHAT_SCOPE_ID: ${AMOCRM_CHAT_SCOPE_ID:-}
+  AMOCRM_CHAT_API_BASE_URL: ${AMOCRM_CHAT_API_BASE_URL:-https://amojo.amocrm.ru}
+  AMOCRM_CLIENT_ID: ${AMOCRM_CLIENT_ID:-}
+  AMOCRM_CLIENT_SECRET: ${AMOCRM_CLIENT_SECRET:-}
+  AMOCRM_CRM_REST_ENABLED: ${AMOCRM_CRM_REST_ENABLED:-false}
+  AMOCRM_CRM_API_BASE_URL: ${AMOCRM_CRM_API_BASE_URL:-}
+  AMOCRM_CRM_CONNECTION_SCOPE: ${AMOCRM_CRM_CONNECTION_SCOPE:-default}
+  AMOCRM_CRM_DEAL_CREATE_ENABLED: ${AMOCRM_CRM_DEAL_CREATE_ENABLED:-false}
+  AMOCRM_CRM_DEAL_PIPELINE_ID: ${AMOCRM_CRM_DEAL_PIPELINE_ID:-}
+  AMOCRM_CRM_DEAL_STATUS_ID: ${AMOCRM_CRM_DEAL_STATUS_ID:-}
+  AMOCRM_CRM_OAUTH_ACTIVE_KEY_ID: ${AMOCRM_CRM_OAUTH_ACTIVE_KEY_ID:-}
+
+x-amocrm-oauth-keys-env-file: &amocrm-oauth-keys-env-file
+  - path: ${AMOCRM_CRM_OAUTH_KEYS_ENV_FILE:-/etc/bot-tv/amocrm-crm-oauth-keys.env}
+    required: false
+
 x-runtime-hardening: &runtime-hardening
   read_only: true
   init: true
@@ -40,7 +63,9 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
-    environment: *runtime-environment
+    environment:
+      <<: [*runtime-environment, *amocrm-environment]
+    env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening
     depends_on:
       migrate:
@@ -60,8 +85,9 @@ services:
       context: .
     command: ["python", "-m", "app.worker"]
     environment:
-      <<: *runtime-environment
+      <<: [*runtime-environment, *amocrm-environment]
       WORKER_INSTANCE_ID: bot-tv-worker
+    env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening
     depends_on:
       migrate:
