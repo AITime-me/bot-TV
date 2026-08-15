@@ -17,7 +17,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.amocrm_chat_webhook import AMOCRM_CHAT_WEBHOOK_PATH
+from app.amocrm_chat_webhook import amocrm_chat_webhook_path
 from app.config import Settings
 from app.core.amocrm_manager_ids import amocrm_manager_namespaced_id
 from app.db.clock import db_statement_now
@@ -50,6 +50,8 @@ from tests.foundation_test_db import SecretDatabaseUrl
 from tests.pg_harness import truncate_foundation_tables
 
 _SECRET = "t" * 32
+_SCOPE = "scope-pg-01"
+_WEBHOOK_PATH = amocrm_chat_webhook_path(_SCOPE)
 
 
 @contextmanager
@@ -67,6 +69,7 @@ def _amo_app_client(
 
     monkeypatch.setenv("AMOCRM_CHAT_WEBHOOK_ENABLED", "true")
     monkeypatch.setenv("AMOCRM_CHAT_CHANNEL_SECRET", _SECRET)
+    monkeypatch.setenv("AMOCRM_CHAT_SCOPE_ID", _SCOPE)
     settings = Settings.from_env(
         {
             "BOT_MODE": "OFF",
@@ -499,14 +502,14 @@ async def test_webhook_http_ack_after_commit_and_signature(
 
     with _amo_app_client(monkeypatch, database_url=pg_database_url.reveal()) as client:
         unauthorized = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={"Content-Type": "application/json"},
         )
         assert unauthorized.status_code == 401
 
         ok = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={
                 "Content-Type": "application/json",
@@ -517,7 +520,7 @@ async def test_webhook_http_ack_after_commit_and_signature(
         assert ok.text == "ok"
 
         dup = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={
                 "Content-Type": "application/json",
@@ -535,7 +538,7 @@ async def test_webhook_http_ack_after_commit_and_signature(
             }
         ).encode("utf-8")
         conflict = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=mutated,
             headers={
                 "Content-Type": "application/json",

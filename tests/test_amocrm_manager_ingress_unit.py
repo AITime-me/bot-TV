@@ -15,7 +15,11 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.amocrm_chat_webhook import AMOCRM_CHAT_WEBHOOK_PATH, build_amocrm_chat_router
+from app.amocrm_chat_webhook import (
+    AMOCRM_CHAT_WEBHOOK_PATH,
+    amocrm_chat_webhook_path,
+    build_amocrm_chat_router,
+)
 from app.config import Settings
 from app.core.amocrm_chat_config import AmoCrmChatConfig, AmoCrmChatConfigError
 from app.core.amocrm_chat_signature import verify_amocrm_chat_signature
@@ -42,7 +46,17 @@ from tests.docker_runtime_allowlist import (
 
 _REPO = Path(__file__).resolve().parents[1]
 _SECRET = "s" * 32
+_SCOPE = "scope-id-01"
 _FAKE_DB = "postgresql+asyncpg://bot:pass@127.0.0.1:5432/bot_tv"
+_WEBHOOK_PATH = amocrm_chat_webhook_path(_SCOPE)
+
+
+def _enabled_config() -> AmoCrmChatConfig:
+    return AmoCrmChatConfig(
+        enabled=True,
+        channel_secret=_SECRET,
+        scope_id=_SCOPE,
+    )
 
 
 def _sign(body: bytes, secret: str = _SECRET) -> str:
@@ -90,6 +104,16 @@ def test_enabled_missing_secret_fail_closed() -> None:
         AmoCrmChatConfig.from_env({"AMOCRM_CHAT_WEBHOOK_ENABLED": "true"})
 
 
+def test_enabled_missing_scope_fail_closed() -> None:
+    with pytest.raises(AmoCrmChatConfigError, match="AMOCRM_CHAT_SCOPE_REQUIRED"):
+        AmoCrmChatConfig.from_env(
+            {
+                "AMOCRM_CHAT_WEBHOOK_ENABLED": "true",
+                "AMOCRM_CHAT_CHANNEL_SECRET": _SECRET,
+            }
+        )
+
+
 @pytest.mark.parametrize("secret", ["", "short", "has space" + "x" * 20])
 def test_enabled_invalid_secret_fail_closed(secret: str) -> None:
     with pytest.raises(AmoCrmChatConfigError):
@@ -97,6 +121,19 @@ def test_enabled_invalid_secret_fail_closed(secret: str) -> None:
             {
                 "AMOCRM_CHAT_WEBHOOK_ENABLED": "true",
                 "AMOCRM_CHAT_CHANNEL_SECRET": secret,
+                "AMOCRM_CHAT_SCOPE_ID": _SCOPE,
+            }
+        )
+
+
+@pytest.mark.parametrize("scope", ["short", "has spacexx", "bad\nline"])
+def test_enabled_invalid_scope_fail_closed(scope: str) -> None:
+    with pytest.raises(AmoCrmChatConfigError, match="AMOCRM_CHAT_SCOPE_INVALID"):
+        AmoCrmChatConfig.from_env(
+            {
+                "AMOCRM_CHAT_WEBHOOK_ENABLED": "true",
+                "AMOCRM_CHAT_CHANNEL_SECRET": _SECRET,
+                "AMOCRM_CHAT_SCOPE_ID": scope,
             }
         )
 
@@ -106,16 +143,19 @@ def test_valid_enabled_config() -> None:
         {
             "AMOCRM_CHAT_WEBHOOK_ENABLED": "true",
             "AMOCRM_CHAT_CHANNEL_SECRET": _SECRET,
+            "AMOCRM_CHAT_SCOPE_ID": _SCOPE,
         }
     )
     assert config.enabled is True
     assert config.channel_secret == _SECRET
+    assert config.scope_id == _SCOPE
     assert _SECRET not in repr(config)
+    assert _SCOPE not in repr(config)
 
 
 def test_signature_valid() -> None:
     body = b'{"ok":true}'
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
+    config = _enabled_config()
     assert (
         verify_amocrm_chat_signature(
             raw_body=body,
@@ -128,7 +168,7 @@ def test_signature_valid() -> None:
 
 def test_signature_invalid_or_missing() -> None:
     body = b'{"ok":true}'
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
+    config = _enabled_config()
     assert (
         verify_amocrm_chat_signature(
             raw_body=body,
@@ -149,7 +189,11 @@ def test_signature_invalid_or_missing() -> None:
         verify_amocrm_chat_signature(
             raw_body=body,
             provided_signature=_sign(body),
-            config=AmoCrmChatConfig(enabled=False, channel_secret=None),
+            config=AmoCrmChatConfig(
+                enabled=False,
+                channel_secret=None,
+                scope_id=None,
+            ),
         )
         is False
     )
@@ -227,6 +271,7 @@ def test_webhook_enabled_without_database_fail_closed(
 ) -> None:
     monkeypatch.setenv("AMOCRM_CHAT_WEBHOOK_ENABLED", "true")
     monkeypatch.setenv("AMOCRM_CHAT_CHANNEL_SECRET", _SECRET)
+    monkeypatch.setenv("AMOCRM_CHAT_SCOPE_ID", _SCOPE)
     with pytest.raises(AmoCrmChatConfigError, match="AMOCRM_CHAT_DATABASE_REQUIRED"):
         create_app(
             Settings.from_env(
@@ -241,7 +286,7 @@ def test_webhook_enabled_without_database_fail_closed(
 def test_webhook_ack_only_after_successful_accept(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
+    config = _enabled_config()
     accept = AsyncMock(
         return_value=IngressAck(
             accepted=True,
@@ -261,7 +306,7 @@ def test_webhook_ack_only_after_successful_accept(
     body = json.dumps(_payload()).encode("utf-8")
     with TestClient(app) as client:
         resp = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
         )
@@ -270,8 +315,32 @@ def test_webhook_ack_only_after_successful_accept(
     accept.assert_awaited_once()
 
 
+def test_webhook_rejects_mismatched_scope_without_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _enabled_config()
+    accept = AsyncMock()
+    monkeypatch.setattr(AmoCrmManagerIngressAdapter, "accept", accept)
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(
+        build_amocrm_chat_router(config=config, session_factory=MagicMock())
+    )
+    body = json.dumps(_payload()).encode("utf-8")
+    with TestClient(app) as client:
+        resp = client.post(
+            amocrm_chat_webhook_path("other-scope-9"),
+            content=body,
+            headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
+        )
+    assert resp.status_code == 401
+    assert resp.text == "unauthorized"
+    accept.assert_not_called()
+
+
 def test_webhook_rejects_bad_signature_without_persist() -> None:
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
+    config = _enabled_config()
     from fastapi import FastAPI
 
     app = FastAPI()
@@ -281,12 +350,12 @@ def test_webhook_rejects_bad_signature_without_persist() -> None:
     body = json.dumps(_payload()).encode("utf-8")
     with TestClient(app) as client:
         missing = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={"Content-Type": "application/json"},
         )
         bad = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={
                 "Content-Type": "application/json",
@@ -298,7 +367,7 @@ def test_webhook_rejects_bad_signature_without_persist() -> None:
 
 
 def test_webhook_persist_failure_no_ack(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
+    config = _enabled_config()
     monkeypatch.setattr(
         AmoCrmManagerIngressAdapter,
         "accept",
@@ -313,7 +382,7 @@ def test_webhook_persist_failure_no_ack(monkeypatch: pytest.MonkeyPatch) -> None
     body = json.dumps(_payload()).encode("utf-8")
     with TestClient(app) as client:
         resp = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
         )
@@ -322,7 +391,7 @@ def test_webhook_persist_failure_no_ack(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_webhook_conflict_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = AmoCrmChatConfig(enabled=True, channel_secret=_SECRET)
+    config = _enabled_config()
     monkeypatch.setattr(
         AmoCrmManagerIngressAdapter,
         "accept",
@@ -337,7 +406,7 @@ def test_webhook_conflict_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
     body = json.dumps(_payload()).encode("utf-8")
     with TestClient(app) as client:
         resp = client.post(
-            AMOCRM_CHAT_WEBHOOK_PATH,
+            _WEBHOOK_PATH,
             content=body,
             headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
         )
