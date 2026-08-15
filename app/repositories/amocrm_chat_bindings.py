@@ -46,6 +46,29 @@ async def get_active_by_amocrm_chat_id(
     return rows[0]
 
 
+async def get_active_by_conversation_id(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+) -> AmocrmChatBinding | None:
+    """Return the single ACTIVE binding for a conversation or None.
+
+    Raises AmocrmChatBindingAmbiguousError if more than one ACTIVE row matches
+    (should be unreachable under uq_amocrm_chat_bindings_conversation_id).
+    """
+
+    stmt = select(AmocrmChatBinding).where(
+        AmocrmChatBinding.conversation_id == conversation_id,
+        AmocrmChatBinding.status == AmocrmChatBindingStatus.ACTIVE.value,
+    )
+    rows = list(await session.scalars(stmt))
+    if len(rows) > 1:
+        raise AmocrmChatBindingAmbiguousError("BINDING_AMBIGUOUS")
+    if not rows:
+        return None
+    return rows[0]
+
+
 async def insert_active_if_absent(
     session: AsyncSession,
     *,

@@ -232,6 +232,39 @@ Immediate rollback будущего включения: остановить т�
 контейнеры также остаются в `BOT_MODE=OFF`; включение реальных адаптеров и
 автоматической отправки не входит в `CURSOR-10`.
 
+### Controlled amoCRM enablement (after disabled deploy)
+
+Порядок только такой. На каждом шаге `BOT_MODE=OFF` и `EMERGENCY_LOCK=true`
+сохраняются; Chat/CRM HTTP включаются **только** явными `AMOCRM_*_ENABLED=true`.
+
+1. **Disabled deploy** — `docker compose up -d` с defaults: все
+   `AMOCRM_*_ENABLED=false` (compose прокидывает флаги; секреты/OAuth key
+   bytes не в образе). Smoke `/health*`.
+2. **OAuth bootstrap** (host/venv, offline CLI; образ ops не содержит):
+   `python -B -m app.amocrm_crm_ops bootstrap` при настроенных
+   `AMOCRM_CRM_OAUTH_*` keys / `DATABASE_URL`. CRM REST может оставаться
+   `false`.
+3. **Chat binding seed** (explicit ids only, no Chat/CRM HTTP):
+   `python -B -m app.amocrm_chat_binding_ops seed-binding \
+     --conversation-id UUID \
+     --amocrm-chat-id CHAT_ID \
+     --integration-conversation-id INTEG_CID`
+   Outcomes / exit codes (safe under `set -e` for success paths):
+   - `SEEDED` (new ACTIVE row) → exit `0`
+   - `UPDATED` (same conversation+chat, filled NULL `integration_conversation_id`
+     once) → exit `0`
+   - `ALREADY_PRESENT` (identical ACTIVE binding) → exit `0`
+   - `REFUSED` / errors (conflict, repoint, invalid input) → exit `2`
+   Conflict/repoint of non-null integ or conversation/chat mismatch → fail
+   closed, zero mutation.
+4. **Staged enablement** (по одному, с проверкой):
+   - `AMOCRM_CHAT_WEBHOOK_ENABLED=true` + channel secret → manager ingress;
+   - `AMOCRM_CHAT_EGRESS_ENABLED=true` + scope → CLIENT_INBOUND / BOT_OUTBOUND
+     projection;
+   - `AMOCRM_CRM_REST_ENABLED=true` + client id/secret + API base;
+   - `AMOCRM_CRM_DEAL_CREATE_ENABLED=true` + pipeline/status → TECHNICAL_DEAL.
+   Rollback шага: соответствующий enable-флаг → `false` (zero HTTP).
+
 `docker-compose.yml` сохраняет безопасные defaults `BOT_MODE=OFF` и
 `EMERGENCY_LOCK=true`, не принимает `DATABASE_URL` по умолчанию, запускает
 контейнеры без root/capabilities с read-only filesystem и применяет
