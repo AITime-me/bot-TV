@@ -395,6 +395,7 @@ def test_compose_amocrm_defaults_fail_closed_no_secret_material() -> None:
         assert env["AMOCRM_CRM_REST_ENABLED"] == (
             "${AMOCRM_CRM_REST_ENABLED:-false}"
         )
+        assert env["AMOCRM_CRM_REDIRECT_URI"] == "${AMOCRM_CRM_REDIRECT_URI:-}"
         assert env["AMOCRM_CRM_DEAL_CREATE_ENABLED"] == (
             "${AMOCRM_CRM_DEAL_CREATE_ENABLED:-false}"
         )

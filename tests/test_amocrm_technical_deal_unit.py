@@ -48,6 +48,7 @@ def _valid_deal_env(**extra: str) -> dict[str, str]:
         "AMOCRM_CLIENT_ID": "crm-client-id-001",
         "AMOCRM_CLIENT_SECRET": "crm-secret-xxxxxxxxxx",
         "AMOCRM_CRM_API_BASE_URL": "https://example.amocrm.ru",
+        "AMOCRM_CRM_REDIRECT_URI": "https://example.com/oauth",
         "AMOCRM_CRM_DEAL_CREATE_ENABLED": "true",
         "AMOCRM_CRM_DEAL_PIPELINE_ID": "1001",
         "AMOCRM_CRM_DEAL_STATUS_ID": "2002",
@@ -68,6 +69,8 @@ def test_deal_create_enabled_missing_pipeline_fail_closed() -> None:
                 "AMOCRM_CRM_REST_ENABLED": "true",
                 "AMOCRM_CLIENT_ID": "crm-client-id-001",
                 "AMOCRM_CLIENT_SECRET": "crm-secret-xxxxxxxxxx",
+                "AMOCRM_CRM_API_BASE_URL": "https://example.amocrm.ru",
+                "AMOCRM_CRM_REDIRECT_URI": "https://example.com/oauth",
                 "AMOCRM_CRM_DEAL_CREATE_ENABLED": "true",
                 "AMOCRM_CRM_DEAL_STATUS_ID": "2002",
             }
@@ -155,6 +158,7 @@ async def test_hostile_uuid_subclass_int_raises_fail_closed_zero_http() -> None:
                 client_id="c",
                 client_secret="secret12",
                 api_base_url="https://example.amocrm.ru",
+                redirect_uri="https://example.com/oauth",
             ),
         ),
         transport=transport,
@@ -183,6 +187,7 @@ async def test_ensure_rejects_invalid_conversation_id_fail_closed(bad: object) -
                 client_id="c",
                 client_secret="secret12",
                 api_base_url="https://example.amocrm.ru",
+                redirect_uri="https://example.com/oauth",
             ),
         ),
         transport=transport,
@@ -226,6 +231,7 @@ def test_lead_create_payload_is_v4_shape() -> None:
             client_id="c",
             client_secret="secret12",
             api_base_url="https://example.amocrm.ru",
+            redirect_uri="https://example.com/oauth",
         ),
         transport=transport,
     )
@@ -261,6 +267,7 @@ def test_ambiguous_create_marks_flag() -> None:
             client_id="c",
             client_secret="secret12",
             api_base_url="https://example.amocrm.ru",
+            redirect_uri="https://example.com/oauth",
         ),
         transport=transport,
     )
@@ -286,6 +293,7 @@ def _lead_client(transport: _FakeTransport) -> AmoCrmLeadHttpClient:
             client_id="c",
             client_secret="secret12",
             api_base_url="https://example.amocrm.ru",
+            redirect_uri="https://example.com/oauth",
         ),
         transport=transport,
     )

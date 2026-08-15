@@ -53,6 +53,7 @@ def _enabled_rest() -> AmoCrmCrmRestConfig:
         client_id="cid",
         client_secret="csecret12",
         api_base_url="https://example.amocrm.ru",
+        redirect_uri="https://example.com/oauth",
         connection_scope="default",
     )
 
