@@ -268,6 +268,7 @@ class AmoCrmCrmRestHttpClient:
                 error_code=exc.code,
             )
         assert lease is not None and pre_refresh is not None
+        assert self._config.redirect_uri is not None
 
         body = json.dumps(
             {
@@ -275,6 +276,7 @@ class AmoCrmCrmRestHttpClient:
                 "client_secret": self._config.client_secret,
                 "grant_type": "refresh_token",
                 "refresh_token": pre_refresh.refresh_token,
+                "redirect_uri": self._config.redirect_uri,
             },
             separators=(",", ":"),
         ).encode("utf-8")

@@ -258,6 +258,7 @@ async def test_http_refresh_uses_lease_and_fake_transport(
             client_id="cid",
             client_secret="csecret12",
             api_base_url="https://example.amocrm.ru",
+            redirect_uri="https://example.com/oauth",
             connection_scope=_SCOPE,
         ),
         session_factory=session_factory,
@@ -271,6 +272,8 @@ async def test_http_refresh_uses_lease_and_fake_transport(
     assert transport.calls[0].url.endswith("/oauth2/access_token")
     body = transport.calls[0].body.decode("utf-8")
     assert "refresh-before" in body
+    payload = json.loads(body)
+    assert payload["redirect_uri"] == "https://example.com/oauth"
     assert "csecret12" not in repr(transport.calls[0])
 
     async with session_scope(session_factory) as session:
@@ -318,6 +321,7 @@ async def test_post_200_recover_when_refresh_lease_expired(
             client_id="cid",
             client_secret="csecret12",
             api_base_url="https://example.amocrm.ru",
+            redirect_uri="https://example.com/oauth",
             connection_scope=_SCOPE,
         ),
         session_factory=session_factory,
@@ -389,6 +393,7 @@ async def test_post_200_superseded_when_pre_refresh_no_longer_in_db(
             client_id="cid",
             client_secret="csecret12",
             api_base_url="https://example.amocrm.ru",
+            redirect_uri="https://example.com/oauth",
             connection_scope=_SCOPE,
         ),
         session_factory=session_factory,

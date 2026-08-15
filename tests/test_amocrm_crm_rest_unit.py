@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 from pathlib import Path
 from uuid import uuid4
@@ -45,6 +46,7 @@ _KEY = secrets.token_bytes(KEY_SIZE_BYTES)
 _KEY_B64 = base64.urlsafe_b64encode(_KEY).decode("ascii")
 _CLIENT_ID = "crm-client-id-001"
 _CLIENT_SECRET = "crm-secret-" + ("x" * 16)
+_REDIRECT_URI = "https://example.com/oauth"
 
 
 def _oauth_env(**extra: str) -> dict[str, str]:
@@ -62,6 +64,7 @@ def _valid_crm_env(**extra: str) -> dict[str, str]:
         "AMOCRM_CLIENT_ID": _CLIENT_ID,
         "AMOCRM_CLIENT_SECRET": _CLIENT_SECRET,
         "AMOCRM_CRM_API_BASE_URL": "https://example.amocrm.ru",
+        "AMOCRM_CRM_REDIRECT_URI": _REDIRECT_URI,
     }
     env.update(extra)
     return env
@@ -83,6 +86,16 @@ def test_crm_rest_default_off() -> None:
     config = AmoCrmCrmRestConfig.from_env({})
     assert config.enabled is False
     assert config.connection_scope == "default"
+    assert config.redirect_uri is None
+
+
+def test_crm_rest_disabled_without_redirect_uri() -> None:
+    config = AmoCrmCrmRestConfig.from_env({"AMOCRM_CRM_REST_ENABLED": "false"})
+    assert config.enabled is False
+    assert config.redirect_uri is None
+    closed = load_crm_rest_config_fail_closed({})
+    assert closed.enabled is False
+    assert closed.redirect_uri is None
 
 
 def test_crm_rest_disabled_preserves_explicit_connection_scope() -> None:
@@ -142,6 +155,82 @@ def test_crm_rest_enabled_missing_credentials_raises() -> None:
                 "AMOCRM_CLIENT_ID": _CLIENT_ID,
             }
         )
+    with pytest.raises(AmoCrmCrmRestConfigError, match="REDIRECT_URI_REQUIRED"):
+        AmoCrmCrmRestConfig.from_env(
+            {
+                "AMOCRM_CRM_REST_ENABLED": "true",
+                "AMOCRM_CLIENT_ID": _CLIENT_ID,
+                "AMOCRM_CLIENT_SECRET": _CLIENT_SECRET,
+            }
+        )
+
+
+def test_crm_rest_enabled_invalid_redirect_uri_raises() -> None:
+    with pytest.raises(AmoCrmCrmRestConfigError, match="REDIRECT_URI_INVALID"):
+        AmoCrmCrmRestConfig.from_env(
+            _valid_crm_env(AMOCRM_CRM_REDIRECT_URI="http://insecure.example/oauth")
+        )
+    with pytest.raises(AmoCrmCrmRestConfigError, match="REDIRECT_URI_INVALID"):
+        AmoCrmCrmRestConfig.from_env(
+            _valid_crm_env(AMOCRM_CRM_REDIRECT_URI="https://example.com/o auth")
+        )
+
+
+def test_enabled_missing_or_invalid_redirect_fail_closed_zero_oauth_http() -> None:
+    transport = _FakeTransport()
+    for environ in (
+        {
+            "AMOCRM_CRM_REST_ENABLED": "true",
+            "AMOCRM_CLIENT_ID": _CLIENT_ID,
+            "AMOCRM_CLIENT_SECRET": _CLIENT_SECRET,
+            "AMOCRM_CRM_API_BASE_URL": "https://example.amocrm.ru",
+        },
+        _valid_crm_env(AMOCRM_CRM_REDIRECT_URI="http://bad.example/oauth"),
+        _valid_crm_env(AMOCRM_CRM_REDIRECT_URI=""),
+    ):
+        config = load_crm_rest_config_fail_closed(environ)
+        assert config.enabled is False
+        assert config.redirect_uri is None
+        client = AmoCrmCrmRestHttpClient(
+            config,
+            session_factory=object(),  # type: ignore[arg-type]
+            transport=transport,
+        )
+        outcome, _ = client.authorized_get(path="/api/v4/account", access_token="t")
+        assert outcome is AmoCrmCrmRestOutcome.DISABLED
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_enabled_invalid_redirect_refresh_zero_oauth_http() -> None:
+    transport = _FakeTransport()
+    config = load_crm_rest_config_fail_closed(
+        _valid_crm_env(AMOCRM_CRM_REDIRECT_URI="http://bad.example/oauth")
+    )
+    assert config.enabled is False
+    client = AmoCrmCrmRestHttpClient(
+        config,
+        session_factory=object(),  # type: ignore[arg-type]
+        transport=transport,
+    )
+    result = await client.refresh_tokens()
+    assert result.outcome is AmoCrmCrmRestOutcome.DISABLED
+    assert transport.calls == []
+    assert client.http_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_disabled_config_zero_oauth_http_without_redirect() -> None:
+    transport = _FakeTransport()
+    client = AmoCrmCrmRestHttpClient(
+        AmoCrmCrmRestConfig(enabled=False),
+        session_factory=object(),  # type: ignore[arg-type]
+        transport=transport,
+    )
+    result = await client.refresh_tokens()
+    assert result.outcome is AmoCrmCrmRestOutcome.DISABLED
+    assert transport.calls == []
+    assert client.http_calls == []
 
 
 def test_load_crm_rest_config_fail_closed_does_not_raise() -> None:
@@ -163,11 +252,28 @@ def test_load_crm_rest_config_fail_closed_does_not_raise() -> None:
             "AMOCRM_CLIENT_ID": _CLIENT_ID,
             "AMOCRM_CLIENT_SECRET": _CLIENT_SECRET,
             "AMOCRM_CRM_API_BASE_URL": "http://insecure.example",
+            "AMOCRM_CRM_REDIRECT_URI": _REDIRECT_URI,
+        },
+        {
+            "AMOCRM_CRM_REST_ENABLED": "true",
+            "AMOCRM_CLIENT_ID": _CLIENT_ID,
+            "AMOCRM_CLIENT_SECRET": _CLIENT_SECRET,
+            "AMOCRM_CRM_API_BASE_URL": "https://example.amocrm.ru",
+            "AMOCRM_CRM_REDIRECT_URI": "http://insecure.example/oauth",
         },
     ],
 )
 def test_invalid_enabled_config_fail_closed(environ: dict[str, str]) -> None:
     assert load_crm_rest_config_fail_closed(environ).enabled is False
+
+
+def test_valid_crm_config_preserves_exact_redirect_uri() -> None:
+    exact = "https://example.com/oauth/callback/"
+    config = AmoCrmCrmRestConfig.from_env(
+        _valid_crm_env(AMOCRM_CRM_REDIRECT_URI=exact)
+    )
+    assert config.enabled is True
+    assert config.redirect_uri == exact
 
 
 def test_valid_crm_config_redacts_secrets() -> None:
@@ -424,6 +530,9 @@ async def test_post_200_stale_lease_recovers_without_second_refresh(
     assert result.outcome is AmoCrmCrmRestOutcome.SUCCESS
     assert len(transport.calls) == 1
     assert client.http_calls == ["REFRESH"]
+    refresh_body = json.loads(transport.calls[0].body.decode("utf-8"))
+    assert refresh_body["redirect_uri"] == _REDIRECT_URI
+    assert refresh_body["grant_type"] == "refresh_token"
     assert rotate_calls["n"] == 1
     assert recover_calls["n"] == 1
     assert "refresh-after" not in repr(result)
@@ -508,6 +617,89 @@ async def test_post_200_superseded_fails_closed_no_second_refresh(
     assert result.outcome is AmoCrmCrmRestOutcome.PERMANENT_ERROR
     assert result.error_code == "AMOCRM_CRM_OAUTH_ROTATE_SUPERSEDED"
     assert len(transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_request_includes_exact_redirect_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import AsyncMock
+
+    from app.repositories import amocrm_crm_oauth_tokens as oauth_repo
+
+    exact = "https://integration.example/amocrm/oauth/callback/"
+    transport = _FakeTransport()
+    transport.responses.append(
+        S2sHttpResponse(
+            status_code=200,
+            headers={},
+            body=(
+                b'{"access_token":"access-after","refresh_token":"refresh-after",'
+                b'"expires_in":3600}'
+            ),
+        )
+    )
+    lease = oauth_repo.OauthRefreshLease(
+        token_row_id=uuid4(),
+        connection_scope="default",
+        lease_owner="w1",
+        lease_token=uuid4(),
+        lease_version=2,
+        lease_until=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+
+    @asynccontextmanager
+    async def _scope(_factory):  # type: ignore[no-untyped-def]
+        yield AsyncMock()
+
+    monkeypatch.setattr("app.core.amocrm_crm_rest_http.session_scope", _scope)
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.claim_refresh_lease",
+        AsyncMock(return_value=lease),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.get_by_scope",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.decrypt_row",
+        lambda *_a, **_k: oauth_repo.DecryptedOauthTokens(
+            access_token="access-before",
+            refresh_token="refresh-before",
+            access_expires_at=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.renew_refresh_lease",
+        AsyncMock(return_value=lease),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.rotate_tokens_with_lease",
+        AsyncMock(return_value=object()),
+    )
+
+    client = AmoCrmCrmRestHttpClient(
+        AmoCrmCrmRestConfig.from_env(
+            _valid_crm_env(AMOCRM_CRM_REDIRECT_URI=exact)
+        ),
+        session_factory=object(),  # type: ignore[arg-type]
+        transport=transport,
+        worker_id="w1",
+    )
+    result = await client.refresh_tokens()
+    assert result.outcome is AmoCrmCrmRestOutcome.SUCCESS
+    assert len(transport.calls) == 1
+    payload = json.loads(transport.calls[0].body.decode("utf-8"))
+    assert payload["redirect_uri"] == exact
+    assert list(payload.keys()) == [
+        "client_id",
+        "client_secret",
+        "grant_type",
+        "refresh_token",
+        "redirect_uri",
+    ]
 
 
 def test_oauth_dual_write_residual_documented() -> None:

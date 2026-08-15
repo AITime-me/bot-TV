@@ -56,6 +56,22 @@ def _require_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def _require_redirect_uri(value: str) -> str:
+    """Validate OAuth redirect_uri; preserve exact configured string."""
+
+    if type(value) is not str or not value:
+        raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REDIRECT_URI_REQUIRED") from None
+    if any(ch.isspace() for ch in value) or any(ord(ch) < 32 for ch in value):
+        raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REDIRECT_URI_INVALID") from None
+    if any(ord(ch) == 127 for ch in value):
+        raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REDIRECT_URI_INVALID") from None
+    if not value.startswith("https://"):
+        raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REDIRECT_URI_INVALID") from None
+    if len(value) > 2048:
+        raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REDIRECT_URI_INVALID") from None
+    return value
+
+
 def connection_scope_from_env(
     environ: Mapping[str, str] | None = None,
 ) -> str:
@@ -81,6 +97,7 @@ class AmoCrmCrmRestConfig:
     client_id: str | None = None
     client_secret: str | None = None
     api_base_url: str = DEFAULT_AMOCRM_CRM_API_BASE_URL
+    redirect_uri: str | None = None
     connection_scope: str = "default"
 
     def __repr__(self) -> str:
@@ -89,13 +106,18 @@ class AmoCrmCrmRestConfig:
             f"enabled={self.enabled!r}, "
             "client_id=<redacted>, client_secret=<redacted>, "
             f"api_base_url={self.api_base_url!r}, "
+            f"redirect_uri={self.redirect_uri!r}, "
             "connection_scope=<redacted>)"
         )
 
     def require_runtime(self) -> None:
         if not self.enabled:
             raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REST_DISABLED") from None
-        if self.client_id is None or self.client_secret is None:
+        if (
+            self.client_id is None
+            or self.client_secret is None
+            or self.redirect_uri is None
+        ):
             raise AmoCrmCrmRestConfigError("AMOCRM_CRM_REST_CONFIG_INVALID") from None
 
     @classmethod
@@ -136,11 +158,20 @@ class AmoCrmCrmRestConfig:
             source.get("AMOCRM_BASE_URL", DEFAULT_AMOCRM_CRM_API_BASE_URL),
         )
         api_base_url = _require_base_url(base_raw)
+
+        redirect_raw = source.get("AMOCRM_CRM_REDIRECT_URI")
+        if redirect_raw is None or redirect_raw == "":
+            raise AmoCrmCrmRestConfigError(
+                "AMOCRM_CRM_REDIRECT_URI_REQUIRED"
+            ) from None
+        redirect_uri = _require_redirect_uri(redirect_raw)
+
         return cls(
             enabled=True,
             client_id=client_id,
             client_secret=client_secret,
             api_base_url=api_base_url,
+            redirect_uri=redirect_uri,
             connection_scope=connection_scope,
         )
 

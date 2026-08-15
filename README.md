@@ -261,7 +261,8 @@ Immediate rollback будущего включения: остановить т�
    - `AMOCRM_CHAT_WEBHOOK_ENABLED=true` + channel secret → manager ingress;
    - `AMOCRM_CHAT_EGRESS_ENABLED=true` + scope → CLIENT_INBOUND / BOT_OUTBOUND
      projection;
-   - `AMOCRM_CRM_REST_ENABLED=true` + client id/secret + API base;
+   - `AMOCRM_CRM_REST_ENABLED=true` + client id/secret + API base +
+     `AMOCRM_CRM_REDIRECT_URI` (exact OAuth redirect_uri);
    - `AMOCRM_CRM_DEAL_CREATE_ENABLED=true` + pipeline/status → TECHNICAL_DEAL.
    Rollback шага: соответствующий enable-флаг → `false` (zero HTTP).
 
