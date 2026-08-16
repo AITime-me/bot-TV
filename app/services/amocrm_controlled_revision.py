@@ -1,16 +1,17 @@
-"""Fail-closed executor for the owner-approved legacy PROGREV revision.
+"""Offline-only fail-closed executor for the approved legacy PROGREV revision.
 
-This module deliberately exposes no generic CRM write API.  It can only create
-the one approved task and move a lead from the one approved source state to the
-one approved target state, after fresh checks and with a post-write receipt.
+This is deliberately not a general amoCRM client: its private transport rejects
+every method, path and body except the exact read/create/move sequence below.
 """
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from app.core.amocrm_crm_rest_http import _CrmHttpStdlibTransport
-from app.core.s2s_http_transport import S2sHttpRequest
+from app.core.amocrm_crm_rest_http import AmoCrmCrmRestTransport
+from app.core.s2s_http_transport import S2sHttpRequest, S2sHttpTransportError
 
 SOURCE_PIPELINE = 7408150
 SOURCE_STATUS = 61561286
@@ -19,6 +20,10 @@ TARGET_STATUS = 87911490
 MANAGER_ID = 9655458
 TASK_TYPE_ID = 3176798
 TASK_TEXT = "Проверить историю клиента и определить дальнейшее действие"
+_LEAD_PATH = re.compile(r"^/api/v4/leads/[1-9][0-9]*$")
+_TASKS_PATH = re.compile(
+    r"^/api/v4/tasks\?filter\[entity_id\]=[1-9][0-9]*&filter\[is_completed\]=0&limit=250$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,56 +35,108 @@ class ControlledRevisionReceipt:
 
 
 class ControlledRevisionExecutor:
-    def __init__(self, *, api_base_url: str, access_token: str) -> None:
+    def __init__(
+        self,
+        *,
+        api_base_url: str,
+        transport: AmoCrmCrmRestTransport,
+        token_loader: Callable[[], Awaitable[str | None]],
+        refresh_once: Callable[[], Awaitable[bool]],
+    ) -> None:
         self._base = api_base_url
-        self._token = access_token
-        self._transport = _CrmHttpStdlibTransport()
+        self._transport = transport
+        self._token_loader = token_loader
+        self._refresh_once = refresh_once
 
-    def _request(self, method: str, path: str, body: object | None = None) -> tuple[int, dict]:
-        if method not in {"GET", "POST", "PATCH"} or not path.startswith("/api/v4/"):
+    @staticmethod
+    def refused(lead_id: int, error_code: str) -> ControlledRevisionReceipt:
+        return ControlledRevisionReceipt(lead_id=lead_id, outcome="REFUSED", error_code=error_code)
+
+    @staticmethod
+    def _task_path(lead_id: int) -> str:
+        return f"/api/v4/tasks?filter[entity_id]={lead_id}&filter[is_completed]=0&limit=250"
+
+    @staticmethod
+    def _task_body(lead_id: int, complete_till: int) -> list[dict[str, object]]:
+        return [{
+            "entity_id": lead_id,
+            "entity_type": "leads",
+            "responsible_user_id": MANAGER_ID,
+            "task_type_id": TASK_TYPE_ID,
+            "text": TASK_TEXT,
+            "complete_till": complete_till,
+        }]
+
+    @staticmethod
+    def _allowed(method: str, path: str, body: object | None) -> bool:
+        if method == "GET":
+            return body is None and (_LEAD_PATH.fullmatch(path) is not None or _TASKS_PATH.fullmatch(path) is not None)
+        if method == "PATCH":
+            return _LEAD_PATH.fullmatch(path) is not None and body == {"pipeline_id": TARGET_PIPELINE, "status_id": TARGET_STATUS}
+        if method == "POST" and path == "/api/v4/tasks" and isinstance(body, list) and len(body) == 1:
+            row = body[0]
+            return isinstance(row, dict) and set(row) == {"entity_id", "entity_type", "responsible_user_id", "task_type_id", "text", "complete_till"} and type(row["entity_id"]) is int and row["entity_id"] > 0 and row["entity_type"] == "leads" and row["responsible_user_id"] == MANAGER_ID and row["task_type_id"] == TASK_TYPE_ID and row["text"] == TASK_TEXT and type(row["complete_till"]) is int and row["complete_till"] > 0
+        return False
+
+    async def _request(self, method: str, path: str, body: object | None = None, *, retry_get_401: bool = True) -> tuple[int, dict]:
+        if not self._allowed(method, path, body):
             raise ValueError("CONTROLLED_REVISION_REQUEST_REFUSED")
+        token = await self._token_loader()
+        if not token:
+            raise RuntimeError("AMOCRM_CRM_OAUTH_NOT_FOUND")
         raw = b"" if body is None else json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
-        response = self._transport.request(S2sHttpRequest(method=method, url=f"{self._base}{path}", headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}, body=raw, timeout_seconds=10.0, allow_redirects=False, max_response_bytes=65536))
+        def send(current_token: str):
+            return self._transport.request(S2sHttpRequest(method=method, url=f"{self._base}{path}", headers={"Authorization": f"Bearer {current_token}", "Content-Type": "application/json"}, body=raw, timeout_seconds=10.0, allow_redirects=False, max_response_bytes=65536))
         try:
-            payload = json.loads(response.body) if response.body else {}
+            response = send(token)
+            if response.status_code == 401 and method == "GET" and retry_get_401:
+                if not await self._refresh_once():
+                    raise RuntimeError("AMOCRM_CRM_REFRESH_FAILED")
+                return await self._request(method, path, body, retry_get_401=False)
+        except S2sHttpTransportError as exc:
+            raise RuntimeError("CONTROLLED_REVISION_TRANSPORT") from exc
+        try:
+            return response.status_code, json.loads(response.body) if response.body else {}
         except ValueError:
-            payload = {}
-        return response.status_code, payload
+            return response.status_code, {}
 
-    def _active_tasks(self) -> list[dict]:
-        rows: list[dict] = []
-        for page in range(1, 61):
-            status, data = self._request("GET", f"/api/v4/tasks?filter[entity_type]=leads&filter[is_completed]=0&limit=50&page={page}")
-            if status != 200:
-                raise RuntimeError("CONTROLLED_REVISION_TASK_CHECK_FAILED")
-            page_rows = (data.get("_embedded") or {}).get("tasks") or []
-            rows.extend(page_rows)
-            if len(page_rows) < 50:
-                return rows
-        raise RuntimeError("CONTROLLED_REVISION_TASK_PAGE_CAP")
+    async def _lead(self, lead_id: int) -> tuple[int, dict]:
+        return await self._request("GET", f"/api/v4/leads/{lead_id}")
 
-    def execute(self, *, lead_id: int, complete_till: int, apply: bool) -> ControlledRevisionReceipt:
+    async def _active_tasks(self, lead_id: int) -> list[dict]:
+        status, data = await self._request("GET", self._task_path(lead_id))
+        rows = (data.get("_embedded") or {}).get("tasks") or []
+        if status != 200 or not isinstance(rows, list) or (data.get("_embedded") or {}).get("next"):
+            raise RuntimeError("CONTROLLED_REVISION_TASK_CHECK_FAILED")
+        if any(not isinstance(row, dict) or row.get("entity_type") != "leads" or row.get("entity_id") != lead_id for row in rows):
+            raise RuntimeError("CONTROLLED_REVISION_TASK_ENTITY_MISMATCH")
+        return rows
+
+    async def execute(self, *, lead_id: int, complete_till: int, apply: bool) -> ControlledRevisionReceipt:
         if type(lead_id) is not int or lead_id <= 0 or type(complete_till) is not int or complete_till <= 0:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="REFUSED", error_code="CONTROLLED_REVISION_INPUT_INVALID")
-        status, lead = self._request("GET", f"/api/v4/leads/{lead_id}")
-        if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or lead.get("status_id") != SOURCE_STATUS:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="REFUSED", error_code="CONTROLLED_REVISION_SOURCE_STATE")
-        if any(task.get("entity_id") == lead_id for task in self._active_tasks()):
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="REFUSED", error_code="CONTROLLED_REVISION_ACTIVE_TASK")
-        if not apply:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="DRY_RUN")
-        status, task_data = self._request("POST", "/api/v4/tasks", [{"entity_id": lead_id, "entity_type": "leads", "responsible_user_id": MANAGER_ID, "task_type_id": TASK_TYPE_ID, "text": TASK_TEXT, "complete_till": complete_till}])
-        if not 200 <= status < 300:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_REVISION_TASK_CREATE")
-        task_id = (((task_data.get("_embedded") or {}).get("tasks") or [{}])[0]).get("id")
-        status, lead = self._request("GET", f"/api/v4/leads/{lead_id}")
-        if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or lead.get("status_id") != SOURCE_STATUS:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", task_id=task_id, error_code="CONTROLLED_REVISION_STATE_CHANGED")
-        status, _ = self._request("PATCH", f"/api/v4/leads/{lead_id}", {"pipeline_id": TARGET_PIPELINE, "status_id": TARGET_STATUS})
-        if not 200 <= status < 300:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", task_id=task_id, error_code="CONTROLLED_REVISION_MOVE")
-        status, lead = self._request("GET", f"/api/v4/leads/{lead_id}")
-        matching = [t for t in self._active_tasks() if t.get("entity_id") == lead_id and t.get("responsible_user_id") == MANAGER_ID and t.get("task_type_id") == TASK_TYPE_ID and t.get("text") == TASK_TEXT and t.get("complete_till") == complete_till]
-        if status != 200 or lead.get("pipeline_id") != TARGET_PIPELINE or lead.get("status_id") != TARGET_STATUS or len(matching) != 1:
-            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", task_id=task_id, error_code="CONTROLLED_REVISION_POSTCHECK")
-        return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED", task_id=task_id)
+            return self.refused(lead_id, "CONTROLLED_REVISION_INPUT_INVALID")
+        try:
+            status, lead = await self._lead(lead_id)
+            if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or lead.get("status_id") != SOURCE_STATUS:
+                return self.refused(lead_id, "CONTROLLED_REVISION_SOURCE_STATE")
+            if await self._active_tasks(lead_id):
+                return self.refused(lead_id, "CONTROLLED_REVISION_ACTIVE_TASK")
+            if not apply:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="DRY_RUN")
+            status, task_data = await self._request("POST", "/api/v4/tasks", self._task_body(lead_id, complete_till))
+            if not 200 <= status < 300:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_REVISION_TASK_CREATE")
+            task_id = (((task_data.get("_embedded") or {}).get("tasks") or [{}])[0]).get("id")
+            status, lead = await self._lead(lead_id)
+            if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or lead.get("status_id") != SOURCE_STATUS:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", task_id=task_id, error_code="CONTROLLED_REVISION_STATE_CHANGED")
+            status, _ = await self._request("PATCH", f"/api/v4/leads/{lead_id}", {"pipeline_id": TARGET_PIPELINE, "status_id": TARGET_STATUS})
+            if not 200 <= status < 300:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", task_id=task_id, error_code="CONTROLLED_REVISION_MOVE")
+            status, lead = await self._lead(lead_id)
+            matching = [row for row in await self._active_tasks(lead_id) if row.get("responsible_user_id") == MANAGER_ID and row.get("task_type_id") == TASK_TYPE_ID and row.get("text") == TASK_TEXT and row.get("complete_till") == complete_till]
+            if status != 200 or lead.get("pipeline_id") != TARGET_PIPELINE or lead.get("status_id") != TARGET_STATUS or len(matching) != 1:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", task_id=task_id, error_code="CONTROLLED_REVISION_POSTCHECK")
+            return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED", task_id=task_id)
+        except (RuntimeError, ValueError) as exc:
+            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=str(exc))

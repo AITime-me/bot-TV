@@ -28,7 +28,6 @@ from app.services.amocrm_crm_ops import (
     AmoCrmOpsOutcome,
     read_secret_line,
 )
-from app.services.amocrm_controlled_revision import ControlledRevisionExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +81,9 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Bot-TV conversation UUID.",
     )
-    revision = sub.add_parser("controlled-revision", help="Run the fixed PROGREV revision executor.")
+    revision = sub.add_parser(
+        "controlled-revision", help="Run the fixed PROGREV revision executor."
+    )
     revision.add_argument("--lead-id", required=True, type=int)
     revision.add_argument("--complete-till", required=True, type=int)
     revision.add_argument("--apply", action="store_true")
@@ -153,12 +154,15 @@ async def _run(
                 confirmed_deal_id=args.confirmed_deal_id,
             )
         elif args.command == "controlled-revision":
-            token = await service._load_access_token()
-            if token is None:
-                print("controlled_revision outcome=REFUSED error_code=AMOCRM_CRM_OAUTH_NOT_FOUND")
-                return 2
-            receipt = ControlledRevisionExecutor(api_base_url=rest_config.api_base_url, access_token=token).execute(lead_id=args.lead_id, complete_till=args.complete_till, apply=args.apply)
-            print(f"controlled_revision lead_id={receipt.lead_id} outcome={receipt.outcome} task_id={receipt.task_id or '-'} error_code={receipt.error_code or '-'}")
+            # Deliberately lazy: api/worker/chat never import this offline-only path.
+            receipt = await service.run_controlled_revision(
+                lead_id=args.lead_id, complete_till=args.complete_till, apply=args.apply
+            )
+            print(
+                "controlled_revision "
+                f"lead_id={receipt.lead_id} outcome={receipt.outcome} "
+                f"task_id={receipt.task_id or '-'} error_code={receipt.error_code or '-'}"
+            )
             return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
         else:
             return 2
