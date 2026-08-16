@@ -64,6 +64,9 @@ async def test_dry_run_is_zero_writes() -> None:
     receipt = await _executor(transport).execute(lead_id=_LEAD_ID, complete_till=_DUE, apply=False)
     assert receipt.outcome == "DRY_RUN"
     assert [call.method for call in transport.calls] == ["GET", "GET"]
+    assert transport.calls[1].url.endswith(
+        "/api/v4/tasks?filter[entity_type]=leads&filter[entity_id]=42&filter[is_completed]=0&limit=250"
+    )
 
 
 @pytest.mark.asyncio
@@ -102,6 +105,14 @@ async def test_postcheck_and_entity_mismatch_fail_closed() -> None:
     assert (await _executor(postcheck).execute(lead_id=_LEAD_ID, complete_till=_DUE, apply=True)).error_code == "CONTROLLED_REVISION_POSTCHECK"
     mismatch = _Transport([(200, _lead()), (200, _tasks({"entity_id": _LEAD_ID, "entity_type": "contacts"}))])
     assert (await _executor(mismatch).execute(lead_id=_LEAD_ID, complete_till=_DUE, apply=False)).error_code == "CONTROLLED_REVISION_TASK_ENTITY_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_task_pagination_link_fails_closed() -> None:
+    paginated = _Transport([(200, _lead()), (200, {"_embedded": {"tasks": []}, "_links": {"next": {"href": "/api/v4/tasks?page=2"}}})])
+    receipt = await _executor(paginated).execute(lead_id=_LEAD_ID, complete_till=_DUE, apply=False)
+    assert receipt.outcome == "FAILED"
+    assert receipt.error_code == "CONTROLLED_REVISION_TASK_CHECK_FAILED"
 
 
 @pytest.mark.asyncio

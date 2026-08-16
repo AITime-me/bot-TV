@@ -22,7 +22,7 @@ TASK_TYPE_ID = 3176798
 TASK_TEXT = "Проверить историю клиента и определить дальнейшее действие"
 _LEAD_PATH = re.compile(r"^/api/v4/leads/[1-9][0-9]*$")
 _TASKS_PATH = re.compile(
-    r"^/api/v4/tasks\?filter\[entity_id\]=[1-9][0-9]*&filter\[is_completed\]=0&limit=250$"
+    r"^/api/v4/tasks\?filter\[entity_type\]=leads&filter\[entity_id\]=[1-9][0-9]*&filter\[is_completed\]=0&limit=250$"
 )
 
 
@@ -54,7 +54,10 @@ class ControlledRevisionExecutor:
 
     @staticmethod
     def _task_path(lead_id: int) -> str:
-        return f"/api/v4/tasks?filter[entity_id]={lead_id}&filter[is_completed]=0&limit=250"
+        return (
+            "/api/v4/tasks?filter[entity_type]=leads"
+            f"&filter[entity_id]={lead_id}&filter[is_completed]=0&limit=250"
+        )
 
     @staticmethod
     def _task_body(lead_id: int, complete_till: int) -> list[dict[str, object]]:
@@ -106,7 +109,7 @@ class ControlledRevisionExecutor:
     async def _active_tasks(self, lead_id: int) -> list[dict]:
         status, data = await self._request("GET", self._task_path(lead_id))
         rows = (data.get("_embedded") or {}).get("tasks") or []
-        if status != 200 or not isinstance(rows, list) or (data.get("_embedded") or {}).get("next"):
+        if status != 200 or not isinstance(rows, list) or (data.get("_links") or {}).get("next"):
             raise RuntimeError("CONTROLLED_REVISION_TASK_CHECK_FAILED")
         if any(not isinstance(row, dict) or row.get("entity_type") != "leads" or row.get("entity_id") != lead_id for row in rows):
             raise RuntimeError("CONTROLLED_REVISION_TASK_ENTITY_MISMATCH")
