@@ -71,6 +71,7 @@ class _ScriptedClient(AmoCrmChatEgressHttpClient):
         self.history_calls = 0
         self.send_texts: list[str] = []
         self.last_send_kwargs: dict[str, object] | None = None
+        self.last_history_kwargs: dict[str, object] | None = None
 
     def send_silent_text(self, **kwargs: object) -> AmoCrmChatSendResult:
         self.send_calls += 1
@@ -84,6 +85,7 @@ class _ScriptedClient(AmoCrmChatEgressHttpClient):
 
     def scan_msgid_in_history(self, **kwargs: object) -> AmoCrmChatHistoryScanResult:
         self.history_calls += 1
+        self.last_history_kwargs = dict(kwargs)
         if not self.scan_results:
             return AmoCrmChatHistoryScanResult(scan=AmoCrmChatHistoryScan.ABSENT)
         return self.scan_results.pop(0)
@@ -389,6 +391,143 @@ async def test_ambiguous_send_reconcile_no_blind_resend(
     assert result.projected is True
     assert fake.send_calls == 1
     assert fake.history_calls == 1
+    assert fake.last_history_kwargs is not None
+    assert fake.last_history_kwargs.get("amocrm_chat_id") == "amo-chat-proj-1"
+    assert "integration_conversation_id" not in fake.last_history_kwargs
+    assert fake.last_send_kwargs is not None
+    assert fake.last_send_kwargs.get("integration_conversation_id") == _INTEG_CID
+    assert fake.last_send_kwargs.get("conversation_ref_id") == "amo-chat-proj-1"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_retry_absent_allows_one_resend(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation = await _seed_bound(session_factory)
+    async with session_scope(session_factory) as session:
+        accepted = await InboundService(session).accept(
+            SyntheticInboundEvent(
+                external_conversation_id=conversation.external_conversation_id,
+                external_message_id="client-absent-1",
+                text="absent then send",
+            )
+        )
+        from app.models.amocrm_message_projection import AmocrmProjectionSourceKind
+
+        await projection_repo.enqueue_if_absent(
+            session,
+            conversation_id=conversation.id,
+            source_kind=AmocrmProjectionSourceKind.CLIENT_INBOUND,
+            source_id=accepted.inbox.id,
+            correlation_id=uuid4(),
+        )
+
+    fake = _ScriptedClient()
+    fake.send_results.append(
+        AmoCrmChatSendResult(
+            outcome=AmoCrmChatEgressOutcome.TRANSIENT_ERROR,
+            error_code="AMOCRM_CHAT_HTTP_503",
+        )
+    )
+    worker = AmocrmChatProjectionWorker(
+        session_factory,
+        worker_id="proj-absent",
+        config=AmoCrmChatEgressConfig(
+            enabled=True,
+            channel_secret=_SECRET,
+            scope_id=_SCOPE,
+        ),
+        http_client=fake,
+    )
+    claim1 = await worker.claim_one()
+    assert claim1 is not None
+    with pytest.raises(RuntimeError):
+        await worker.process_claimed(claim1)
+    assert fake.send_calls == 1
+
+    fake.scan_results.append(
+        AmoCrmChatHistoryScanResult(scan=AmoCrmChatHistoryScan.ABSENT)
+    )
+    fake.send_results.append(
+        AmoCrmChatSendResult(
+            outcome=AmoCrmChatEgressOutcome.SUCCESS,
+            amocrm_message_id="amo-after-absent",
+        )
+    )
+    later = datetime.now(timezone.utc) + timedelta(seconds=2)
+    claim2 = await worker.claim_one(now=later)
+    assert claim2 is not None
+    assert claim2.attempt_count >= 2
+    result = await worker.process_claimed(claim2, now=later)
+    assert result.projected is True
+    assert fake.history_calls == 1
+    assert fake.send_calls == 2
+    assert fake.last_history_kwargs is not None
+    assert fake.last_history_kwargs.get("amocrm_chat_id") == "amo-chat-proj-1"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_retry_uncertain_fail_closed_no_resend(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation = await _seed_bound(session_factory)
+    async with session_scope(session_factory) as session:
+        accepted = await InboundService(session).accept(
+            SyntheticInboundEvent(
+                external_conversation_id=conversation.external_conversation_id,
+                external_message_id="client-uncertain-1",
+                text="uncertain history",
+            )
+        )
+        from app.models.amocrm_message_projection import AmocrmProjectionSourceKind
+
+        await projection_repo.enqueue_if_absent(
+            session,
+            conversation_id=conversation.id,
+            source_kind=AmocrmProjectionSourceKind.CLIENT_INBOUND,
+            source_id=accepted.inbox.id,
+            correlation_id=uuid4(),
+        )
+
+    fake = _ScriptedClient()
+    fake.send_results.append(
+        AmoCrmChatSendResult(
+            outcome=AmoCrmChatEgressOutcome.TRANSIENT_ERROR,
+            error_code="AMOCRM_CHAT_HTTP_503",
+        )
+    )
+    worker = AmocrmChatProjectionWorker(
+        session_factory,
+        worker_id="proj-uncertain",
+        config=AmoCrmChatEgressConfig(
+            enabled=True,
+            channel_secret=_SECRET,
+            scope_id=_SCOPE,
+        ),
+        http_client=fake,
+    )
+    claim1 = await worker.claim_one()
+    assert claim1 is not None
+    with pytest.raises(RuntimeError):
+        await worker.process_claimed(claim1)
+    assert fake.send_calls == 1
+
+    fake.scan_results.append(
+        AmoCrmChatHistoryScanResult(
+            scan=AmoCrmChatHistoryScan.UNCERTAIN,
+            error_code="AMOCRM_CHAT_HISTORY_TRANSIENT",
+        )
+    )
+    later = datetime.now(timezone.utc) + timedelta(seconds=2)
+    claim2 = await worker.claim_one(now=later)
+    assert claim2 is not None
+    assert claim2.attempt_count >= 2
+    with pytest.raises(RuntimeError, match="AMOCRM_CHAT_HISTORY"):
+        await worker.process_claimed(claim2, now=later)
+    assert fake.history_calls == 1
+    assert fake.send_calls == 1
+    assert fake.last_history_kwargs is not None
+    assert fake.last_history_kwargs.get("amocrm_chat_id") == "amo-chat-proj-1"
 
 
 @pytest.mark.asyncio
@@ -1025,6 +1164,9 @@ async def test_b1b_ambiguous_retry_reconcile_at_most_one_remote(
         assert fake.history_calls == history_before + 1
         assert len(fake.send_texts) == texts_before + 1
         assert fake.send_texts[-1] == durable
+        assert fake.last_history_kwargs is not None
+        assert fake.last_history_kwargs.get("amocrm_chat_id") == "amo-chat-proj-1"
+        assert "integration_conversation_id" not in fake.last_history_kwargs
         break
     else:
         raise AssertionError("BOT_OUTBOUND claim missing")

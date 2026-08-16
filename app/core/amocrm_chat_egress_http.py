@@ -303,14 +303,18 @@ class AmoCrmChatEgressHttpClient:
     def find_msgid_in_history(
         self,
         *,
-        integration_conversation_id: str,
+        amocrm_chat_id: str,
         integration_msgid: str,
         limit: int = _HISTORY_PAGE_LIMIT,
     ) -> AmoCrmChatHistoryHit:
-        """Compatibility wrapper around a complete history scan."""
+        """Compatibility wrapper around a complete history scan.
+
+        ``amocrm_chat_id`` is the Chat API conversation id (binding /
+        conversation_ref_id), not the integration-side conversation_id.
+        """
 
         scan = self.scan_msgid_in_history(
-            integration_conversation_id=integration_conversation_id,
+            amocrm_chat_id=amocrm_chat_id,
             integration_msgid=integration_msgid,
             page_limit=limit,
         )
@@ -336,11 +340,14 @@ class AmoCrmChatEgressHttpClient:
     def scan_msgid_in_history(
         self,
         *,
-        integration_conversation_id: str,
+        amocrm_chat_id: str,
         integration_msgid: str,
         page_limit: int = _HISTORY_PAGE_LIMIT,
     ) -> AmoCrmChatHistoryScanResult:
-        """Paginated history scan. Prefer fail-closed when absence is unproven."""
+        """Paginated history scan. Prefer fail-closed when absence is unproven.
+
+        Path uses ``amocrm_chat_id`` (Chat API id / conversation_ref_id).
+        """
 
         assert self._config.scope_id is not None
         if page_limit < 1 or page_limit > _HISTORY_PAGE_LIMIT:
@@ -349,7 +356,7 @@ class AmoCrmChatEgressHttpClient:
         offset = 0
         for _ in range(_HISTORY_MAX_PAGES):
             page = self._history_page(
-                integration_conversation_id=integration_conversation_id,
+                amocrm_chat_id=amocrm_chat_id,
                 integration_msgid=integration_msgid,
                 limit=page_limit,
                 offset=offset,
@@ -381,7 +388,7 @@ class AmoCrmChatEgressHttpClient:
     def _history_page(
         self,
         *,
-        integration_conversation_id: str,
+        amocrm_chat_id: str,
         integration_msgid: str,
         limit: int,
         offset: int,
@@ -389,12 +396,12 @@ class AmoCrmChatEgressHttpClient:
         assert self._config.scope_id is not None
         path = (
             f"/v2/origin/custom/{self._config.scope_id}"
-            f"/chats/{integration_conversation_id}/history"
+            f"/chats/{amocrm_chat_id}/history"
             f"?limit={limit}&offset={offset}"
         )
         sign_path = (
             f"/v2/origin/custom/{self._config.scope_id}"
-            f"/chats/{integration_conversation_id}/history"
+            f"/chats/{amocrm_chat_id}/history"
         )
         response = self._signed_request(
             method="GET",
