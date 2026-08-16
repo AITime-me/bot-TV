@@ -251,9 +251,16 @@ class AmoCrmChatEgressHttpClient:
         sender_name: str,
         text: str,
         timestamp_unix: int,
+        sender_ref_id: str | None = None,
     ) -> AmoCrmChatSendResult:
         assert self._config.scope_id is not None
         path = f"/v2/origin/custom/{self._config.scope_id}"
+        sender: dict[str, Any] = {
+            "id": sender_id,
+            "name": sender_name,
+        }
+        if sender_ref_id is not None:
+            sender["ref_id"] = sender_ref_id
         body_obj: dict[str, Any] = {
             "event_type": "new_message",
             "payload": {
@@ -262,10 +269,7 @@ class AmoCrmChatEgressHttpClient:
                 "msgid": integration_msgid,
                 "conversation_id": integration_conversation_id,
                 "conversation_ref_id": conversation_ref_id,
-                "sender": {
-                    "id": sender_id,
-                    "name": sender_name,
-                },
+                "sender": sender,
                 "message": {
                     "type": "text",
                     "text": text,

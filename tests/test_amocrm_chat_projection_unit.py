@@ -13,6 +13,8 @@ from uuid import uuid4
 import pytest
 
 from app.core.amocrm_chat_egress_config import (
+    AMOCRM_CHAT_BOT_SENDER_ID,
+    AMOCRM_CHAT_BOT_SENDER_NAME,
     AmoCrmChatEgressConfig,
     AmoCrmChatEgressConfigError,
 )
@@ -50,6 +52,7 @@ from tests.docker_runtime_allowlist import (
 _REPO = Path(__file__).resolve().parents[1]
 _SECRET = "s" * 32
 _SCOPE = "scope-test-001"
+_BOT_ID = "aca07629-6c59-4330-9f67-a3a5dd4746f4"
 
 
 class _FakeTransport:
@@ -95,11 +98,41 @@ def test_egress_valid_config_redacts_secret() -> None:
             "AMOCRM_CHAT_EGRESS_ENABLED": "true",
             "AMOCRM_CHAT_CHANNEL_SECRET": _SECRET,
             "AMOCRM_CHAT_SCOPE_ID": _SCOPE,
+            "AMOCRM_CHAT_BOT_ID": _BOT_ID,
         }
     )
     assert config.enabled is True
+    assert config.bot_id == _BOT_ID
     assert _SECRET not in repr(config)
     assert _SCOPE not in repr(config)
+    assert _BOT_ID not in repr(config)
+    assert config.require_bot_id_for_outbound() == _BOT_ID
+
+
+def test_egress_bot_id_optional_until_outbound() -> None:
+    config = AmoCrmChatEgressConfig.from_env(
+        {
+            "AMOCRM_CHAT_EGRESS_ENABLED": "true",
+            "AMOCRM_CHAT_CHANNEL_SECRET": _SECRET,
+            "AMOCRM_CHAT_SCOPE_ID": _SCOPE,
+        }
+    )
+    assert config.bot_id is None
+    with pytest.raises(AmoCrmChatEgressConfigError, match="BOT_ID_REQUIRED"):
+        config.require_bot_id_for_outbound()
+
+
+@pytest.mark.parametrize("bot_id", ["short", "has spacexx", "bad\nline"])
+def test_egress_invalid_bot_id_fail_closed(bot_id: str) -> None:
+    with pytest.raises(AmoCrmChatEgressConfigError, match="BOT_ID_INVALID"):
+        AmoCrmChatEgressConfig.from_env(
+            {
+                "AMOCRM_CHAT_EGRESS_ENABLED": "true",
+                "AMOCRM_CHAT_CHANNEL_SECRET": _SECRET,
+                "AMOCRM_CHAT_SCOPE_ID": _SCOPE,
+                "AMOCRM_CHAT_BOT_ID": bot_id,
+            }
+        )
 
 
 def test_hmac_signature_and_body_taxonomy() -> None:
@@ -154,6 +187,33 @@ def test_hmac_signature_and_body_taxonomy() -> None:
     assert b"hello" in transport.calls[0].body
     assert b'"conversation_id":"convhex"' in transport.calls[0].body
     assert b'"conversation_ref_id":"chat-1"' in transport.calls[0].body
+    assert b'"ref_id"' not in transport.calls[0].body
+
+    transport.responses.append(
+        S2sHttpResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {"new_message": {"msgid": "amo-msg-bot", "ref_id": "c" + "3" * 32}}
+            ).encode("utf-8"),
+        )
+    )
+    bot_ok = client.send_silent_text(
+        integration_msgid="c" + "3" * 32,
+        integration_conversation_id="convhex",
+        conversation_ref_id="chat-1",
+        sender_id=AMOCRM_CHAT_BOT_SENDER_ID,
+        sender_name=AMOCRM_CHAT_BOT_SENDER_NAME,
+        text="bot hello",
+        timestamp_unix=1,
+        sender_ref_id=_BOT_ID,
+    )
+    assert bot_ok.outcome is AmoCrmChatEgressOutcome.SUCCESS
+    bot_body = transport.calls[1].body
+    assert f'"id":"{AMOCRM_CHAT_BOT_SENDER_ID}"'.encode() in bot_body
+    assert f'"ref_id":"{_BOT_ID}"'.encode() in bot_body
+    assert AMOCRM_CHAT_BOT_SENDER_NAME.encode("utf-8") in bot_body
+    assert b'"id":"cli1"' not in bot_body
 
     transport.responses.append(
         S2sHttpResponse(status_code=403, headers={}, body=b"{}")
