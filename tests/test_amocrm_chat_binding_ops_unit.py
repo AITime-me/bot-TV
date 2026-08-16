@@ -392,6 +392,7 @@ def test_compose_amocrm_defaults_fail_closed_no_secret_material() -> None:
         assert env["AMOCRM_CHAT_EGRESS_ENABLED"] == (
             "${AMOCRM_CHAT_EGRESS_ENABLED:-false}"
         )
+        assert env["AMOCRM_CHAT_BOT_ID"] == "${AMOCRM_CHAT_BOT_ID:-}"
         assert env["AMOCRM_CRM_REST_ENABLED"] == (
             "${AMOCRM_CRM_REST_ENABLED:-false}"
         )

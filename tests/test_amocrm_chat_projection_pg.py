@@ -12,7 +12,11 @@ import pytest_asyncio
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.amocrm_chat_egress_config import AmoCrmChatEgressConfig
+from app.core.amocrm_chat_egress_config import (
+    AMOCRM_CHAT_BOT_SENDER_ID,
+    AMOCRM_CHAT_BOT_SENDER_NAME,
+    AmoCrmChatEgressConfig,
+)
 from app.core.amocrm_chat_egress_http import (
     AmoCrmChatEgressHttpClient,
     AmoCrmChatEgressOutcome,
@@ -49,7 +53,19 @@ from tests.pg_harness import truncate_foundation_tables
 
 _SECRET = "t" * 32
 _SCOPE = "scope-pg-test-01"
+_BOT_ID = "aca07629-6c59-4330-9f67-a3a5dd4746f4"
 _INTEG_CID = "integ-conv-pg-1"
+
+
+def _egress_config(**overrides: object) -> AmoCrmChatEgressConfig:
+    values: dict[str, object] = {
+        "enabled": True,
+        "channel_secret": _SECRET,
+        "scope_id": _SCOPE,
+        "bot_id": _BOT_ID,
+    }
+    values.update(overrides)
+    return AmoCrmChatEgressConfig(**values)  # type: ignore[arg-type]
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -182,11 +198,7 @@ async def test_success_and_idempotent_enqueue(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-worker-1",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim = await worker.claim_one()
@@ -229,11 +241,7 @@ async def test_stale_lease_wrong_version_zero_http(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-stale",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim = await worker.claim_one()
@@ -287,11 +295,7 @@ async def test_expired_lease_zero_http(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-expire",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim = await worker.claim_one()
@@ -361,11 +365,7 @@ async def test_ambiguous_send_reconcile_no_blind_resend(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-recon",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim1 = await worker.claim_one()
@@ -432,11 +432,7 @@ async def test_ambiguous_retry_absent_allows_one_resend(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-absent",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim1 = await worker.claim_one()
@@ -499,11 +495,7 @@ async def test_ambiguous_retry_uncertain_fail_closed_no_resend(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-uncertain",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim1 = await worker.claim_one()
@@ -718,11 +710,7 @@ async def test_missing_binding_or_integ_cid_fail_closed(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-unbound",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     claim = await worker.claim_one()
@@ -778,11 +766,7 @@ async def test_token_only_delivered_outbound_no_bot_projection_or_http(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-no-bot",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
 
@@ -1006,11 +990,7 @@ async def test_b1b_delivered_text_projects_exact_outbox_body(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-b1b-exact",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     # Drain CLIENT_INBOUND first; BOT_OUTBOUND body must equal DB text.
@@ -1039,6 +1019,10 @@ async def test_b1b_delivered_text_projects_exact_outbox_body(
         assert result.projected is True
         assert fake.send_texts[-1] == durable
         assert "must never project draft" not in fake.send_texts[-1]
+        assert fake.last_send_kwargs is not None
+        assert fake.last_send_kwargs.get("sender_id") == AMOCRM_CHAT_BOT_SENDER_ID
+        assert fake.last_send_kwargs.get("sender_name") == AMOCRM_CHAT_BOT_SENDER_NAME
+        assert fake.last_send_kwargs.get("sender_ref_id") == _BOT_ID
         break
     else:
         raise AssertionError("BOT_OUTBOUND claim was never processed")
@@ -1055,6 +1039,209 @@ async def test_b1b_delivered_text_projects_exact_outbox_body(
             ).one()
             assert bot.status == AmocrmProjectionStatus.PROJECTED.value
             assert bot.amocrm_message_id == "amo-bot-exact-1"
+
+
+@pytest.mark.asyncio
+async def test_b1b_stable_bot_sender_across_conversations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender_ids: list[str] = []
+    for idx, (chat_id, integ, ext_conv) in enumerate(
+        (
+            ("amo-chat-a", "integ-a", "synth-bot-a"),
+            ("amo-chat-b", "integ-b", "synth-bot-b"),
+        )
+    ):
+        async with session_scope(session_factory) as session:
+            accepted = await InboundService(session).accept(
+                SyntheticInboundEvent(
+                    external_conversation_id=ext_conv,
+                    external_message_id=f"client-seed-{idx}",
+                    text="client seed",
+                )
+            )
+            conversation = accepted.conversation
+            await binding_repo.insert_active_if_absent(
+                session,
+                conversation_id=conversation.id,
+                amocrm_chat_id=chat_id,
+                integration_conversation_id=integ,
+            )
+            accepted2 = await InboundService(session).accept(
+                SyntheticInboundEvent(
+                    external_conversation_id=ext_conv,
+                    external_message_id=f"client-bot-id-{idx}",
+                    text="client",
+                )
+            )
+            assert accepted2.reply_plan is not None
+            outbound = await _insert_delivered_bot_outbound(
+                session,
+                conversation=accepted2.conversation,
+                reply_plan_id=accepted2.reply_plan.id,
+                context_version=accepted2.context_version,
+                manager_epoch=accepted2.conversation.manager_epoch,
+                event_seq_hwm=accepted2.conversation.current_event_seq,
+                payload_json={
+                    "schema": "synthetic.outbound.v1",
+                    "synthetic_token": "SYNTHETIC_OK",
+                    "text": f"bot reply {idx}",
+                },
+            )
+            await enqueue_bot_outbound_projection(
+                session,
+                conversation_id=conversation.id,
+                outbound_id=outbound.id,
+                correlation_id=uuid4(),
+                egress_enabled=True,
+            )
+
+        fake = _ScriptedClient()
+        worker = AmocrmChatProjectionWorker(
+            session_factory,
+            worker_id=f"proj-bot-id-{idx}",
+            config=_egress_config(),
+            http_client=fake,
+        )
+        while True:
+            claim = await worker.claim_one()
+            if claim is None:
+                break
+            fake.send_results.append(
+                AmoCrmChatSendResult(
+                    outcome=AmoCrmChatEgressOutcome.SUCCESS,
+                    amocrm_message_id=f"amo-{idx}-{fake.send_calls + 1}",
+                )
+            )
+            await worker.process_claimed(claim)
+            if claim.source_kind == AmocrmProjectionSourceKind.BOT_OUTBOUND.value:
+                assert fake.last_send_kwargs is not None
+                sender_ids.append(str(fake.last_send_kwargs["sender_id"]))
+                assert fake.last_send_kwargs["sender_ref_id"] == _BOT_ID
+                assert (
+                    fake.last_send_kwargs["sender_name"] == AMOCRM_CHAT_BOT_SENDER_NAME
+                )
+
+    assert sender_ids == [AMOCRM_CHAT_BOT_SENDER_ID, AMOCRM_CHAT_BOT_SENDER_ID]
+
+
+@pytest.mark.asyncio
+async def test_b1b_missing_bot_id_fail_closed_zero_post(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation = await _seed_bound(session_factory)
+    async with session_scope(session_factory) as session:
+        accepted = await InboundService(session).accept(
+            SyntheticInboundEvent(
+                external_conversation_id=conversation.external_conversation_id,
+                external_message_id="client-missing-bot",
+                text="client",
+            )
+        )
+        assert accepted.reply_plan is not None
+        outbound = await _insert_delivered_bot_outbound(
+            session,
+            conversation=accepted.conversation,
+            reply_plan_id=accepted.reply_plan.id,
+            context_version=accepted.context_version,
+            manager_epoch=accepted.conversation.manager_epoch,
+            event_seq_hwm=accepted.conversation.current_event_seq,
+            payload_json={
+                "schema": "synthetic.outbound.v1",
+                "synthetic_token": "SYNTHETIC_OK",
+                "text": "bot without id",
+            },
+        )
+        await enqueue_bot_outbound_projection(
+            session,
+            conversation_id=conversation.id,
+            outbound_id=outbound.id,
+            correlation_id=uuid4(),
+            egress_enabled=True,
+        )
+
+    fake = _ScriptedClient()
+    worker = AmocrmChatProjectionWorker(
+        session_factory,
+        worker_id="proj-missing-bot",
+        config=_egress_config(bot_id=None),
+        http_client=fake,
+    )
+    bot_skipped = False
+    while True:
+        claim = await worker.claim_one()
+        if claim is None:
+            break
+        if claim.source_kind != AmocrmProjectionSourceKind.BOT_OUTBOUND.value:
+            fake.send_results.append(
+                AmoCrmChatSendResult(
+                    outcome=AmoCrmChatEgressOutcome.SUCCESS,
+                    amocrm_message_id=f"amo-cli-{fake.send_calls + 1}",
+                )
+            )
+            await worker.process_claimed(claim)
+            assert fake.last_send_kwargs is not None
+            assert fake.last_send_kwargs.get("sender_ref_id") is None
+            assert fake.last_send_kwargs.get("sender_id") != AMOCRM_CHAT_BOT_SENDER_ID
+            continue
+        sends_before = fake.send_calls
+        result = await worker.process_claimed(claim)
+        assert result.projected is False
+        assert result.skip_reason == "BOT_ID_MISSING"
+        assert fake.send_calls == sends_before
+        bot_skipped = True
+    assert bot_skipped is True
+    # BOT_OUTBOUND must never POST when bot id is missing.
+    assert all(
+        (kwargs or {}).get("sender_id") != AMOCRM_CHAT_BOT_SENDER_ID
+        for kwargs in ([fake.last_send_kwargs] if fake.last_send_kwargs else [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_inbound_send_has_no_bot_ref_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation = await _seed_bound(session_factory)
+    async with session_scope(session_factory) as session:
+        accepted = await InboundService(session).accept(
+            SyntheticInboundEvent(
+                external_conversation_id=conversation.external_conversation_id,
+                external_message_id="client-no-bot-ref",
+                text="client only",
+            )
+        )
+        from app.models.amocrm_message_projection import AmocrmProjectionSourceKind
+
+        await projection_repo.enqueue_if_absent(
+            session,
+            conversation_id=conversation.id,
+            source_kind=AmocrmProjectionSourceKind.CLIENT_INBOUND,
+            source_id=accepted.inbox.id,
+            correlation_id=uuid4(),
+        )
+
+    fake = _ScriptedClient()
+    fake.send_results.append(
+        AmoCrmChatSendResult(
+            outcome=AmoCrmChatEgressOutcome.SUCCESS,
+            amocrm_message_id="amo-cli-noref",
+        )
+    )
+    worker = AmocrmChatProjectionWorker(
+        session_factory,
+        worker_id="proj-cli-noref",
+        config=_egress_config(),
+        http_client=fake,
+    )
+    claim = await worker.claim_one()
+    assert claim is not None
+    result = await worker.process_claimed(claim)
+    assert result.projected is True
+    assert fake.last_send_kwargs is not None
+    assert fake.last_send_kwargs.get("sender_ref_id") is None
+    assert str(fake.last_send_kwargs.get("sender_id", "")).startswith("cli")
+    assert fake.last_send_kwargs.get("sender_name") == "Client"
 
 
 @pytest.mark.asyncio
@@ -1105,11 +1292,7 @@ async def test_b1b_ambiguous_retry_reconcile_at_most_one_remote(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-b1b-recon",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
 
@@ -1307,11 +1490,7 @@ async def test_b1b_stale_lease_cannot_complete(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-b1b-stale",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
 
@@ -1553,11 +1732,7 @@ async def test_m1_non_delivered_source_with_text_zero_chat_http(
     worker = AmocrmChatProjectionWorker(
         session_factory,
         worker_id="proj-m1-nondel",
-        config=AmoCrmChatEgressConfig(
-            enabled=True,
-            channel_secret=_SECRET,
-            scope_id=_SCOPE,
-        ),
+        config=_egress_config(),
         http_client=fake,
     )
     while True:

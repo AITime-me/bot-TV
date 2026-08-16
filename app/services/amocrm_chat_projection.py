@@ -20,6 +20,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.amocrm_chat_egress_config import (
+    AMOCRM_CHAT_BOT_SENDER_ID,
+    AMOCRM_CHAT_BOT_SENDER_NAME,
     AmoCrmChatEgressConfig,
     AmoCrmChatEgressConfigError,
 )
@@ -348,6 +350,7 @@ class AmocrmChatProjectionWorker:
             sender_name=prepared["sender_name"],
             text=prepared["text"],
             timestamp_unix=prepared["timestamp_unix"],
+            sender_ref_id=prepared.get("sender_ref_id"),
         )
         if send.outcome is AmoCrmChatEgressOutcome.SUCCESS and send.amocrm_message_id:
             await self._attach_amo_id(claim, send.amocrm_message_id, now=now)
@@ -676,9 +679,33 @@ class AmocrmChatProjectionWorker:
                 )
 
             kind = AmocrmProjectionSourceKind(claim.source_kind)
-            sender_prefix = (
-                "cli" if kind is AmocrmProjectionSourceKind.CLIENT_INBOUND else "bot"
-            )
+            if kind is AmocrmProjectionSourceKind.BOT_OUTBOUND:
+                try:
+                    bot_ref_id = self._config.require_bot_id_for_outbound()
+                except AmoCrmChatEgressConfigError:
+                    row = await projection_repo.skip_with_lease(
+                        session,
+                        projection_id=claim.projection_id,
+                        lease_token=claim.lease_token,
+                        lease_version=claim.lease_version,
+                        skip_reason=AmocrmProjectionSkipReason.BOT_ID_MISSING,
+                        now=now,
+                    )
+                    raise _ProjectionSkip(
+                        AmocrmProjectionProcessResult(
+                            projection_id=row.id,
+                            status=row.status,
+                            projected=False,
+                            skip_reason=row.skip_reason,
+                        )
+                    ) from None
+                sender_id = AMOCRM_CHAT_BOT_SENDER_ID
+                sender_name = AMOCRM_CHAT_BOT_SENDER_NAME
+                sender_ref_id: str | None = bot_ref_id
+            else:
+                sender_id = f"cli{claim.conversation_id.hex[:29]}"
+                sender_name = "Client"
+                sender_ref_id = None
             return {
                 "text": text,
                 "timestamp_unix": timestamp_unix
@@ -686,12 +713,9 @@ class AmocrmChatProjectionWorker:
                 else int(datetime.now(timezone.utc).timestamp()),
                 "conversation_ref_id": binding.amocrm_chat_id,
                 "integration_conversation_id": binding.integration_conversation_id,
-                "sender_id": f"{sender_prefix}{claim.conversation_id.hex[:29]}",
-                "sender_name": (
-                    "Client"
-                    if kind is AmocrmProjectionSourceKind.CLIENT_INBOUND
-                    else "Teya"
-                ),
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "sender_ref_id": sender_ref_id,
             }
 
 
