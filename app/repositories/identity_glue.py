@@ -87,7 +87,10 @@ async def list_open_reviews(
     )
     if conversation_id is not None:
         stmt = stmt.where(IdentityReviewCase.conversation_id == conversation_id)
-    stmt = stmt.order_by(IdentityReviewCase.created_at.asc())
+    stmt = stmt.order_by(
+        IdentityReviewCase.created_at.asc(),
+        IdentityReviewCase.id.asc(),
+    )
     result = await session.scalars(stmt)
     return list(result.all())
 

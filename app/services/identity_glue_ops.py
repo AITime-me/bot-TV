@@ -17,6 +17,7 @@ from app.core.identity_glue import (
     ApproveIdentityReviewResult,
     ConversationIdentityGlueOutcome,
     ConversationIdentityGlueResult,
+    IdentityReviewCaseRecord,
     InspectIdentityReviewsResult,
 )
 from app.core.identity_resolution import IdentityResolveSignals
@@ -52,6 +53,7 @@ class IdentityGlueOpsResult:
     review_case_id: uuid.UUID | None = None
     canonical_identity_id: uuid.UUID | None = None
     open_review_count: int | None = None
+    cases: tuple[IdentityReviewCaseRecord, ...] = ()
 
     def __repr__(self) -> str:
         return (
@@ -60,7 +62,8 @@ class IdentityGlueOpsResult:
             f"error_code={self.error_code!r}, "
             "review_case_id=<redacted>, "
             "canonical_identity_id=<redacted>, "
-            f"open_review_count={self.open_review_count!r})"
+            f"open_review_count={self.open_review_count!r}, "
+            f"cases_count={len(self.cases)})"
         )
 
 
@@ -134,10 +137,12 @@ async def inspect_open_identity_reviews(
                 conversation_id=conversation_id,
             )
         )
+        cases = inspected.cases
         return IdentityGlueOpsResult(
             outcome=IdentityGlueOpsOutcome.INSPECTED,
-            open_review_count=len(inspected.cases),
-            review_case_id=inspected.cases[0].id if inspected.cases else None,
+            open_review_count=len(cases),
+            review_case_id=cases[0].id if cases else None,
+            cases=cases,
         )
 
 

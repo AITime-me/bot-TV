@@ -123,6 +123,7 @@ Thumbs.db
 !app/http_healthcheck.py
 !app/closed_test_router.py
 !app/amocrm_chat_webhook.py
+!app/identity_glue_ops.py
 !app/integrations/
 !app/integrations/__init__.py
 !app/main.py
@@ -198,6 +199,7 @@ Thumbs.db
 !app/services/manager_messages.py
 !app/services/identity_resolution.py
 !app/services/identity_glue.py
+!app/services/identity_glue_ops.py
 !app/services/master_channel_binding.py
 !app/services/master_command_flow.py
 !app/services/vk_master_adapter.py

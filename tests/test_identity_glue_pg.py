@@ -24,12 +24,18 @@ from app.core.identity_resolution import (
     ReconcileBuyerCardOutcome,
 )
 from app.db.session import session_scope
+from app.identity_glue_ops import format_inspect_case_line
 from app.models.canonical_identity import CanonicalIdentity
 from app.models.conversation import Channel
 from app.models.identity_review_case import IdentityReviewCase
 from app.repositories import conversations as conversation_repo
+from app.repositories import identity_glue as glue_repo
 from app.services.identity_glue import ConversationIdentityGlueService
 from app.services.identity_resolution import IdentityResolutionService
+from app.services.identity_glue_ops import (
+    IdentityGlueOpsOutcome,
+    inspect_open_identity_reviews,
+)
 from tests.foundation_test_db import SecretDatabaseUrl, run_alembic_command_async
 from tests.pg_harness import truncate_foundation_tables
 
@@ -474,6 +480,72 @@ async def test_review_rows_store_no_pii_columns(
             assert _PHONE not in dumped
             assert _EMAIL not in dumped
             assert _PHONE_ALT not in dumped
+
+
+@pytest.mark.asyncio
+async def test_inspect_ops_returns_all_open_cases_with_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation_id = await _seed_conversation(session_factory)
+    async with session_scope(session_factory) as session:
+        identity = IdentityResolutionService(session)
+        first = await identity.attach(
+            provider="phone",
+            entity_kind=IdentityEntityKind.PHONE,
+            external_id=_PHONE,
+            create_canonical=True,
+        )
+        await identity.attach(
+            provider="phone",
+            entity_kind=IdentityEntityKind.PHONE,
+            external_id=_PHONE_ALT,
+            create_canonical=True,
+        )
+        glue = ConversationIdentityGlueService(session)
+        await glue.resolve_for_conversation(
+            conversation_id=conversation_id,
+            signals=IdentityResolveSignals(
+                confirmed_links=(
+                    ("phone", "default", IdentityEntityKind.PHONE, _PHONE),
+                    ("phone", "default", IdentityEntityKind.PHONE, _PHONE_ALT),
+                )
+            ),
+        )
+        conversation = await conversation_repo.get_by_id_for_update(
+            session,
+            conversation_id=conversation_id,
+        )
+        assert conversation is not None
+        assert first.canonical_identity_id is not None
+        await glue_repo.set_conversation_canonical_identity(
+            session,
+            conversation=conversation,
+            canonical_identity_id=first.canonical_identity_id,
+        )
+        await glue.resolve_for_conversation(
+            conversation_id=conversation_id,
+            signals=IdentityResolveSignals(phone=_PHONE_ALT),
+        )
+
+    inspected = await inspect_open_identity_reviews(
+        session_factory,
+        conversation_id=conversation_id,
+    )
+    assert inspected.outcome is IdentityGlueOpsOutcome.INSPECTED
+    assert inspected.open_review_count == len(inspected.cases)
+    assert inspected.open_review_count >= 2
+    reason_codes = {case.reason_code for case in inspected.cases}
+    assert "AMBIGUOUS_RESOLVE" in reason_codes
+    assert "CONFLICTING_CANONICAL" in reason_codes
+    assert len({case.id for case in inspected.cases}) == len(inspected.cases)
+    for case in inspected.cases:
+        assert case.conversation_id == conversation_id
+        line = format_inspect_case_line(case)
+        assert str(case.id) in line
+        assert str(case.conversation_id) in line
+        assert case.reason_code in line
+        assert _PHONE not in line
+        assert _EMAIL not in line
 
 
 @pytest.mark.asyncio

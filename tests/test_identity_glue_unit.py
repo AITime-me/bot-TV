@@ -1,17 +1,24 @@
-"""IR-1 identity glue unit/static coverage."""
+"""IR-1 identity glue unit/static coverage + ops CLI harden."""
 
 from __future__ import annotations
 
 import ast
 import inspect
+import io
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from app.core.identity_glue import (
     IDENTITY_REVIEW_REASON_CODES,
     ConversationIdentityGlueResult,
     IdentityReviewCaseRecord,
     IdentityReviewReasonCode,
+)
+from app.identity_glue_ops import (
+    format_inspect_case_line,
+    parse_resolve_signals_json,
 )
 from app.models.identity_review_case import IdentityReviewCase
 from app.services import identity_glue as glue_service_mod
@@ -111,15 +118,17 @@ def test_glue_ops_zero_external_http_surface() -> None:
             assert needle not in text, f"{rel} contains {needle}"
 
 
-def test_identity_glue_ops_cli_not_in_docker_image() -> None:
+def test_identity_glue_ops_cli_in_docker_image() -> None:
     assert_canonical_docker_runtime_allowlist()
     lines = dockerignore_lines(_REPO)
     for rel in (
         "app/identity_glue_ops.py",
         "app/services/identity_glue_ops.py",
     ):
-        assert is_included_in_docker_build_context(rel, lines, repo_root=_REPO) is False
-        assert f"!{rel}" not in EXPECTED_DOCKER_ALLOW_RULES
+        assert f"!{rel}" in EXPECTED_DOCKER_ALLOW_RULES
+        assert is_included_in_docker_build_context(rel, lines, repo_root=_REPO) is True
+        assert (_REPO / rel).is_file()
+        assert rel in IR1_DOCKER_RUNTIME_PATHS
 
 
 def test_ir1_runtime_paths_allowlisted() -> None:
@@ -139,3 +148,100 @@ def test_identity_review_case_model_has_no_pii_columns() -> None:
     assert "payload" not in cols
     assert "text" not in cols
     assert "envelope_json" not in cols
+
+
+def test_parse_resolve_signals_json_from_stdin_shape() -> None:
+    signals = parse_resolve_signals_json(
+        '{"phone":"+79001234567","email":"a@example.com",'
+        '"channel_provider":"vk","channel_scope":"g1",'
+        '"channel_account":"acc-1"}'
+    )
+    assert signals.phone == "+79001234567"
+    assert signals.email == "a@example.com"
+    assert signals.channel_provider == "vk"
+    assert signals.channel_connection_scope == "g1"
+    assert signals.channel_external_account_id == "acc-1"
+
+
+@pytest.mark.parametrize(
+    "raw,code",
+    [
+        ("", "SIGNALS_STDIN_EMPTY"),
+        ("{", "SIGNALS_STDIN_JSON_INVALID"),
+        ("[]", "SIGNALS_STDIN_OBJECT_REQUIRED"),
+        ('{"phone":"+1","extra":1}', "SIGNALS_STDIN_UNKNOWN_KEYS"),
+        ("{}", "SIGNALS_STDIN_EMPTY_SIGNALS"),
+        ('{"phone":1}', "SIGNALS_PHONE_INVALID"),
+    ],
+)
+def test_parse_resolve_signals_json_fail_closed(raw: str, code: str) -> None:
+    with pytest.raises(ValueError) as exc:
+        parse_resolve_signals_json(raw)
+    assert str(exc.value.args[0]) == code
+
+
+def test_legacy_sensitive_argv_flags_forbidden() -> None:
+    from app import identity_glue_ops as cli
+
+    code = cli.main(
+        [
+            "resolve-from-signals",
+            "--conversation-id",
+            str(uuid4()),
+            "--phone",
+            "+79001234567",
+        ],
+        environ={},
+        stdin=io.StringIO('{"phone":"+79001234567"}'),
+    )
+    assert code == 2
+
+
+def test_inspect_case_line_has_ids_and_no_pii() -> None:
+    review_id = uuid4()
+    conversation_id = uuid4()
+    proposed = uuid4()
+    line = format_inspect_case_line(
+        IdentityReviewCaseRecord(
+            id=review_id,
+            conversation_id=conversation_id,
+            reason_code="AMBIGUOUS_RESOLVE",
+            status="OPEN",
+            proposed_canonical_identity_id=proposed,
+            resolved_canonical_identity_id=None,
+        )
+    )
+    assert f"review_case_id={review_id}" in line
+    assert f"conversation_id={conversation_id}" in line
+    assert "reason_code=AMBIGUOUS_RESOLVE" in line
+    assert f"proposed_canonical_identity_id={proposed}" in line
+    assert "phone" not in line.lower()
+    assert "email" not in line.lower()
+    assert "name" not in line.lower()
+    missing = format_inspect_case_line(
+        IdentityReviewCaseRecord(
+            id=review_id,
+            conversation_id=conversation_id,
+            reason_code="CONFLICTING_CANONICAL",
+            status="OPEN",
+            proposed_canonical_identity_id=None,
+            resolved_canonical_identity_id=None,
+        )
+    )
+    assert "proposed_canonical_identity_id=-" in missing
+
+
+def test_cli_parser_rejects_removed_phone_email_flags() -> None:
+    from app.identity_glue_ops import _build_parser
+
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "resolve-from-signals",
+                "--conversation-id",
+                str(uuid4()),
+                "--phone",
+                "+79001234567",
+            ]
+        )

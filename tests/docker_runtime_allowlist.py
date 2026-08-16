@@ -101,6 +101,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/http_healthcheck.py",
     "!app/closed_test_router.py",
     "!app/amocrm_chat_webhook.py",
+    "!app/identity_glue_ops.py",
     "!app/integrations/",
     "!app/integrations/__init__.py",
     "!app/main.py",
@@ -176,6 +177,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/manager_messages.py",
     "!app/services/identity_resolution.py",
     "!app/services/identity_glue.py",
+    "!app/services/identity_glue_ops.py",
     "!app/services/master_channel_binding.py",
     "!app/services/master_command_flow.py",
     "!app/services/vk_master_adapter.py",
@@ -241,13 +243,15 @@ CURSOR30_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/services/identity_resolution.py",
 )
 
-# IR-1 conversation↔canonical glue (ops CLI intentionally excluded).
+# IR-1 conversation↔canonical glue + production ops CLI.
 IR1_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "alembic/versions/20260816_26_identity_glue.py",
     "app/core/identity_glue.py",
     "app/models/identity_review_case.py",
     "app/repositories/identity_glue.py",
     "app/services/identity_glue.py",
+    "app/services/identity_glue_ops.py",
+    "app/identity_glue_ops.py",
 )
 
 # AMO-01A durable amoCRM manager ingress paths.
