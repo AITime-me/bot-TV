@@ -593,3 +593,138 @@ async def test_revoked_binding_fail_closed(
     with pytest.raises(ValueError, match="BINDING_UNKNOWN"):
         await worker.process_claimed(claim)
     assert conversation.id is not None
+
+
+def _official_v2_http_body(
+    *,
+    msg_type: str = "text",
+    text: str = "via http v2",
+    chat_id: str = "8e4d4baa-9e6c-4a88-838a-5f62be227bdc",
+    message_id: str = "0371a0ff-b78a-4c7b-8538-a7d547e10692",
+    client_id: str = "my_int-d5a421f7f218",
+    msec_timestamp: int = 1639572260980,
+) -> bytes:
+    return json.dumps(
+        {
+            "account_id": "52e591f7-c98f-4255-8495-827210138c81",
+            "time": 1639572261,
+            "message": {
+                "receiver": {
+                    "id": "2ed64e26-70a1-4857-8382-bb066a076219",
+                    "phone": "79161234567",
+                    "email": "example.client@example.com",
+                    "client_id": "my_int-1376265f-86df-4c49-a0c3-a4816df41af8",
+                },
+                "sender": {"id": "76fc2bea-902f-425c-9a3d-dcdac4766090"},
+                "conversation": {
+                    "id": chat_id,
+                    "client_id": client_id,
+                },
+                "timestamp": 1639572260,
+                "msec_timestamp": msec_timestamp,
+                "message": {
+                    "id": message_id,
+                    "type": msg_type,
+                    "text": text,
+                    "media": "https://example.invalid/attachments/image.jpg",
+                },
+            },
+        }
+    ).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_webhook_official_v2_http_ack_duplicate_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+    pg_database_url: SecretDatabaseUrl,
+) -> None:
+    chat_id = "8e4d4baa-9e6c-4a88-838a-5f62be227bdc"
+    message_id = "0371a0ff-b78a-4c7b-8538-a7d547e10692"
+    namespaced = f"amo:{chat_id}:{message_id}"
+    await _seed_bound_conversation(session_factory, chat_id=chat_id)
+    body = _official_v2_http_body(chat_id=chat_id, message_id=message_id)
+
+    async with session_factory() as session:
+        async with session.begin():
+            before = await session.scalar(
+                select(func.count()).select_from(IngressEvent)
+            )
+    assert before == 0
+
+    with _amo_app_client(monkeypatch, database_url=pg_database_url.reveal()) as client:
+        unauthorized = client.post(
+            _WEBHOOK_PATH,
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert unauthorized.status_code == 401
+
+        wrong_scope = client.post(
+            amocrm_chat_webhook_path("other-scope-9"),
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": _sign(body),
+            },
+        )
+        assert wrong_scope.status_code == 401
+
+        unsupported = _official_v2_http_body(
+            chat_id=chat_id,
+            message_id="11111111-1111-1111-1111-111111111111",
+            msg_type="picture",
+        )
+        unsupported_resp = client.post(
+            _WEBHOOK_PATH,
+            content=unsupported,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": _sign(unsupported),
+            },
+        )
+        assert unsupported_resp.status_code == 422
+
+        ok = client.post(
+            _WEBHOOK_PATH,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": _sign(body),
+            },
+        )
+        assert ok.status_code == 200
+        assert ok.text == "ok"
+
+        dup = client.post(
+            _WEBHOOK_PATH,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": _sign(body),
+            },
+        )
+        assert dup.status_code == 200
+
+    async with session_factory() as session:
+        async with session.begin():
+            count = await session.scalar(
+                select(func.count()).select_from(IngressEvent)
+            )
+            assert count == 1
+            row = (
+                await session.scalars(
+                    select(IngressEvent).where(
+                        IngressEvent.external_event_id == namespaced
+                    )
+                )
+            ).one()
+            assert row.status == IngressStatus.RECEIVED.value
+            assert row.channel == "amocrm"
+            assert row.envelope_json["amocrm_chat_id"] == chat_id
+            assert row.envelope_json["amocrm_message_id"] == message_id
+            assert row.envelope_json["provider_sequence"] == 1639572260980
+            assert row.envelope_json["conversation_client_id"] == "my_int-d5a421f7f218"
+            assert "phone" not in row.envelope_json
+            assert "email" not in row.envelope_json
+            assert "79161234567" not in json.dumps(row.envelope_json)
