@@ -33,6 +33,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260813_23_amocrm_crm_oauth.py",
     "!alembic/versions/20260813_24_amo_entity_links.py",
     "!alembic/versions/20260813_25_amo_deal_reserve.py",
+    "!alembic/versions/20260816_26_identity_glue.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -86,6 +87,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/master_channel_binding.py",
     "!app/core/identity_resolution.py",
     "!app/core/identity_provider_port.py",
+    "!app/core/identity_glue.py",
     "!app/core/master_command_types.py",
     "!app/core/master_command_parser.py",
     "!app/core/master_command_remote.py",
@@ -117,6 +119,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/ingress.py",
     "!app/models/manager_message.py",
     "!app/models/canonical_identity.py",
+    "!app/models/identity_review_case.py",
     "!app/models/master_channel_binding.py",
     "!app/models/master_command_pending.py",
     "!app/models/outbox.py",
@@ -135,6 +138,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/ingress.py",
     "!app/repositories/manager_messages.py",
     "!app/repositories/identity_resolution.py",
+    "!app/repositories/identity_glue.py",
     "!app/repositories/master_channel_bindings.py",
     "!app/repositories/master_command_pendings.py",
     "!app/repositories/messages.py",
@@ -171,6 +175,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/ingress.py",
     "!app/services/manager_messages.py",
     "!app/services/identity_resolution.py",
+    "!app/services/identity_glue.py",
     "!app/services/master_channel_binding.py",
     "!app/services/master_command_flow.py",
     "!app/services/vk_master_adapter.py",
@@ -234,6 +239,15 @@ CURSOR30_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/models/canonical_identity.py",
     "app/repositories/identity_resolution.py",
     "app/services/identity_resolution.py",
+)
+
+# IR-1 conversation↔canonical glue (ops CLI intentionally excluded).
+IR1_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260816_26_identity_glue.py",
+    "app/core/identity_glue.py",
+    "app/models/identity_review_case.py",
+    "app/repositories/identity_glue.py",
+    "app/services/identity_glue.py",
 )
 
 # AMO-01A durable amoCRM manager ingress paths.

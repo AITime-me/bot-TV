@@ -126,6 +126,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_identity_review_cases = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.identity_review_cases') "
+                    "IS NOT NULL"
+                )
+            )
             has_amocrm_chat_bindings = await session.scalar(
                 text(
                     "SELECT to_regclass('public.amocrm_chat_bindings') "
@@ -167,6 +173,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "master_command_pendings")
             if has_master_bindings:
                 tables.insert(0, "master_channel_bindings")
+            if has_identity_review_cases:
+                tables.insert(0, "identity_review_cases")
             if has_identity_links:
                 tables.insert(0, "external_identity_links")
             if has_canonical_identities:
