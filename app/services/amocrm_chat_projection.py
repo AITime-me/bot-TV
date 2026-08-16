@@ -37,6 +37,8 @@ from app.models.amocrm_message_projection import (
     AmocrmProjectionSkipReason,
     AmocrmProjectionSourceKind,
     AmocrmProjectionStatus,
+    CLIENT_PARTICIPANT_NAME,
+    client_participant_id_for_conversation,
 )
 from app.models.inbox import InboxMessage
 from app.models.outbox import DeliveryStatus, OutboxMessage
@@ -351,6 +353,9 @@ class AmocrmChatProjectionWorker:
             text=prepared["text"],
             timestamp_unix=prepared["timestamp_unix"],
             sender_ref_id=prepared.get("sender_ref_id"),
+            receiver_id=prepared.get("receiver_id"),
+            receiver_name=prepared.get("receiver_name"),
+            receiver_ref_id=prepared.get("receiver_ref_id"),
         )
         if send.outcome is AmoCrmChatEgressOutcome.SUCCESS and send.amocrm_message_id:
             await self._attach_amo_id(claim, send.amocrm_message_id, now=now)
@@ -679,6 +684,9 @@ class AmocrmChatProjectionWorker:
                 )
 
             kind = AmocrmProjectionSourceKind(claim.source_kind)
+            client_participant_id = client_participant_id_for_conversation(
+                claim.conversation_id
+            )
             if kind is AmocrmProjectionSourceKind.BOT_OUTBOUND:
                 try:
                     bot_ref_id = self._config.require_bot_id_for_outbound()
@@ -702,10 +710,14 @@ class AmocrmChatProjectionWorker:
                 sender_id = AMOCRM_CHAT_BOT_SENDER_ID
                 sender_name = AMOCRM_CHAT_BOT_SENDER_NAME
                 sender_ref_id: str | None = bot_ref_id
+                receiver_id: str | None = client_participant_id
+                receiver_name: str | None = CLIENT_PARTICIPANT_NAME
             else:
-                sender_id = f"cli{claim.conversation_id.hex[:29]}"
-                sender_name = "Client"
+                sender_id = client_participant_id
+                sender_name = CLIENT_PARTICIPANT_NAME
                 sender_ref_id = None
+                receiver_id = None
+                receiver_name = None
             return {
                 "text": text,
                 "timestamp_unix": timestamp_unix
@@ -716,6 +728,9 @@ class AmocrmChatProjectionWorker:
                 "sender_id": sender_id,
                 "sender_name": sender_name,
                 "sender_ref_id": sender_ref_id,
+                "receiver_id": receiver_id,
+                "receiver_name": receiver_name,
+                "receiver_ref_id": None,
             }
 
 

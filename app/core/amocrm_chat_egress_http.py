@@ -20,6 +20,9 @@ from app.core.s2s_http_transport import (
     S2sHttpResponse,
     S2sHttpTransportError,
 )
+from app.models.amocrm_message_projection import (
+    INTEGRATION_MSGID_MAX_LENGTH,
+)
 
 __all__ = (
     "AmoCrmChatEgressHttpClient",
@@ -252,30 +255,78 @@ class AmoCrmChatEgressHttpClient:
         text: str,
         timestamp_unix: int,
         sender_ref_id: str | None = None,
+        receiver_id: str | None = None,
+        receiver_name: str | None = None,
+        receiver_ref_id: str | None = None,
     ) -> AmoCrmChatSendResult:
         assert self._config.scope_id is not None
-        path = f"/v2/origin/custom/{self._config.scope_id}"
+        if (
+            type(integration_msgid) is not str
+            or not integration_msgid
+            or len(integration_msgid) > INTEGRATION_MSGID_MAX_LENGTH
+        ):
+            return AmoCrmChatSendResult(
+                outcome=AmoCrmChatEgressOutcome.PERMANENT_ERROR,
+                error_code="AMOCRM_CHAT_MSGID_INVALID",
+            )
+
         sender: dict[str, Any] = {
             "id": sender_id,
             "name": sender_name,
         }
         if sender_ref_id is not None:
             sender["ref_id"] = sender_ref_id
+
+        receiver: dict[str, Any] | None = None
+        if receiver_id is not None or receiver_name is not None or receiver_ref_id is not None:
+            if (
+                type(receiver_id) is not str
+                or not receiver_id.strip()
+                or type(receiver_name) is not str
+                or not receiver_name.strip()
+            ):
+                return AmoCrmChatSendResult(
+                    outcome=AmoCrmChatEgressOutcome.PERMANENT_ERROR,
+                    error_code="AMOCRM_CHAT_RECEIVER_INVALID",
+                )
+            receiver = {
+                "id": receiver_id.strip(),
+                "name": receiver_name.strip(),
+            }
+            if receiver_ref_id is not None:
+                if type(receiver_ref_id) is not str or not receiver_ref_id.strip():
+                    return AmoCrmChatSendResult(
+                        outcome=AmoCrmChatEgressOutcome.PERMANENT_ERROR,
+                        error_code="AMOCRM_CHAT_RECEIVER_INVALID",
+                    )
+                receiver["ref_id"] = receiver_ref_id.strip()
+
+        # Bot outbound (sender.ref_id set) must address the client receiver.
+        if sender_ref_id is not None and receiver is None:
+            return AmoCrmChatSendResult(
+                outcome=AmoCrmChatEgressOutcome.PERMANENT_ERROR,
+                error_code="AMOCRM_CHAT_RECEIVER_REQUIRED",
+            )
+
+        path = f"/v2/origin/custom/{self._config.scope_id}"
+        payload: dict[str, Any] = {
+            "timestamp": timestamp_unix,
+            "msec_timestamp": timestamp_unix * 1000,
+            "msgid": integration_msgid,
+            "conversation_id": integration_conversation_id,
+            "conversation_ref_id": conversation_ref_id,
+            "sender": sender,
+            "message": {
+                "type": "text",
+                "text": text,
+            },
+            "silent": True,
+        }
+        if receiver is not None:
+            payload["receiver"] = receiver
         body_obj: dict[str, Any] = {
             "event_type": "new_message",
-            "payload": {
-                "timestamp": timestamp_unix,
-                "msec_timestamp": timestamp_unix * 1000,
-                "msgid": integration_msgid,
-                "conversation_id": integration_conversation_id,
-                "conversation_ref_id": conversation_ref_id,
-                "sender": sender,
-                "message": {
-                    "type": "text",
-                    "text": text,
-                },
-                "silent": True,
-            },
+            "payload": payload,
         }
         raw = json.dumps(body_obj, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"

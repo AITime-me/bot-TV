@@ -32,6 +32,8 @@ from app.core.s2s_http_transport import S2sHttpRequest, S2sHttpResponse
 from app.models.amocrm_message_projection import (
     AmocrmMessageProjection,
     AmocrmProjectionSourceKind,
+    CLIENT_PARTICIPANT_NAME,
+    client_participant_id_for_conversation,
     integration_msgid_for_source,
 )
 from app.schemas.amocrm_manager_ingress import AmoCrmChatWebhookPayload
@@ -207,13 +209,46 @@ def test_hmac_signature_and_body_taxonomy() -> None:
         text="bot hello",
         timestamp_unix=1,
         sender_ref_id=_BOT_ID,
+        receiver_id="cliabcd",
+        receiver_name="Client",
     )
     assert bot_ok.outcome is AmoCrmChatEgressOutcome.SUCCESS
     bot_body = transport.calls[1].body
     assert f'"id":"{AMOCRM_CHAT_BOT_SENDER_ID}"'.encode() in bot_body
     assert f'"ref_id":"{_BOT_ID}"'.encode() in bot_body
     assert AMOCRM_CHAT_BOT_SENDER_NAME.encode("utf-8") in bot_body
-    assert b'"id":"cli1"' not in bot_body
+    assert b'"receiver":{' in bot_body
+    assert b'"id":"cliabcd"' in bot_body
+    assert b'"name":"Client"' in bot_body
+    # CLIENT-shaped sender must not appear; bot ref_id must.
+    assert bot_body.count(b'"ref_id"') == 1
+
+    missing_receiver = client.send_silent_text(
+        integration_msgid="c" + "4" * 32,
+        integration_conversation_id="convhex",
+        conversation_ref_id="chat-1",
+        sender_id=AMOCRM_CHAT_BOT_SENDER_ID,
+        sender_name=AMOCRM_CHAT_BOT_SENDER_NAME,
+        text="bot hello",
+        timestamp_unix=1,
+        sender_ref_id=_BOT_ID,
+    )
+    assert missing_receiver.outcome is AmoCrmChatEgressOutcome.PERMANENT_ERROR
+    assert missing_receiver.error_code == "AMOCRM_CHAT_RECEIVER_REQUIRED"
+    assert len(transport.calls) == 2  # no HTTP for invalid bot payload
+
+    too_long = client.send_silent_text(
+        integration_msgid="x" * 41,
+        integration_conversation_id="convhex",
+        conversation_ref_id="chat-1",
+        sender_id="cli1",
+        sender_name="Client",
+        text="hello",
+        timestamp_unix=1,
+    )
+    assert too_long.outcome is AmoCrmChatEgressOutcome.PERMANENT_ERROR
+    assert too_long.error_code == "AMOCRM_CHAT_MSGID_INVALID"
+    assert len(transport.calls) == 2
 
     transport.responses.append(
         S2sHttpResponse(status_code=403, headers={}, body=b"{}")
@@ -570,12 +605,23 @@ def test_projection_model_has_no_text_columns() -> None:
     )
     assert msgid.startswith("c")
     assert len(msgid) == 33
+    assert len(msgid) <= 40
     assert msgid == f"c{source_id.hex}"
     bot_msgid = integration_msgid_for_source(
         source_kind=AmocrmProjectionSourceKind.BOT_OUTBOUND,
         source_id=source_id,
     )
     assert bot_msgid == f"b{source_id.hex}"
+    assert len(bot_msgid) <= 40
+
+    conv_a = uuid4()
+    conv_b = uuid4()
+    client_a = client_participant_id_for_conversation(conv_a)
+    client_b = client_participant_id_for_conversation(conv_b)
+    assert client_a.startswith("cli")
+    assert client_a == client_participant_id_for_conversation(conv_a)
+    assert client_a != client_b
+    assert CLIENT_PARTICIPANT_NAME == "Client"
 
 
 def test_docker_allowlist_includes_amo01b1() -> None:
