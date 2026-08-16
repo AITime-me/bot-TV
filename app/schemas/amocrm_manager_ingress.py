@@ -49,6 +49,60 @@ def _lift_conversation_client_id(data: Any) -> Any:
     return raw
 
 
+def _normalize_official_v2_chat_webhook(data: dict[str, Any]) -> dict[str, Any]:
+    """Map official Chat API v2 webhook body → flat AmoCrmChatWebhookPayload.
+
+    Strips outer envelope fields (account_id, receiver PII, media, …) so
+    ``extra=forbid`` stays strict. Non-text message types fail closed.
+    Never logs the body.
+    """
+
+    message = data.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("unsupported webhook shape")
+    conversation = message.get("conversation")
+    inner = message.get("message")
+    if not isinstance(conversation, dict) or not isinstance(inner, dict):
+        raise ValueError("unsupported webhook shape")
+
+    msg_type = inner.get("type")
+    if msg_type != "text":
+        raise ValueError("unsupported message type")
+
+    chat_id = conversation.get("id")
+    message_id = inner.get("id")
+    text = inner.get("text")
+    msec_timestamp = message.get("msec_timestamp")
+    if type(chat_id) is not str or type(message_id) is not str or type(text) is not str:
+        raise ValueError("unsupported webhook shape")
+    if type(msec_timestamp) is not int:
+        raise ValueError("unsupported webhook shape")
+
+    normalized: dict[str, Any] = {
+        "amocrm_chat_id": chat_id,
+        "message_id": message_id,
+        "provider_sequence": msec_timestamp,
+        "text": text,
+    }
+    client_id = conversation.get("client_id")
+    if type(client_id) is str and client_id.strip():
+        normalized["conversation_client_id"] = client_id.strip()
+    return normalized
+
+
+def _normalize_amocrm_chat_webhook_payload(data: Any) -> Any:
+    """Accept official v2 nested body or existing flat test/internal payload."""
+
+    if not isinstance(data, dict):
+        return data
+    raw = dict(data)
+    message = raw.get("message")
+    # Official v2: message.message is the nested Chat message object.
+    if isinstance(message, dict) and isinstance(message.get("message"), dict):
+        return _normalize_official_v2_chat_webhook(raw)
+    return _lift_conversation_client_id(raw)
+
+
 class AmoCrmManagerIngressEvent(BaseModel):
     """Normalized amoCRM manager webhook envelope for durable ingress.
 
@@ -182,7 +236,12 @@ class AmoCrmManagerIngressEvent(BaseModel):
 
 
 class AmoCrmChatWebhookPayload(BaseModel):
-    """HTTP body accepted by the amoCRM Chat manager webhook (01A/01B1)."""
+    """HTTP body accepted by the amoCRM Chat manager webhook (01A/01B1).
+
+    Accepts the official Chat API v2 nested webhook shape (normalized in
+    ``before``) or the existing flat internal/test payload. HMAC is verified
+    on the raw body before this model runs.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -194,8 +253,8 @@ class AmoCrmChatWebhookPayload(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_conversation_client_id(cls, data: Any) -> Any:
-        return _lift_conversation_client_id(data)
+    def _normalize_webhook_shape(cls, data: Any) -> Any:
+        return _normalize_amocrm_chat_webhook_payload(data)
 
     @field_validator("amocrm_chat_id", "message_id")
     @classmethod

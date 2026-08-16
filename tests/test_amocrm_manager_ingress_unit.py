@@ -210,6 +210,78 @@ def test_payload_schema_forbids_extra_and_redacts_text() -> None:
     assert event.external_message_id == "amo:amo-chat-1:amo-msg-1"
 
 
+def _official_v2_payload(
+    *,
+    msg_type: str = "text",
+    text: str = "manager says hello",
+    chat_id: str = "8e4d4baa-9e6c-4a88-838a-5f62be227bdc",
+    message_id: str = "0371a0ff-b78a-4c7b-8538-a7d547e10692",
+    client_id: str = "my_int-d5a421f7f218",
+    msec_timestamp: int = 1639572260980,
+) -> dict[str, object]:
+    """Official Chat API v2 webhook body (includes PII-shaped envelope fields)."""
+
+    return {
+        "account_id": "52e591f7-c98f-4255-8495-827210138c81",
+        "time": 1639572261,
+        "message": {
+            "receiver": {
+                "id": "2ed64e26-70a1-4857-8382-bb066a076219",
+                "phone": "79161234567",
+                "email": "example.client@example.com",
+                "client_id": "my_int-1376265f-86df-4c49-a0c3-a4816df41af8",
+            },
+            "sender": {"id": "76fc2bea-902f-425c-9a3d-dcdac4766090"},
+            "conversation": {
+                "id": chat_id,
+                "client_id": client_id,
+            },
+            "timestamp": 1639572260,
+            "msec_timestamp": msec_timestamp,
+            "message": {
+                "id": message_id,
+                "type": msg_type,
+                "text": text,
+                "media": "https://example.invalid/attachments/image.jpg",
+            },
+        },
+    }
+
+
+def test_official_v2_webhook_payload_normalizes_to_flat() -> None:
+    payload = AmoCrmChatWebhookPayload.model_validate(_official_v2_payload())
+    assert payload.amocrm_chat_id == "8e4d4baa-9e6c-4a88-838a-5f62be227bdc"
+    assert payload.message_id == "0371a0ff-b78a-4c7b-8538-a7d547e10692"
+    assert payload.conversation_client_id == "my_int-d5a421f7f218"
+    assert payload.provider_sequence == 1639572260980
+    assert payload.text == "manager says hello"
+    event = payload.to_ingress_event()
+    assert event.external_message_id == (
+        "amo:8e4d4baa-9e6c-4a88-838a-5f62be227bdc:"
+        "0371a0ff-b78a-4c7b-8538-a7d547e10692"
+    )
+    assert "79161234567" not in repr(payload)
+    assert "example.client@example.com" not in repr(event)
+
+
+@pytest.mark.parametrize("msg_type", ["picture", "file", "voice", "sticker"])
+def test_official_v2_non_text_type_fail_closed(msg_type: str) -> None:
+    with pytest.raises(ValidationError):
+        AmoCrmChatWebhookPayload.model_validate(
+            _official_v2_payload(msg_type=msg_type)
+        )
+
+
+def test_official_v2_malformed_shape_fail_closed() -> None:
+    with pytest.raises(ValidationError):
+        AmoCrmChatWebhookPayload.model_validate(
+            {
+                "account_id": "52e591f7-c98f-4255-8495-827210138c81",
+                "message": {"conversation": {"id": "only-chat"}},
+            }
+        )
+
+
 def test_namespaced_ingress_and_manager_ids() -> None:
     assert (
         amocrm_manager_namespaced_id(
@@ -313,6 +385,115 @@ def test_webhook_ack_only_after_successful_accept(
     assert resp.status_code == 200
     assert resp.text == "ok"
     accept.assert_awaited_once()
+
+
+def test_webhook_official_v2_ack_after_hmac_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _enabled_config()
+    accept = AsyncMock(
+        return_value=IngressAck(
+            accepted=True,
+            duplicate=False,
+            event_id=uuid4(),
+            status="RECEIVED",
+            correlation_id=uuid4(),
+        )
+    )
+    monkeypatch.setattr(AmoCrmManagerIngressAdapter, "accept", accept)
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(
+        build_amocrm_chat_router(config=config, session_factory=MagicMock())
+    )
+    body = json.dumps(_official_v2_payload()).encode("utf-8")
+    with TestClient(app) as client:
+        resp = client.post(
+            _WEBHOOK_PATH,
+            content=body,
+            headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
+        )
+    assert resp.status_code == 200
+    assert resp.text == "ok"
+    accept.assert_awaited_once()
+    event = accept.await_args.args[0]
+    assert event.amocrm_chat_id == "8e4d4baa-9e6c-4a88-838a-5f62be227bdc"
+    assert event.amocrm_message_id == "0371a0ff-b78a-4c7b-8538-a7d547e10692"
+    assert event.conversation_client_id == "my_int-d5a421f7f218"
+    assert event.provider_sequence == 1639572260980
+
+
+def test_webhook_official_v2_rejects_bad_signature_without_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _enabled_config()
+    accept = AsyncMock()
+    monkeypatch.setattr(AmoCrmManagerIngressAdapter, "accept", accept)
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(
+        build_amocrm_chat_router(config=config, session_factory=MagicMock())
+    )
+    body = json.dumps(_official_v2_payload()).encode("utf-8")
+    with TestClient(app) as client:
+        resp = client.post(
+            _WEBHOOK_PATH,
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": "a" * 40,
+            },
+        )
+    assert resp.status_code == 401
+    accept.assert_not_called()
+
+
+def test_webhook_official_v2_rejects_wrong_scope_without_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _enabled_config()
+    accept = AsyncMock()
+    monkeypatch.setattr(AmoCrmManagerIngressAdapter, "accept", accept)
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(
+        build_amocrm_chat_router(config=config, session_factory=MagicMock())
+    )
+    body = json.dumps(_official_v2_payload()).encode("utf-8")
+    with TestClient(app) as client:
+        resp = client.post(
+            amocrm_chat_webhook_path("other-scope-9"),
+            content=body,
+            headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
+        )
+    assert resp.status_code == 401
+    accept.assert_not_called()
+
+
+def test_webhook_official_v2_unsupported_type_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _enabled_config()
+    accept = AsyncMock()
+    monkeypatch.setattr(AmoCrmManagerIngressAdapter, "accept", accept)
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(
+        build_amocrm_chat_router(config=config, session_factory=MagicMock())
+    )
+    body = json.dumps(_official_v2_payload(msg_type="picture")).encode("utf-8")
+    with TestClient(app) as client:
+        resp = client.post(
+            _WEBHOOK_PATH,
+            content=body,
+            headers={"Content-Type": "application/json", "X-Signature": _sign(body)},
+        )
+    assert resp.status_code == 422
+    accept.assert_not_called()
 
 
 def test_webhook_rejects_mismatched_scope_without_persist(
