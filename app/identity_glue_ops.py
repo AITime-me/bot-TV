@@ -1,9 +1,9 @@
-"""Offline identity glue ops CLI (IR-1 / IR-1-OPS-HARDEN-02).
+"""Offline identity glue ops CLI (IR-1).
 
 Usage:
-  # Sensitive signals via stdin JSON (never argv). Do not log/echo the JSON.
-  echo '{"phone":"+79001234567"}' | python -B -m app.identity_glue_ops \\
-    resolve-from-signals --conversation-id UUID
+  # Pipe stdin JSON with resolve signals (never put phone/email/channel ids in argv
+  # or shell command examples). Sensitive values must not appear on the command line.
+  python -B -m app.identity_glue_ops resolve-from-signals --conversation-id UUID < signals.json
 
   python -B -m app.identity_glue_ops inspect-reviews [--conversation-id UUID]
   python -B -m app.identity_glue_ops approve-review \\
@@ -61,6 +61,29 @@ _SIGNAL_KEYS = frozenset(
         "confirmed_links",
     }
 )
+
+# Exact flag tokens and ``--flag=`` prefixes rejected before argparse.
+_SENSITIVE_ARGV_FLAGS: tuple[str, ...] = (
+    "--phone",
+    "--email",
+    "--channel-account",
+    "--channel-provider",
+    "--channel-scope",
+    "--channel-connection-scope",
+    "--channel-external-account-id",
+)
+
+
+def argv_has_sensitive_legacy_flag(argv: Sequence[str]) -> bool:
+    """True if argv uses banned sensitive flags (``--flag`` or ``--flag=...``)."""
+
+    for token in argv:
+        if type(token) is not str:
+            continue
+        for flag in _SENSITIVE_ARGV_FLAGS:
+            if token == flag or token.startswith(f"{flag}="):
+                return True
+    return False
 
 
 def _log_safely(level: int, event: str, **fields: object) -> None:
@@ -228,28 +251,19 @@ async def _run(
     environ: Mapping[str, str] | None = None,
     stdin: TextIO | None = None,
 ) -> int:
-    # Reject legacy sensitive argv flags before argparse so they never land in signals.
-    banned_flags = (
-        "--phone",
-        "--email",
-        "--channel-account",
-        "--channel-provider",
-        "--channel-scope",
-        "--channel-connection-scope",
-        "--channel-external-account-id",
-    )
-    for flag in banned_flags:
-        if flag in argv:
-            _log_safely(
-                logging.ERROR,
-                "identity_glue_ops_failed",
-                error_code="SENSITIVE_ARGV_FORBIDDEN",
-            )
-            print(
-                "identity_glue_ops failed error_code=SENSITIVE_ARGV_FORBIDDEN",
-                file=sys.stderr,
-            )
-            return 2
+    # Reject legacy sensitive argv flags before argparse so values never leak
+    # into argparse errors, stdout, stderr, or logs.
+    if argv_has_sensitive_legacy_flag(argv):
+        _log_safely(
+            logging.ERROR,
+            "identity_glue_ops_failed",
+            error_code="SENSITIVE_ARGV_FORBIDDEN",
+        )
+        print(
+            "identity_glue_ops failed error_code=SENSITIVE_ARGV_FORBIDDEN",
+            file=sys.stderr,
+        )
+        return 2
 
     parser = _build_parser()
     args = parser.parse_args(list(argv))

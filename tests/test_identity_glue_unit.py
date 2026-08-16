@@ -180,21 +180,72 @@ def test_parse_resolve_signals_json_fail_closed(raw: str, code: str) -> None:
     assert str(exc.value.args[0]) == code
 
 
-def test_legacy_sensitive_argv_flags_forbidden() -> None:
+def test_module_doc_avoids_sensitive_shell_examples() -> None:
+    text = (_REPO / "app" / "identity_glue_ops.py").read_text(encoding="utf-8")
+    assert "echo '{" not in text
+    assert '"phone"' not in text.split('"""', 2)[1]
+    assert "stdin JSON" in text.split('"""', 2)[1] or "stdin" in text.split('"""', 2)[1]
+
+
+def test_legacy_sensitive_argv_space_form_forbidden(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from app import identity_glue_ops as cli
 
+    secret = "SECRET_PHONE_SPACE"
     code = cli.main(
         [
             "resolve-from-signals",
             "--conversation-id",
             str(uuid4()),
             "--phone",
-            "+79001234567",
+            secret,
         ],
         environ={},
-        stdin=io.StringIO('{"phone":"+79001234567"}'),
+        stdin=io.StringIO("{}"),
     )
     assert code == 2
+    captured = capsys.readouterr()
+    assert "SENSITIVE_ARGV_FORBIDDEN" in captured.err
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--phone=SECRET",
+        "--email=SECRET",
+        "--channel-account=SECRET",
+        "--channel-provider=SECRET",
+        "--channel-scope=SECRET",
+        "--channel-connection-scope=SECRET",
+        "--channel-external-account-id=SECRET",
+    ],
+)
+def test_legacy_sensitive_argv_equals_form_forbidden(
+    flag: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app import identity_glue_ops as cli
+    from app.identity_glue_ops import argv_has_sensitive_legacy_flag
+
+    assert argv_has_sensitive_legacy_flag([flag]) is True
+    code = cli.main(
+        [
+            "resolve-from-signals",
+            "--conversation-id",
+            str(uuid4()),
+            flag,
+        ],
+        environ={},
+        stdin=io.StringIO("{}"),
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert "SENSITIVE_ARGV_FORBIDDEN" in captured.err
+    assert "SECRET" not in captured.out
+    assert "SECRET" not in captured.err
 
 
 def test_inspect_case_line_has_ids_and_no_pii() -> None:
