@@ -31,6 +31,7 @@ from app.models.amocrm_message_projection import (
     AmocrmMessageProjection,
     AmocrmProjectionSourceKind,
     AmocrmProjectionStatus,
+    client_participant_id_for_conversation,
 )
 from app.models.conversation import Conversation, HandoffState
 from app.models.ingress import IngressStatus
@@ -437,9 +438,13 @@ async def test_ambiguous_retry_absent_allows_one_resend(
     )
     claim1 = await worker.claim_one()
     assert claim1 is not None
+    msgid = claim1.integration_msgid
+    assert len(msgid) <= 40
     with pytest.raises(RuntimeError):
         await worker.process_claimed(claim1)
     assert fake.send_calls == 1
+    assert fake.last_send_kwargs is not None
+    assert fake.last_send_kwargs.get("integration_msgid") == msgid
 
     fake.scan_results.append(
         AmoCrmChatHistoryScanResult(scan=AmoCrmChatHistoryScan.ABSENT)
@@ -454,10 +459,13 @@ async def test_ambiguous_retry_absent_allows_one_resend(
     claim2 = await worker.claim_one(now=later)
     assert claim2 is not None
     assert claim2.attempt_count >= 2
+    assert claim2.integration_msgid == msgid
     result = await worker.process_claimed(claim2, now=later)
     assert result.projected is True
     assert fake.history_calls == 1
     assert fake.send_calls == 2
+    assert fake.last_send_kwargs is not None
+    assert fake.last_send_kwargs.get("integration_msgid") == msgid
     assert fake.last_history_kwargs is not None
     assert fake.last_history_kwargs.get("amocrm_chat_id") == "amo-chat-proj-1"
 
@@ -1023,6 +1031,12 @@ async def test_b1b_delivered_text_projects_exact_outbox_body(
         assert fake.last_send_kwargs.get("sender_id") == AMOCRM_CHAT_BOT_SENDER_ID
         assert fake.last_send_kwargs.get("sender_name") == AMOCRM_CHAT_BOT_SENDER_NAME
         assert fake.last_send_kwargs.get("sender_ref_id") == _BOT_ID
+        assert fake.last_send_kwargs.get("receiver_id") == (
+            client_participant_id_for_conversation(conversation.id)
+        )
+        assert fake.last_send_kwargs.get("receiver_name") == "Client"
+        assert fake.last_send_kwargs.get("receiver_ref_id") is None
+        assert len(str(claim.integration_msgid)) <= 40
         break
     else:
         raise AssertionError("BOT_OUTBOUND claim was never processed")
@@ -1046,6 +1060,7 @@ async def test_b1b_stable_bot_sender_across_conversations(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     sender_ids: list[str] = []
+    receiver_ids: list[str] = []
     for idx, (chat_id, integ, ext_conv) in enumerate(
         (
             ("amo-chat-a", "integ-a", "synth-bot-a"),
@@ -1121,8 +1136,16 @@ async def test_b1b_stable_bot_sender_across_conversations(
                 assert (
                     fake.last_send_kwargs["sender_name"] == AMOCRM_CHAT_BOT_SENDER_NAME
                 )
+                receiver_id = str(fake.last_send_kwargs["receiver_id"])
+                receiver_ids.append(receiver_id)
+                assert receiver_id == client_participant_id_for_conversation(
+                    conversation.id
+                )
+                assert fake.last_send_kwargs.get("receiver_ref_id") is None
 
     assert sender_ids == [AMOCRM_CHAT_BOT_SENDER_ID, AMOCRM_CHAT_BOT_SENDER_ID]
+    assert len(receiver_ids) == 2
+    assert receiver_ids[0] != receiver_ids[1]
 
 
 @pytest.mark.asyncio
@@ -1240,8 +1263,91 @@ async def test_client_inbound_send_has_no_bot_ref_id(
     assert result.projected is True
     assert fake.last_send_kwargs is not None
     assert fake.last_send_kwargs.get("sender_ref_id") is None
-    assert str(fake.last_send_kwargs.get("sender_id", "")).startswith("cli")
+    assert fake.last_send_kwargs.get("receiver_id") is None
+    assert fake.last_send_kwargs.get("receiver_name") is None
+    assert fake.last_send_kwargs.get("sender_id") == (
+        client_participant_id_for_conversation(conversation.id)
+    )
     assert fake.last_send_kwargs.get("sender_name") == "Client"
+
+
+@pytest.mark.asyncio
+async def test_bot_receiver_matches_client_inbound_sender_same_conversation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    conversation = await _seed_bound(session_factory)
+    expected_client_id = client_participant_id_for_conversation(conversation.id)
+
+    async with session_scope(session_factory) as session:
+        accepted = await InboundService(session).accept(
+            SyntheticInboundEvent(
+                external_conversation_id=conversation.external_conversation_id,
+                external_message_id="client-match-recv",
+                text="client",
+            )
+        )
+        assert accepted.reply_plan is not None
+        await projection_repo.enqueue_if_absent(
+            session,
+            conversation_id=conversation.id,
+            source_kind=AmocrmProjectionSourceKind.CLIENT_INBOUND,
+            source_id=accepted.inbox.id,
+            correlation_id=uuid4(),
+        )
+        outbound = await _insert_delivered_bot_outbound(
+            session,
+            conversation=accepted.conversation,
+            reply_plan_id=accepted.reply_plan.id,
+            context_version=accepted.context_version,
+            manager_epoch=accepted.conversation.manager_epoch,
+            event_seq_hwm=accepted.conversation.current_event_seq,
+            payload_json={
+                "schema": "synthetic.outbound.v1",
+                "synthetic_token": "SYNTHETIC_OK",
+                "text": "bot match recv",
+            },
+        )
+        await enqueue_bot_outbound_projection(
+            session,
+            conversation_id=conversation.id,
+            outbound_id=outbound.id,
+            correlation_id=uuid4(),
+            egress_enabled=True,
+        )
+
+    fake = _ScriptedClient()
+    worker = AmocrmChatProjectionWorker(
+        session_factory,
+        worker_id="proj-match-recv",
+        config=_egress_config(),
+        http_client=fake,
+    )
+    client_sender: str | None = None
+    bot_receiver: str | None = None
+    while True:
+        claim = await worker.claim_one()
+        if claim is None:
+            break
+        fake.send_results.append(
+            AmoCrmChatSendResult(
+                outcome=AmoCrmChatEgressOutcome.SUCCESS,
+                amocrm_message_id=f"amo-match-{fake.send_calls + 1}",
+            )
+        )
+        await worker.process_claimed(claim)
+        assert fake.last_send_kwargs is not None
+        assert len(str(claim.integration_msgid)) <= 40
+        if claim.source_kind == AmocrmProjectionSourceKind.CLIENT_INBOUND.value:
+            client_sender = str(fake.last_send_kwargs["sender_id"])
+            assert fake.last_send_kwargs.get("receiver_id") is None
+        elif claim.source_kind == AmocrmProjectionSourceKind.BOT_OUTBOUND.value:
+            bot_receiver = str(fake.last_send_kwargs["receiver_id"])
+            assert fake.last_send_kwargs["sender_id"] == AMOCRM_CHAT_BOT_SENDER_ID
+            assert fake.last_send_kwargs["sender_ref_id"] == _BOT_ID
+
+    assert client_sender == expected_client_id
+    assert bot_receiver == expected_client_id
+    assert client_sender == bot_receiver
 
 
 @pytest.mark.asyncio

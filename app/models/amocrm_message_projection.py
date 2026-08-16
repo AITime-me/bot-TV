@@ -28,6 +28,10 @@ from app.db.base import Base
 
 INTEGRATION_MSGID_MAX_LENGTH = 40
 DEFAULT_PROJECTION_MAX_ATTEMPTS = 5
+CLIENT_PARTICIPANT_ID_PREFIX = "cli"
+CLIENT_PARTICIPANT_NAME = "Client"
+# cli + 29 hex chars keeps participant id short and conversation-scoped.
+_CLIENT_PARTICIPANT_HEX_LEN = 29
 
 
 class AmocrmProjectionSourceKind(str, enum.Enum):
@@ -115,6 +119,15 @@ def integration_msgid_for_source(
     if len(msgid) > INTEGRATION_MSGID_MAX_LENGTH:
         raise ValueError("INTEGRATION_MSGID_TOO_LONG")
     return msgid
+
+
+def client_participant_id_for_conversation(conversation_id: uuid.UUID) -> str:
+    """Stable integration-side client id for one conversation.
+
+    Used as CLIENT_INBOUND ``sender.id`` and BOT_OUTBOUND ``receiver.id``.
+    """
+
+    return f"{CLIENT_PARTICIPANT_ID_PREFIX}{conversation_id.hex[:_CLIENT_PARTICIPANT_HEX_LEN]}"
 
 
 def integration_conversation_id_for(conversation_id: uuid.UUID) -> str:
