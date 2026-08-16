@@ -217,12 +217,13 @@ def test_official_history_json_parser_and_path() -> None:
         S2sHttpResponse(status_code=200, headers={}, body=body)
     )
     scan = client.scan_msgid_in_history(
-        integration_conversation_id="integ-conv-1",
+        amocrm_chat_id="amo-chat-hist-1",
         integration_msgid=msgid,
     )
     assert scan.scan is AmoCrmChatHistoryScan.FOUND
     assert scan.amocrm_message_id == "amo-hist-1"
-    assert "/chats/integ-conv-1/history?limit=50&offset=0" in transport.calls[0].url
+    assert "/chats/amo-chat-hist-1/history?limit=50&offset=0" in transport.calls[0].url
+    assert "integ-conv" not in transport.calls[0].url
 
 
 def test_history_absence_proven_via_short_page() -> None:
@@ -241,10 +242,11 @@ def test_history_absence_proven_via_short_page() -> None:
         )
     )
     scan = client.scan_msgid_in_history(
-        integration_conversation_id="integ-conv-1",
+        amocrm_chat_id="amo-chat-hist-1",
         integration_msgid="c" + "b" * 32,
     )
     assert scan.scan is AmoCrmChatHistoryScan.ABSENT
+    assert "/chats/amo-chat-hist-1/history" in transport.calls[0].url
 
 
 def test_webhook_lifts_message_conversation_client_id() -> None:

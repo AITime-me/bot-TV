@@ -383,7 +383,9 @@ class AmocrmChatProjectionWorker:
         client = self._client()
         self.http_calls.append("history")
         scan = client.scan_msgid_in_history(
-            integration_conversation_id=prepared["integration_conversation_id"],
+            # History path requires Chat API id (conversation_ref_id), not
+            # the integration-side conversation_id used on send.
+            amocrm_chat_id=prepared["conversation_ref_id"],
             integration_msgid=claim.integration_msgid,
         )
         if scan.scan is AmoCrmChatHistoryScan.FOUND and scan.amocrm_message_id:
