@@ -24,14 +24,18 @@ _DUE = 1786993140
 
 
 class _Transport:
-    def __init__(self, responses: list[tuple[int, dict]]) -> None:
+    def __init__(self, responses: list[tuple[int, dict | None]]) -> None:
         self.calls: list[S2sHttpRequest] = []
         self.responses = list(responses)
 
     def request(self, req: S2sHttpRequest) -> S2sHttpResponse:
         self.calls.append(req)
         status, body = self.responses.pop(0)
-        return S2sHttpResponse(status_code=status, headers={}, body=json.dumps(body).encode())
+        return S2sHttpResponse(
+            status_code=status,
+            headers={},
+            body=b"" if body is None else json.dumps(body).encode(),
+        )
 
 
 def _lead(pipeline: int = SOURCE_PIPELINE, status: int = SOURCE_STATUS) -> dict:
@@ -67,6 +71,16 @@ async def test_dry_run_is_zero_writes() -> None:
     assert transport.calls[1].url.endswith(
         "/api/v4/tasks?filter[entity_type]=leads&filter[entity_id]=42&filter[is_completed]=0&limit=250"
     )
+
+
+@pytest.mark.asyncio
+async def test_targeted_tasks_204_is_empty_and_dry_runs() -> None:
+    transport = _Transport([(200, _lead()), (204, None)])
+    receipt = await _executor(transport).execute(
+        lead_id=_LEAD_ID, complete_till=_DUE, apply=False
+    )
+    assert receipt.outcome == "DRY_RUN"
+    assert [call.method for call in transport.calls] == ["GET", "GET"]
 
 
 @pytest.mark.asyncio

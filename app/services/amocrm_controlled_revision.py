@@ -108,6 +108,11 @@ class ControlledRevisionExecutor:
 
     async def _active_tasks(self, lead_id: int) -> list[dict]:
         status, data = await self._request("GET", self._task_path(lead_id))
+        # amoCRM returns 204 No Content for a valid targeted query with no tasks.
+        # That is an unambiguous empty set; every other non-200 status remains
+        # fail-closed below.
+        if status == 204:
+            return []
         rows = (data.get("_embedded") or {}).get("tasks") or []
         if status != 200 or not isinstance(rows, list) or (data.get("_links") or {}).get("next"):
             raise RuntimeError("CONTROLLED_REVISION_TASK_CHECK_FAILED")
