@@ -97,6 +97,9 @@ def _build_parser() -> argparse.ArgumentParser:
     terminal = sub.add_parser("controlled-terminal-move", help="Move one closed PROGREV lead to the same terminal SALON status.")
     terminal.add_argument("--lead-id", required=True, type=int)
     terminal.add_argument("--apply", action="store_true")
+    refresh_terminal = sub.add_parser("controlled-refresh-terminal-move", help="Move one terminal REFRESH lead to the same terminal SALON status.")
+    refresh_terminal.add_argument("--lead-id", required=True, type=int)
+    refresh_terminal.add_argument("--apply", action="store_true")
     reconcile.add_argument(
         "--confirmed-deal-id",
         required=True,
@@ -185,6 +188,10 @@ async def _run(
         elif args.command == "controlled-terminal-move":
             receipt = await service.run_controlled_terminal_move(lead_id=args.lead_id, apply=args.apply)
             print(f"controlled_terminal_move lead_id={receipt.lead_id} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
+            return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
+        elif args.command == "controlled-refresh-terminal-move":
+            receipt = await service.run_controlled_refresh_terminal_move(lead_id=args.lead_id, apply=args.apply)
+            print(f"controlled_refresh_terminal_move lead_id={receipt.lead_id} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
             return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
         else:
             return 2

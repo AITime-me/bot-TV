@@ -13,6 +13,7 @@ from app.services.amocrm_controlled_revision import (
     SOURCE_STATUS,
     TARGET_PIPELINE,
     TARGET_STATUS,
+    REFRESH_PIPELINE,
     TASK_TEXT,
     TASK_TYPE_ID,
     ControlledRevisionExecutor,
@@ -130,6 +131,15 @@ async def test_terminal_move_preserves_tasks_and_terminal_result() -> None:
     assert receipt.outcome == "APPLIED"
     assert [call.method for call in transport.calls] == ["GET", "GET", "PATCH", "GET", "GET"]
     assert json.loads(transport.calls[2].body) == {"pipeline_id": TARGET_PIPELINE, "status_id": 142}
+
+
+@pytest.mark.asyncio
+async def test_refresh_terminal_move_accepts_only_refresh_terminal_source() -> None:
+    terminal = _lead(status=143)
+    terminal["pipeline_id"] = REFRESH_PIPELINE
+    moved = _lead(TARGET_PIPELINE, 143)
+    transport = _Transport([(200, terminal), (200, _tasks()), (200, {}), (200, moved), (200, _tasks())])
+    assert (await _executor(transport).execute_refresh_terminal_move(lead_id=_LEAD_ID, apply=True)).outcome == "APPLIED"
 
 
 @pytest.mark.asyncio
