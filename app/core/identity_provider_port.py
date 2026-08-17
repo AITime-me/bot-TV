@@ -1,7 +1,8 @@
-"""Provider-neutral Identity / CRM lookup port (CURSOR-30).
+"""Provider-neutral Identity / CRM lookup port (CURSOR-30 / IR-2).
 
-No live amoCRM / n8n / VK / MAX adapter. Future stages may implement this
-Protocol; CURSOR-30 ships the contract only.
+Contract for CRM/provider lookups. Live amoCRM contact adapter lives in
+``app.services.amocrm_identity_lookup`` (IR-2); richer fail-closed outcomes
+are the primary API — Protocol ``lookup_by_external_id`` remains lossy.
 """
 
 from __future__ import annotations
@@ -43,10 +44,11 @@ class ExternalEntityRef:
 
 @runtime_checkable
 class IdentityExternalLookupPort(Protocol):
-    """Future boundary for CRM/provider lookups used by reconciliation.
+    """Boundary for CRM/provider lookups used by reconciliation.
 
-    Implementations must not embed PII in exceptions. CURSOR-30 does not ship
-    a fake or live adapter.
+    Implementations must not embed PII in exceptions. Prefer typed
+    AmoCrmIdentityLookupResult for fail-closed phone/id discovery; this
+    method stays ``ref | None`` for Protocol compatibility.
     """
 
     async def lookup_by_external_id(
