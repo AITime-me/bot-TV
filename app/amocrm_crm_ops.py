@@ -90,6 +90,13 @@ def _build_parser() -> argparse.ArgumentParser:
     move_only = sub.add_parser("controlled-move-only", help="Move an active-task PROGREV lead without task changes.")
     move_only.add_argument("--lead-id", required=True, type=int)
     move_only.add_argument("--apply", action="store_true")
+    rebalance = sub.add_parser("controlled-rebalance-task", help="Reschedule one exact active Control task only.")
+    rebalance.add_argument("--task-id", required=True, type=int)
+    rebalance.add_argument("--complete-till", required=True, type=int)
+    rebalance.add_argument("--apply", action="store_true")
+    terminal = sub.add_parser("controlled-terminal-move", help="Move one closed PROGREV lead to the same terminal SALON status.")
+    terminal.add_argument("--lead-id", required=True, type=int)
+    terminal.add_argument("--apply", action="store_true")
     reconcile.add_argument(
         "--confirmed-deal-id",
         required=True,
@@ -170,6 +177,14 @@ async def _run(
         elif args.command == "controlled-move-only":
             receipt = await service.run_controlled_move_only(lead_id=args.lead_id, apply=args.apply)
             print(f"controlled_move_only lead_id={receipt.lead_id} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
+            return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
+        elif args.command == "controlled-rebalance-task":
+            receipt = await service.run_controlled_rebalance_task(task_id=args.task_id, complete_till=args.complete_till, apply=args.apply)
+            print(f"controlled_rebalance_task task_id={receipt.task_id or '-'} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
+            return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
+        elif args.command == "controlled-terminal-move":
+            receipt = await service.run_controlled_terminal_move(lead_id=args.lead_id, apply=args.apply)
+            print(f"controlled_terminal_move lead_id={receipt.lead_id} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
             return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
         else:
             return 2
