@@ -110,6 +110,29 @@ async def test_move_only_refuses_taskless_source_without_writes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rebalance_only_patches_due_and_preserves_task_fields() -> None:
+    later = _DUE + 86400
+    before = _task()
+    after = {**before, "complete_till": later}
+    transport = _Transport([(200, before), (200, {}), (200, after)])
+    receipt = await _executor(transport).execute_reschedule_control_task(task_id=700, complete_till=later, apply=True)
+    assert receipt.outcome == "APPLIED"
+    assert [call.method for call in transport.calls] == ["GET", "PATCH", "GET"]
+    assert json.loads(transport.calls[1].body) == {"complete_till": later}
+
+
+@pytest.mark.asyncio
+async def test_terminal_move_preserves_tasks_and_terminal_result() -> None:
+    terminal = _lead(status=142)
+    moved = _lead(TARGET_PIPELINE, 142)
+    transport = _Transport([(200, terminal), (200, _tasks()), (200, {}), (200, moved), (200, _tasks())])
+    receipt = await _executor(transport).execute_terminal_move(lead_id=_LEAD_ID, apply=True)
+    assert receipt.outcome == "APPLIED"
+    assert [call.method for call in transport.calls] == ["GET", "GET", "PATCH", "GET", "GET"]
+    assert json.loads(transport.calls[2].body) == {"pipeline_id": TARGET_PIPELINE, "status_id": 142}
+
+
+@pytest.mark.asyncio
 async def test_apply_uses_exact_post_and_patch_only() -> None:
     transport = _Transport([(200, _lead()), (200, _tasks()), (201, {"_embedded": {"tasks": [{"id": 700}]}}), (200, _lead()), (200, {}), (200, _lead(TARGET_PIPELINE, TARGET_STATUS)), (200, _tasks(_task()))])
     receipt = await _executor(transport).execute(lead_id=_LEAD_ID, complete_till=_DUE, apply=True)

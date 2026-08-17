@@ -412,3 +412,19 @@ class AmoCrmCrmOpsService:
             refreshed = await self._oauth.refresh_tokens()
             return refreshed.outcome is AmoCrmCrmRestOutcome.SUCCESS
         return await ControlledRevisionExecutor(api_base_url=self._rest.api_base_url, transport=self._transport, token_loader=self._load_access_token, refresh_once=_refresh_once).execute_move_only(lead_id=lead_id, apply=apply)
+
+    async def run_controlled_rebalance_task(self, *, task_id: int, complete_till: int, apply: bool) -> "ControlledRevisionReceipt":
+        from app.services.amocrm_controlled_revision import ControlledRevisionExecutor
+        if not self._rest.enabled or self._oauth is None:
+            return ControlledRevisionExecutor.refused(task_id, "AMOCRM_CRM_REST_DISABLED")
+        async def _refresh_once() -> bool:
+            return (await self._oauth.refresh_tokens()).outcome is AmoCrmCrmRestOutcome.SUCCESS
+        return await ControlledRevisionExecutor(api_base_url=self._rest.api_base_url, transport=self._transport, token_loader=self._load_access_token, refresh_once=_refresh_once).execute_reschedule_control_task(task_id=task_id, complete_till=complete_till, apply=apply)
+
+    async def run_controlled_terminal_move(self, *, lead_id: int, apply: bool) -> "ControlledRevisionReceipt":
+        from app.services.amocrm_controlled_revision import ControlledRevisionExecutor
+        if not self._rest.enabled or self._oauth is None:
+            return ControlledRevisionExecutor.refused(lead_id, "AMOCRM_CRM_REST_DISABLED")
+        async def _refresh_once() -> bool:
+            return (await self._oauth.refresh_tokens()).outcome is AmoCrmCrmRestOutcome.SUCCESS
+        return await ControlledRevisionExecutor(api_base_url=self._rest.api_base_url, transport=self._transport, token_loader=self._load_access_token, refresh_once=_refresh_once).execute_terminal_move(lead_id=lead_id, apply=apply)

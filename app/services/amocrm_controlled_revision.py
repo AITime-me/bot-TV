@@ -24,6 +24,8 @@ _LEAD_PATH = re.compile(r"^/api/v4/leads/[1-9][0-9]*$")
 _TASKS_PATH = re.compile(
     r"^/api/v4/tasks\?filter\[entity_type\]=leads&filter\[entity_id\]=[1-9][0-9]*&filter\[is_completed\]=0&limit=250$"
 )
+_TASK_PATH = re.compile(r"^/api/v4/tasks/[1-9][0-9]*$")
+_TERMINAL_STATUSES = {142, 143}
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,10 @@ class ControlledRevisionExecutor:
         )
 
     @staticmethod
+    def _single_task_path(task_id: int) -> str:
+        return f"/api/v4/tasks/{task_id}"
+
+    @staticmethod
     def _task_body(lead_id: int, complete_till: int) -> list[dict[str, object]]:
         return [{
             "entity_id": lead_id,
@@ -73,9 +79,11 @@ class ControlledRevisionExecutor:
     @staticmethod
     def _allowed(method: str, path: str, body: object | None) -> bool:
         if method == "GET":
-            return body is None and (_LEAD_PATH.fullmatch(path) is not None or _TASKS_PATH.fullmatch(path) is not None)
+            return body is None and (_LEAD_PATH.fullmatch(path) is not None or _TASKS_PATH.fullmatch(path) is not None or _TASK_PATH.fullmatch(path) is not None)
         if method == "PATCH":
-            return _LEAD_PATH.fullmatch(path) is not None and body == {"pipeline_id": TARGET_PIPELINE, "status_id": TARGET_STATUS}
+            if _LEAD_PATH.fullmatch(path) is not None:
+                return body == {"pipeline_id": TARGET_PIPELINE, "status_id": TARGET_STATUS} or (isinstance(body, dict) and set(body) == {"pipeline_id", "status_id"} and body.get("pipeline_id") == TARGET_PIPELINE and body.get("status_id") in _TERMINAL_STATUSES)
+            return _TASK_PATH.fullmatch(path) is not None and isinstance(body, dict) and set(body) == {"complete_till"} and type(body.get("complete_till")) is int and body["complete_till"] > 0
         if method == "POST" and path == "/api/v4/tasks" and isinstance(body, list) and len(body) == 1:
             row = body[0]
             return isinstance(row, dict) and set(row) == {"entity_id", "entity_type", "responsible_user_id", "task_type_id", "text", "complete_till"} and type(row["entity_id"]) is int and row["entity_id"] > 0 and row["entity_type"] == "leads" and row["responsible_user_id"] == MANAGER_ID and row["task_type_id"] == TASK_TYPE_ID and row["text"] == TASK_TEXT and type(row["complete_till"]) is int and row["complete_till"] > 0
@@ -119,6 +127,9 @@ class ControlledRevisionExecutor:
         if any(not isinstance(row, dict) or row.get("entity_type") != "leads" or row.get("entity_id") != lead_id for row in rows):
             raise RuntimeError("CONTROLLED_REVISION_TASK_ENTITY_MISMATCH")
         return rows
+
+    async def _task(self, task_id: int) -> tuple[int, dict]:
+        return await self._request("GET", self._single_task_path(task_id))
 
     async def execute(self, *, lead_id: int, complete_till: int, apply: bool) -> ControlledRevisionReceipt:
         if type(lead_id) is not int or lead_id <= 0 or type(complete_till) is not int or complete_till <= 0:
@@ -169,6 +180,50 @@ class ControlledRevisionExecutor:
             after = await self._active_tasks(lead_id)
             if status != 200 or lead.get("pipeline_id") != TARGET_PIPELINE or lead.get("status_id") != TARGET_STATUS or after != before:
                 return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_MOVE_ONLY_POSTCHECK")
+            return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED")
+        except (RuntimeError, ValueError) as exc:
+            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=str(exc))
+
+    async def execute_reschedule_control_task(self, *, task_id: int, complete_till: int, apply: bool) -> ControlledRevisionReceipt:
+        if type(task_id) is not int or task_id <= 0 or type(complete_till) is not int or complete_till <= 0:
+            return self.refused(task_id, "CONTROLLED_REBALANCE_INPUT_INVALID")
+        try:
+            status, before = await self._task(task_id)
+            fixed = before.get("entity_type") == "leads" and before.get("responsible_user_id") == MANAGER_ID and before.get("task_type_id") == TASK_TYPE_ID and before.get("text") == TASK_TEXT and not before.get("is_completed")
+            if status != 200 or not fixed:
+                return self.refused(task_id, "CONTROLLED_REBALANCE_TASK_SCOPE")
+            if not apply:
+                return ControlledRevisionReceipt(lead_id=before.get("entity_id", task_id), task_id=task_id, outcome="DRY_RUN")
+            status, _ = await self._request("PATCH", self._single_task_path(task_id), {"complete_till": complete_till})
+            if not 200 <= status < 300:
+                return ControlledRevisionReceipt(lead_id=before.get("entity_id", task_id), task_id=task_id, outcome="FAILED", error_code="CONTROLLED_REBALANCE_PATCH")
+            status, after = await self._task(task_id)
+            unchanged = all(after.get(key) == before.get(key) for key in ("entity_id", "entity_type", "responsible_user_id", "task_type_id", "text", "is_completed"))
+            if status != 200 or after.get("complete_till") != complete_till or not unchanged:
+                return ControlledRevisionReceipt(lead_id=before.get("entity_id", task_id), task_id=task_id, outcome="FAILED", error_code="CONTROLLED_REBALANCE_POSTCHECK")
+            return ControlledRevisionReceipt(lead_id=before.get("entity_id", task_id), task_id=task_id, outcome="APPLIED")
+        except (RuntimeError, ValueError) as exc:
+            return ControlledRevisionReceipt(lead_id=task_id, task_id=task_id, outcome="FAILED", error_code=str(exc))
+
+    async def execute_terminal_move(self, *, lead_id: int, apply: bool) -> ControlledRevisionReceipt:
+        if type(lead_id) is not int or lead_id <= 0:
+            return self.refused(lead_id, "CONTROLLED_TERMINAL_INPUT_INVALID")
+        try:
+            status, lead = await self._lead(lead_id)
+            terminal = lead.get("status_id") in _TERMINAL_STATUSES
+            if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or not terminal:
+                return self.refused(lead_id, "CONTROLLED_TERMINAL_SOURCE_STATE")
+            before = await self._active_tasks(lead_id)
+            if not apply:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="DRY_RUN")
+            target_status = lead["status_id"]
+            status, _ = await self._request("PATCH", f"/api/v4/leads/{lead_id}", {"pipeline_id": TARGET_PIPELINE, "status_id": target_status})
+            if not 200 <= status < 300:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_TERMINAL_MOVE")
+            status, after = await self._lead(lead_id)
+            tasks_after = await self._active_tasks(lead_id)
+            if status != 200 or after.get("pipeline_id") != TARGET_PIPELINE or after.get("status_id") != target_status or tasks_after != before:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_TERMINAL_POSTCHECK")
             return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED")
         except (RuntimeError, ValueError) as exc:
             return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=str(exc))
