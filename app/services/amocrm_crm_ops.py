@@ -428,3 +428,11 @@ class AmoCrmCrmOpsService:
         async def _refresh_once() -> bool:
             return (await self._oauth.refresh_tokens()).outcome is AmoCrmCrmRestOutcome.SUCCESS
         return await ControlledRevisionExecutor(api_base_url=self._rest.api_base_url, transport=self._transport, token_loader=self._load_access_token, refresh_once=_refresh_once).execute_terminal_move(lead_id=lead_id, apply=apply)
+
+    async def run_controlled_refresh_terminal_move(self, *, lead_id: int, apply: bool) -> "ControlledRevisionReceipt":
+        from app.services.amocrm_controlled_revision import ControlledRevisionExecutor
+        if not self._rest.enabled or self._oauth is None:
+            return ControlledRevisionExecutor.refused(lead_id, "AMOCRM_CRM_REST_DISABLED")
+        async def _refresh_once() -> bool:
+            return (await self._oauth.refresh_tokens()).outcome is AmoCrmCrmRestOutcome.SUCCESS
+        return await ControlledRevisionExecutor(api_base_url=self._rest.api_base_url, transport=self._transport, token_loader=self._load_access_token, refresh_once=_refresh_once).execute_refresh_terminal_move(lead_id=lead_id, apply=apply)

@@ -14,6 +14,7 @@ from app.core.amocrm_crm_rest_http import AmoCrmCrmRestTransport
 from app.core.s2s_http_transport import S2sHttpRequest, S2sHttpTransportError
 
 SOURCE_PIPELINE = 7408150
+REFRESH_PIPELINE = 7408142
 SOURCE_STATUS = 61561286
 TARGET_PIPELINE = 6702678
 TARGET_STATUS = 87911490
@@ -205,25 +206,31 @@ class ControlledRevisionExecutor:
         except (RuntimeError, ValueError) as exc:
             return ControlledRevisionReceipt(lead_id=task_id, task_id=task_id, outcome="FAILED", error_code=str(exc))
 
-    async def execute_terminal_move(self, *, lead_id: int, apply: bool) -> ControlledRevisionReceipt:
+    async def _execute_terminal_move_for_source(self, *, lead_id: int, source_pipeline: int, operation: str, apply: bool) -> ControlledRevisionReceipt:
         if type(lead_id) is not int or lead_id <= 0:
-            return self.refused(lead_id, "CONTROLLED_TERMINAL_INPUT_INVALID")
+            return self.refused(lead_id, f"{operation}_INPUT_INVALID")
         try:
             status, lead = await self._lead(lead_id)
             terminal = lead.get("status_id") in _TERMINAL_STATUSES
-            if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or not terminal:
-                return self.refused(lead_id, "CONTROLLED_TERMINAL_SOURCE_STATE")
+            if status != 200 or lead.get("pipeline_id") != source_pipeline or not terminal:
+                return self.refused(lead_id, f"{operation}_SOURCE_STATE")
             before = await self._active_tasks(lead_id)
             if not apply:
                 return ControlledRevisionReceipt(lead_id=lead_id, outcome="DRY_RUN")
             target_status = lead["status_id"]
             status, _ = await self._request("PATCH", f"/api/v4/leads/{lead_id}", {"pipeline_id": TARGET_PIPELINE, "status_id": target_status})
             if not 200 <= status < 300:
-                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_TERMINAL_MOVE")
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=f"{operation}_MOVE")
             status, after = await self._lead(lead_id)
             tasks_after = await self._active_tasks(lead_id)
             if status != 200 or after.get("pipeline_id") != TARGET_PIPELINE or after.get("status_id") != target_status or tasks_after != before:
-                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_TERMINAL_POSTCHECK")
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=f"{operation}_POSTCHECK")
             return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED")
         except (RuntimeError, ValueError) as exc:
             return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=str(exc))
+
+    async def execute_terminal_move(self, *, lead_id: int, apply: bool) -> ControlledRevisionReceipt:
+        return await self._execute_terminal_move_for_source(lead_id=lead_id, source_pipeline=SOURCE_PIPELINE, operation="CONTROLLED_TERMINAL", apply=apply)
+
+    async def execute_refresh_terminal_move(self, *, lead_id: int, apply: bool) -> ControlledRevisionReceipt:
+        return await self._execute_terminal_move_for_source(lead_id=lead_id, source_pipeline=REFRESH_PIPELINE, operation="CONTROLLED_REFRESH_TERMINAL", apply=apply)
