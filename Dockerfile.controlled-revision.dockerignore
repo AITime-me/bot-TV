@@ -1,0 +1,5 @@
+# Separate, default-deny context for the disposable offline executor image.
+**
+!requirements-lock.txt
+!app/
+!app/**

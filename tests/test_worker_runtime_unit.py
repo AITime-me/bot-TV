@@ -488,6 +488,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "api",
         "worker",
         "attachment-maintenance",
+        "controlled-revision",
     }
     for service_name in ("api", "worker"):
         service = compose["services"][service_name]
@@ -510,6 +511,23 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         "head",
     ]
     assert compose["services"]["migrate"]["restart"] == "no"
+
+    controlled_revision = compose["services"]["controlled-revision"]
+    assert controlled_revision["profiles"] == ["controlled-revision"]
+    assert controlled_revision["entrypoint"] == [
+        "python",
+        "-B",
+        "-m",
+        "app.amocrm_crm_ops",
+    ]
+    assert controlled_revision["restart"] == "no"
+    assert controlled_revision["read_only"] is True
+    assert controlled_revision["init"] is True
+    assert controlled_revision["cap_drop"] == ["ALL"]
+    assert controlled_revision["security_opt"] == ["no-new-privileges:true"]
+    assert controlled_revision["tmpfs"] == ["/tmp:size=32m,mode=1777"]
+    assert "ports" not in controlled_revision
+    assert controlled_revision["build"]["dockerfile"] == "Dockerfile.controlled-revision"
 
     spool_root = "/var/lib/bot-tv/attachment-spool"
     maintenance = compose["services"]["attachment-maintenance"]

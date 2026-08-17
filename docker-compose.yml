@@ -103,6 +103,24 @@ services:
       retries: 3
       start_period: 20s
 
+  # One-shot only. This profile is never part of ordinary api/worker startup;
+  # an operator must explicitly invoke `docker compose run --rm
+  # controlled-revision controlled-revision ...`.
+  controlled-revision:
+    build:
+      context: .
+      dockerfile: Dockerfile.controlled-revision
+    profiles: ["controlled-revision"]
+    entrypoint: ["python", "-B", "-m", "app.amocrm_crm_ops"]
+    environment:
+      <<: [*runtime-environment, *amocrm-environment]
+    env_file: *amocrm-oauth-keys-env-file
+    <<: *runtime-hardening
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
   # Default-off: not started by `docker compose up -d`.
   # Activation requires profile `attachment-maintenance` AND
   # ATTACHMENT_MAINTENANCE_ENABLED=true plus a host-local keyring env_file.
