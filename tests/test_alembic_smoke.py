@@ -23,6 +23,7 @@ from app.models import (
     ConversationOpsEvent,
     EphemeralPiiValue,
     ExternalIdentityLink,
+    IdentityReviewCase,
     InboxMessage,
     IngressEvent,
     ManagerMessage,
@@ -149,6 +150,14 @@ _EXPECTED_CHECKS_25 = {
         ")"
     ),
     "ck_amocrm_entity_links_lease_version_nonnegative": "lease_version >= 0",
+}
+
+_EXPECTED_CHECKS_26 = {
+    "ck_identity_review_cases_status": "status IN ('OPEN', 'RESOLVED')",
+    "ck_identity_review_cases_reason_code": (
+        "reason_code IN ('AMBIGUOUS_RESOLVE', 'CONFLICTING_CANONICAL', "
+        "'CANONICAL_NOT_ACTIVE')"
+    ),
 }
 
 _EXPECTED_CHECKS_01B = {
@@ -284,6 +293,7 @@ def test_alembic_metadata_imports() -> None:
     assert AmocrmMessageProjection.__tablename__ == "amocrm_message_projections"
     assert AmocrmCrmOauthToken.__tablename__ == "amocrm_crm_oauth_tokens"
     assert AmocrmEntityLink.__tablename__ == "amocrm_entity_links"
+    assert IdentityReviewCase.__tablename__ == "identity_review_cases"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -305,6 +315,7 @@ def test_alembic_metadata_imports() -> None:
         "amocrm_message_projections",
         "amocrm_crm_oauth_tokens",
         "amocrm_entity_links",
+        "identity_review_cases",
     }
 
 
@@ -390,6 +401,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260813_25_amo_deal_reserve"].down_revision
         == "20260813_24_amo_entity_links"
     )
+    assert "20260816_26_identity_glue" in by_id
+    assert (
+        by_id["20260816_26_identity_glue"].down_revision
+        == "20260813_25_amo_deal_reserve"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -409,6 +425,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260813_23_amocrm_crm_oauth",
         "20260813_24_amo_entity_links",
         "20260813_25_amo_deal_reserve",
+        "20260816_26_identity_glue",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -442,7 +459,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260813_24_amo_entity_links") <= 32
     assert "20260813_25_amo_deal_reserve" in revision_ids
     assert len("20260813_25_amo_deal_reserve") <= 32
-    assert heads == ["20260813_25_amo_deal_reserve"]
+    assert "20260816_26_identity_glue" in revision_ids
+    assert len("20260816_26_identity_glue") <= 32
+    assert heads == ["20260816_26_identity_glue"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -530,6 +549,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_25 = (
         root / "alembic" / "versions" / "20260813_25_amo_deal_reserve.py"
     ).read_text(encoding="utf-8")
+    migration_26 = (
+        root / "alembic" / "versions" / "20260816_26_identity_glue.py"
+    ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
     model_uniques: set[str] = set()
@@ -561,6 +583,7 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert _EXPECTED_UNIQUES_23 <= model_uniques
     assert set(_EXPECTED_CHECKS_24) <= set(model_checks)
     assert set(_EXPECTED_CHECKS_25) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_26) <= set(model_checks)
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -716,6 +739,17 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert "RECONCILE_REQUIRED" in migration_25
     assert "create_submitted_at" in migration_25
     assert "uq_amocrm_entity_links_open_conversation_kind" in migration_25
+
+    for name, sql in _EXPECTED_CHECKS_26.items():
+        assert name in migration_26
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_26, f"{name} missing {token}"
+    assert "identity_review_cases" in migration_26
+    assert "canonical_identity_id" in migration_26
+    assert "uq_identity_review_cases_open_conversation_reason" in migration_26
+    for forbidden in ("normalize_phone", "send_silent_text", "create_contact"):
+        assert forbidden not in migration_26
 
     for complex_check in (
         "ck_conversations_handoff_consistency",

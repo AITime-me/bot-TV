@@ -124,6 +124,10 @@ class Conversation(Base):
             "manager_sequence_hwm IS NULL OR manager_sequence_hwm >= 0",
             name="ck_conversations_manager_sequence_hwm_nonnegative",
         ),
+        Index(
+            "ix_conversations_canonical_identity_id",
+            "canonical_identity_id",
+        ),
         CheckConstraint(
             "("
             "status = 'CLOSED' AND ownership = 'BOT' "
@@ -253,6 +257,15 @@ class Conversation(Base):
             ondelete="SET NULL",
             use_alter=True,
             name="fk_conversations_active_reply_plan_id",
+        ),
+        nullable=True,
+    )
+    canonical_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "canonical_identities.id",
+            ondelete="SET NULL",
+            name="fk_conversations_canonical_identity_id",
         ),
         nullable=True,
     )
