@@ -70,6 +70,7 @@ from app.models.manager_message import (
     ManagerMessageStatus,
 )
 from app.models.canonical_identity import CanonicalIdentity, ExternalIdentityLink
+from app.models.identity_review_case import IdentityReviewCase
 from app.models.master_channel_binding import MasterChannelBinding
 from app.models.master_command_pending import MasterCommandPending
 from app.models.outbox import (
@@ -154,6 +155,7 @@ __all__ = [
     "ManagerMessageStatus",
     "CanonicalIdentity",
     "ExternalIdentityLink",
+    "IdentityReviewCase",
     "MasterChannelBinding",
     "MasterCommandPending",
     "MirrorPayloadViolation",
