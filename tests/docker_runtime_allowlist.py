@@ -83,6 +83,8 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/amocrm_crm_rest_http.py",
     "!app/core/amocrm_crm_deal_create_config.py",
     "!app/core/amocrm_crm_leads_http.py",
+    "!app/core/amocrm_crm_contacts_http.py",
+    "!app/core/amocrm_identity_lookup.py",
     "!app/core/amocrm_manager_ids.py",
     "!app/core/master_channel_binding.py",
     "!app/core/identity_resolution.py",
@@ -161,6 +163,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/amocrm_manager_ingress.py",
     "!app/services/amocrm_chat_projection.py",
     "!app/services/amocrm_technical_deal.py",
+    "!app/services/amocrm_identity_lookup.py",
     "!app/services/amocrm_crm_mirror_adapter.py",
     "!app/services/dialog_context.py",
     "!app/services/ephemeral_pii_store.py",
@@ -252,6 +255,13 @@ IR1_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/services/identity_glue.py",
     "app/services/identity_glue_ops.py",
     "app/identity_glue_ops.py",
+)
+
+# IR-2 read-only amoCRM contact identity lookup.
+IR2_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "app/core/amocrm_crm_contacts_http.py",
+    "app/core/amocrm_identity_lookup.py",
+    "app/services/amocrm_identity_lookup.py",
 )
 
 # AMO-01A durable amoCRM manager ingress paths.
