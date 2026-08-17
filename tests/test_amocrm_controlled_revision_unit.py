@@ -93,6 +93,23 @@ async def test_wrong_source_and_existing_task_are_zero_writes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_move_only_preserves_active_task_and_only_patches_lead() -> None:
+    transport = _Transport([(200, _lead()), (200, _tasks(_task())), (200, {}), (200, _lead(TARGET_PIPELINE, TARGET_STATUS)), (200, _tasks(_task()))])
+    receipt = await _executor(transport).execute_move_only(lead_id=_LEAD_ID, apply=True)
+    assert receipt.outcome == "APPLIED"
+    assert [call.method for call in transport.calls] == ["GET", "GET", "PATCH", "GET", "GET"]
+    assert all(call.method != "POST" for call in transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_move_only_refuses_taskless_source_without_writes() -> None:
+    transport = _Transport([(200, _lead()), (204, None)])
+    receipt = await _executor(transport).execute_move_only(lead_id=_LEAD_ID, apply=True)
+    assert receipt.error_code == "CONTROLLED_MOVE_ONLY_NO_ACTIVE_TASK"
+    assert all(call.method == "GET" for call in transport.calls)
+
+
+@pytest.mark.asyncio
 async def test_apply_uses_exact_post_and_patch_only() -> None:
     transport = _Transport([(200, _lead()), (200, _tasks()), (201, {"_embedded": {"tasks": [{"id": 700}]}}), (200, _lead()), (200, {}), (200, _lead(TARGET_PIPELINE, TARGET_STATUS)), (200, _tasks(_task()))])
     receipt = await _executor(transport).execute(lead_id=_LEAD_ID, complete_till=_DUE, apply=True)
