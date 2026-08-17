@@ -148,3 +148,27 @@ class ControlledRevisionExecutor:
             return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED", task_id=task_id)
         except (RuntimeError, ValueError) as exc:
             return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=str(exc))
+
+    async def execute_move_only(self, *, lead_id: int, apply: bool) -> ControlledRevisionReceipt:
+        """Move an open PROGREV lead only when its active tasks remain unchanged."""
+        if type(lead_id) is not int or lead_id <= 0:
+            return self.refused(lead_id, "CONTROLLED_REVISION_INPUT_INVALID")
+        try:
+            status, lead = await self._lead(lead_id)
+            if status != 200 or lead.get("pipeline_id") != SOURCE_PIPELINE or lead.get("status_id") != SOURCE_STATUS:
+                return self.refused(lead_id, "CONTROLLED_MOVE_ONLY_SOURCE_STATE")
+            before = await self._active_tasks(lead_id)
+            if not before:
+                return self.refused(lead_id, "CONTROLLED_MOVE_ONLY_NO_ACTIVE_TASK")
+            if not apply:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="DRY_RUN")
+            status, _ = await self._request("PATCH", f"/api/v4/leads/{lead_id}", {"pipeline_id": TARGET_PIPELINE, "status_id": TARGET_STATUS})
+            if not 200 <= status < 300:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_MOVE_ONLY_MOVE")
+            status, lead = await self._lead(lead_id)
+            after = await self._active_tasks(lead_id)
+            if status != 200 or lead.get("pipeline_id") != TARGET_PIPELINE or lead.get("status_id") != TARGET_STATUS or after != before:
+                return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code="CONTROLLED_MOVE_ONLY_POSTCHECK")
+            return ControlledRevisionReceipt(lead_id=lead_id, outcome="APPLIED")
+        except (RuntimeError, ValueError) as exc:
+            return ControlledRevisionReceipt(lead_id=lead_id, outcome="FAILED", error_code=str(exc))

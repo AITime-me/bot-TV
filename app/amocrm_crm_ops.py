@@ -87,6 +87,9 @@ def _build_parser() -> argparse.ArgumentParser:
     revision.add_argument("--lead-id", required=True, type=int)
     revision.add_argument("--complete-till", required=True, type=int)
     revision.add_argument("--apply", action="store_true")
+    move_only = sub.add_parser("controlled-move-only", help="Move an active-task PROGREV lead without task changes.")
+    move_only.add_argument("--lead-id", required=True, type=int)
+    move_only.add_argument("--apply", action="store_true")
     reconcile.add_argument(
         "--confirmed-deal-id",
         required=True,
@@ -163,6 +166,10 @@ async def _run(
                 f"lead_id={receipt.lead_id} outcome={receipt.outcome} "
                 f"task_id={receipt.task_id or '-'} error_code={receipt.error_code or '-'}"
             )
+            return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
+        elif args.command == "controlled-move-only":
+            receipt = await service.run_controlled_move_only(lead_id=args.lead_id, apply=args.apply)
+            print(f"controlled_move_only lead_id={receipt.lead_id} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
             return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
         else:
             return 2
