@@ -229,6 +229,7 @@ jobs:
           set -euo pipefail
           docker compose config --quiet
           docker compose --profile attachment-maintenance config --quiet
+          docker compose --profile controlled-revision config --quiet
 
       - name: Assert rendered compose safety defaults
         run: |
@@ -273,11 +274,15 @@ jobs:
               raise SystemExit(
                   "attachment-maintenance must stay profile-gated in default config"
               )
-          print("default config omits attachment-maintenance OK")
+          if "controlled-revision" in config["services"]:
+              raise SystemExit(
+                  "controlled-revision must stay profile-gated in default config"
+              )
+          print("default config omits offline profiles OK")
           PY
 
       - name: Build Docker images
-        run: docker compose build --pull migrate api worker attachment-maintenance
+        run: docker compose build --pull migrate api worker attachment-maintenance controlled-revision
 
       - name: Verify built images exist
         run: |
@@ -315,6 +320,21 @@ jobs:
             fi
           done
           echo "Verified attachment-maintenance profile image set"
+          mapfile -t revision_images < <(
+            docker compose --profile controlled-revision config --images
+          )
+          revision_unique="$(printf '%s\n' "${revision_images[@]}" | sort -u | wc -l)"
+          if [ "${revision_unique}" -ne 4 ]; then
+            echo "Expected exactly 4 unique controlled-revision profile images, got ${revision_unique}"
+            exit 1
+          fi
+          for image in "${revision_images[@]}"; do
+            if ! docker image inspect "${image}" >/dev/null; then
+              echo "Missing local controlled-revision profile image: ${image}"
+              exit 1
+            fi
+          done
+          echo "Verified controlled-revision disposable profile image set"
 
   pr-gate:
     name: PR Gate
