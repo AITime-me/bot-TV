@@ -29,7 +29,8 @@ _LINK_STATUS_SQL = "'ACTIVE', 'REVOKED'"
 _CONFIDENCE_SQL = "'CONFIRMED', 'SECONDARY'"
 _ENTITY_KIND_SQL = (
     "'CHANNEL_ACCOUNT', 'PHONE', 'EMAIL', 'ONLINE_ZAPIS_CLIENT', "
-    "'AMOCRM_CONTACT', 'AMOCRM_BUYER_CARD', 'AMOCRM_TECHNICAL_DEAL'"
+    "'AMOCRM_CONTACT', 'AMOCRM_BUYER_CARD', 'AMOCRM_TECHNICAL_DEAL', "
+    "'AMOCRM_DEAL'"
 )
 
 
@@ -130,7 +131,8 @@ class ExternalIdentityLink(Base):
             unique=True,
             postgresql_where=text("status = 'ACTIVE'"),
         ),
-        # One ACTIVE amoCRM deal-id role: Buyer Card XOR technical/chat deal.
+        # One ACTIVE amoCRM Lead id: business Deal XOR technical/chat Lead.
+        # Buyer Card (Customer) is a separate namespace and is not included.
         Index(
             "uq_external_identity_links_active_amocrm_deal_role",
             "provider",
@@ -139,7 +141,7 @@ class ExternalIdentityLink(Base):
             unique=True,
             postgresql_where=text(
                 "status = 'ACTIVE' AND entity_kind IN "
-                "('AMOCRM_BUYER_CARD', 'AMOCRM_TECHNICAL_DEAL')"
+                "('AMOCRM_DEAL', 'AMOCRM_TECHNICAL_DEAL')"
             ),
         ),
         Index(

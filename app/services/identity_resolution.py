@@ -14,11 +14,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity_resolution import (
-    AMOCRM_DEAL_ENTITY_KINDS,
+    AMOCRM_LEAD_ROLE_ENTITY_KINDS,
     DEFAULT_CONNECTION_SCOPE,
     EMAIL_PROVIDER,
     PHONE_PROVIDER,
-    REASON_BUYER_TECH_ROLE_CONFLICT,
+    REASON_DEAL_TECH_ROLE_CONFLICT,
     REASON_EMAIL_ONLY_SECONDARY,
     AttachIdentityLinkOutcome,
     AttachIdentityLinkResult,
@@ -75,7 +75,6 @@ _REASON_AMBIGUOUS_CANDIDATES = "ambiguous_canonical_candidates"
 _REASON_CONFLICTING_LINKS = "conflicting_durable_links"
 _REASON_BUYER_CARD_REUSE = "existing_buyer_card"
 _REASON_BUYER_CARD_AMBIGUOUS = "ambiguous_buyer_cards"
-_REASON_TECHNICAL_DEAL_NOT_BUYER = "technical_deal_is_not_buyer_card"
 
 
 def _log(event: str) -> None:
@@ -364,9 +363,9 @@ class IdentityResolutionService:
                 outcome=AttachIdentityLinkOutcome.INVALID_INPUT
             )
 
-        # Fail-closed: one ACTIVE amoCRM deal id cannot be both Buyer Card and
-        # technical/chat deal under the same provider/scope.
-        if kind in AMOCRM_DEAL_ENTITY_KINDS:
+        # Fail-closed: one ACTIVE amoCRM Lead id cannot be both a business Deal
+        # and a technical/chat Lead under the same provider/scope.
+        if kind in AMOCRM_LEAD_ROLE_ENTITY_KINDS:
             roles = await repo.lock_active_amocrm_deal_roles(
                 self._session,
                 provider=prov,
@@ -378,7 +377,7 @@ class IdentityResolutionService:
                     _log("IDENTITY_LINK_CONFLICT")
                     return AttachIdentityLinkResult(
                         outcome=AttachIdentityLinkOutcome.CONFLICT,
-                        reason=REASON_BUYER_TECH_ROLE_CONFLICT,
+                        reason=REASON_DEAL_TECH_ROLE_CONFLICT,
                     )
 
         existing = await repo.lock_active_by_key(
@@ -497,7 +496,7 @@ class IdentityResolutionService:
     ) -> AttachIdentityLinkResult:
         """After savepoint rollback: re-read and return typed outcome (UoW intact)."""
 
-        if entity_kind in AMOCRM_DEAL_ENTITY_KINDS:
+        if entity_kind in AMOCRM_LEAD_ROLE_ENTITY_KINDS:
             roles = await repo.lock_active_amocrm_deal_roles(
                 self._session,
                 provider=provider,
@@ -509,7 +508,7 @@ class IdentityResolutionService:
                     _log("IDENTITY_LINK_CONFLICT")
                     return AttachIdentityLinkResult(
                         outcome=AttachIdentityLinkOutcome.CONFLICT,
-                        reason=REASON_BUYER_TECH_ROLE_CONFLICT,
+                        reason=REASON_DEAL_TECH_ROLE_CONFLICT,
                     )
 
         raced = await repo.lock_active_by_key(
@@ -643,10 +642,11 @@ class IdentityResolutionService:
         candidate_buyer_card_ids: tuple[object, ...] = (),
         candidate_technical_deal_ids: tuple[object, ...] = (),
     ) -> ReconcileBuyerCardResult:
-        """Reuse the linked Buyer Card or fail closed on ambiguity.
+        """Reuse the linked Buyer Card (Customer) or fail closed on ambiguity.
 
-        Technical/conversation deals are never treated as Buyer Cards. No
-        automatic amoCRM merge. Closed/revoked cards are ignored.
+        Buyer Card ids are amoCRM Customer ids, a different namespace from
+        Lead. Technical/business Lead ids are never treated as Customers.
+        Numeric overlap with a Lead id is allowed. No automatic amoCRM merge.
         """
 
         try:
@@ -664,15 +664,10 @@ class IdentityResolutionService:
                 outcome=ReconcileBuyerCardOutcome.INVALID_INPUT
             )
 
-        # Explicit guard: technical deal ids must not be mistaken for cards.
-        overlap = set(buyer_candidates) & set(tech_candidates)
-        if overlap:
-            _log("IDENTITY_MANUAL_REVIEW")
-            return ReconcileBuyerCardResult(
-                outcome=ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED,
-                reason=_REASON_TECHNICAL_DEAL_NOT_BUYER,
-                known_external_ids=(),
-            )
+        # Customer ids and Lead ids occupy different amoCRM namespaces.
+        # Technical Lead ids are never treated as Buyer Card (Customer) ids,
+        # but numeric overlap is allowed and is not a role conflict.
+        _ = tech_candidates
 
         identity = await repo.lock_canonical(self._session, identity_id=cid)
         if identity is None:
@@ -697,43 +692,11 @@ class IdentityResolutionService:
         )
         known = tuple(repo.as_link_record(r) for r in active_links)
 
-        # Technical deals linked on the identity are never Buyer Cards.
-        for link in known:
-            if (
-                link.entity_kind is IdentityEntityKind.AMOCRM_TECHNICAL_DEAL
-                and link.external_id in buyer_candidates
-            ):
-                _log("IDENTITY_MANUAL_REVIEW")
-                return ReconcileBuyerCardResult(
-                    outcome=ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED,
-                    reason=_REASON_TECHNICAL_DEAL_NOT_BUYER,
-                    known_external_ids=known,
-                )
-
         buyer_rows = [
             r
             for r in active_links
             if r.entity_kind == IdentityEntityKind.AMOCRM_BUYER_CARD.value
         ]
-        # Dual-kind ACTIVE (Buyer Card + technical deal same id) must never REUSE.
-        for buyer in buyer_rows:
-            roles = await repo.list_active_amocrm_deal_roles(
-                self._session,
-                provider=buyer.provider,
-                connection_scope=buyer.connection_scope,
-                external_id=buyer.external_id,
-            )
-            kinds = {r.entity_kind for r in roles}
-            if (
-                IdentityEntityKind.AMOCRM_BUYER_CARD.value in kinds
-                and IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value in kinds
-            ):
-                _log("IDENTITY_MANUAL_REVIEW")
-                return ReconcileBuyerCardResult(
-                    outcome=ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED,
-                    reason=REASON_BUYER_TECH_ROLE_CONFLICT,
-                    known_external_ids=known,
-                )
 
         if len(buyer_rows) > 1:
             _log("IDENTITY_MANUAL_REVIEW")

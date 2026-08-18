@@ -28,15 +28,17 @@ mapping and must not be overloaded as client identity.
   new providers do not require a schema rewrite.
 - `entity_kind` is a closed CHECK set expanded by migration when needed:
   `CHANNEL_ACCOUNT`, `PHONE`, `EMAIL`, `ONLINE_ZAPIS_CLIENT`, `AMOCRM_CONTACT`,
-  `AMOCRM_BUYER_CARD`, `AMOCRM_TECHNICAL_DEAL`.
+  `AMOCRM_BUYER_CARD`, `AMOCRM_TECHNICAL_DEAL`, `AMOCRM_DEAL`.
 - Link lifecycle: `ACTIVE` (resolvable) / `REVOKED` (audit history, ignored).
 - Partial unique index:
   `UNIQUE (provider, connection_scope, entity_kind, external_id) WHERE status = 'ACTIVE'`.
-- Additional partial unique for amoCRM deal roles
+- Additional partial unique for amoCRM **Lead** roles
   (`uq_external_identity_links_active_amocrm_deal_role`):
   `UNIQUE (provider, connection_scope, external_id) WHERE status = 'ACTIVE'
-  AND entity_kind IN ('AMOCRM_BUYER_CARD', 'AMOCRM_TECHNICAL_DEAL')`.
-  One deal id cannot be both Buyer Card and technical/chat deal at once.
+  AND entity_kind IN ('AMOCRM_DEAL', 'AMOCRM_TECHNICAL_DEAL')`.
+  One Lead id cannot be ACTIVE as both a business Deal and a technical/chat
+  Lead at once. Buyer Card (Customer) is a different amoCRM id namespace and
+  is not in this XOR: Customer `123` and Lead `123` may coexist.
 
 ### Matching priority
 
@@ -67,26 +69,30 @@ route to human review. No automatic mass merge of amo entities.
 
 ### Buyer Card semantics
 
-- Buyer Card = canonical CRM card for purchases/invoices/tasks
-  (`AMOCRM_BUYER_CARD`).
+- Buyer Card = amoCRM **Customer** card (`AMOCRM_BUYER_CARD`), not a Lead.
+- Customer and Lead occupy different amoCRM id namespaces.
 - If exactly one ACTIVE Buyer Card link exists for the canonical identity,
   `reconcile_buyer_card` **reuses** it.
 - Multiple ACTIVE Buyer Cards, or candidate set disagreeing with the linked card
   → `MANUAL_REVIEW_REQUIRED`.
-- Revoked/closed duplicate cards are ignored (must be REVOKED, not ACTIVE).
-- Dual-kind ACTIVE Buyer Card + technical deal for the same id →
-  `MANUAL_REVIEW_REQUIRED` (`buyer_card_technical_deal_conflict`); never `REUSED`.
+- Max one ACTIVE Buyer Card (Customer) per canonical.
+- Numeric overlap with a Technical Lead or business Lead id is allowed and is
+  not a role conflict.
 
-### Technical deal semantics
+### Lead / Deal semantics
 
-- `AMOCRM_TECHNICAL_DEAL` is a conversation/technical deal id, **not** a Buyer
-  Card.
-- Attach fail-closed + DB partial unique prevent the same ACTIVE amoCRM
-  `(provider, connection_scope, external_id)` from occupying both roles.
-- Reconciliation rejects treating a technical deal id as a Buyer Card candidate
-  (`technical_deal_is_not_buyer_card`).
-- Technical deals may be linked for audit/routing but never selected as the
-  purchase card.
+- `AMOCRM_DEAL` is an ordinary business Lead (карточка сделки).
+- `AMOCRM_TECHNICAL_DEAL` is a conversation/technical/chat Lead, **not** a
+  Buyer Card and **not** a business Deal.
+- Attach fail-closed + DB partial unique prevent the same ACTIVE Lead id from
+  occupying both `AMOCRM_DEAL` and `AMOCRM_TECHNICAL_DEAL`
+  (`deal_technical_deal_conflict`).
+- Only amoCRM system status `143` (closed and unrealized) is a reanimation
+  candidate. Status `142` (successfully realized) is successful history, not
+  reanimation. A non-system status with `closed_at` set fails closed.
+  Auto-reanimation is out of scope.
+- Multiple historical business Deal links are allowed; there is no “exactly one
+  Deal forever” rule.
 
 ### Future amoCRM / n8n boundary
 
@@ -103,8 +109,9 @@ route to human review. No automatic mass merge of amo entities.
 - Import historical mappings as REVOKED+ACTIVE history preserving audit.
 - Ambiguous Sellbot duplicates → manual review queues; never bulk-merge contacts
   or deals inside bot-TV.
-- Technical deals stay linked separately from Buyer Cards so cleanup can retire
-  chat deals without destroying purchase history.
+- Technical Leads stay linked separately from Buyer Cards (Customers) and
+  business Deals so cleanup can retire chat Leads without destroying purchase
+  history.
 
 ### Phone / email privacy tradeoff
 

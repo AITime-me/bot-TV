@@ -1,4 +1,4 @@
-"""IR-3 read-only amoCRM Buyer Card discovery unit coverage."""
+"""IR-3 read-only amoCRM Buyer Card (Customer) discovery unit coverage."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from app.core.amocrm_buyer_card_discovery import (
 )
 from app.core.amocrm_crm_buyer_card_http import (
     AmoCrmBuyerCardHttpClient,
-    parse_contact_with_leads_body,
-    parse_lead_inspect_body,
+    parse_contact_with_customers_body,
+    parse_customer_inspect_body,
 )
 from app.core.amocrm_crm_rest_config import AmoCrmCrmRestConfig
 from app.core.amocrm_crm_rest_http import (
@@ -25,7 +25,7 @@ from app.core.amocrm_crm_rest_http import (
 )
 from app.core.s2s_http_transport import S2sHttpRequest, S2sHttpResponse
 from app.services.amocrm_buyer_card_discovery import (
-    MAX_LINKED_LEADS_PER_DISCOVERY,
+    MAX_LINKED_CUSTOMERS_PER_DISCOVERY,
     AmoCrmBuyerCardDiscoveryService,
 )
 from tests.docker_runtime_allowlist import (
@@ -84,7 +84,7 @@ def _json_response(status: int, payload: object) -> S2sHttpResponse:
 
 def _contact_payload(
     contact_id: int,
-    lead_ids: list[int],
+    customer_ids: list[int],
     *,
     name: str = _NAME,
 ) -> dict:
@@ -95,23 +95,21 @@ def _contact_payload(
             {"field_code": "EMAIL", "values": [{"value": _EMAIL}]},
             {"field_code": "PHONE", "values": [{"value": _PHONE}]},
         ],
-        "_embedded": {"leads": [{"id": lid, "name": f"Lead {lid}"} for lid in lead_ids]},
+        "_embedded": {
+            "customers": [{"id": cid, "name": f"Customer {cid}"} for cid in customer_ids]
+        },
     }
 
 
-def _lead_payload(
-    lead_id: int,
+def _customer_payload(
+    customer_id: int,
     contact_ids: list[int],
     *,
-    closed_at: int | None = None,
-    is_deleted: bool = False,
-    name: str = "Buyer Deal Name",
+    name: str = "Buyer Customer Name",
 ) -> dict:
     return {
-        "id": lead_id,
+        "id": customer_id,
         "name": name,
-        "is_deleted": is_deleted,
-        "closed_at": closed_at,
         "tags": [{"name": "vip"}],
         "_embedded": {"contacts": [{"id": cid} for cid in contact_ids]},
     }
@@ -139,17 +137,19 @@ async def _make_service(
     )
 
 
-def _queue_contact_and_leads(
+def _queue_contact_and_customers(
     transport: _FakeTransport,
     *,
     contact_id: int,
-    leads: list[dict],
+    customers: list[dict],
 ) -> None:
-    lead_ids = [int(item["id"]) for item in leads]
-    transport.responses.append(_json_response(200, _contact_payload(contact_id, lead_ids)))
-    by_id = {int(item["id"]): item for item in leads}
-    for lid in sorted(set(lead_ids)):
-        transport.responses.append(_json_response(200, by_id[lid]))
+    customer_ids = [int(item["id"]) for item in customers]
+    transport.responses.append(
+        _json_response(200, _contact_payload(contact_id, customer_ids))
+    )
+    by_id = {int(item["id"]): item for item in customers}
+    for cid in sorted(set(customer_ids)):
+        transport.responses.append(_json_response(200, by_id[cid]))
 
 
 @pytest.mark.asyncio
@@ -181,38 +181,40 @@ async def test_contact_id_mismatch_permanent() -> None:
     result = await service.discover_buyer_card_candidates(contact_id="42")
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR
     assert result.error_code == "AMOCRM_CRM_CONTACT_ID_MISMATCH"
-    assert result.eligible_lead_ids == ()
+    assert result.eligible_customer_ids == ()
     text = repr(result)
     assert _NAME not in text
     assert _PHONE not in text
 
 
 @pytest.mark.asyncio
-async def test_contact_without_leads_not_found() -> None:
+async def test_contact_without_customers_not_found() -> None:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [])))
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
     assert result.contact_id == str(_CONTACT_ID)
-    assert result.eligible_lead_ids == ()
+    assert result.eligible_customer_ids == ()
     assert len(transport.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_one_open_linked_lead_found_candidate() -> None:
+async def test_one_linked_customer_found_candidate() -> None:
     transport = _FakeTransport()
-    _queue_contact_and_leads(
+    _queue_contact_and_customers(
         transport,
         contact_id=_CONTACT_ID,
-        leads=[_lead_payload(7, [_CONTACT_ID])],
+        customers=[_customer_payload(7, [_CONTACT_ID])],
     )
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
-    assert result.eligible_lead_ids == ("7",)
+    assert result.eligible_customer_ids == ("7",)
     assert transport.calls[0].method == "GET"
-    assert "with=leads" in transport.calls[0].url
+    assert "with=customers" in transport.calls[0].url
+    assert "with=leads" not in transport.calls[0].url
+    assert "/customers/7" in transport.calls[1].url
     assert "with=contacts" in transport.calls[1].url
     mapped = buyer_card_reconcile_candidates_from_discovery(result)
     assert mapped is not None
@@ -221,119 +223,46 @@ async def test_one_open_linked_lead_found_candidate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_two_open_linked_leads_ambiguous() -> None:
+async def test_two_linked_customers_ambiguous() -> None:
     transport = _FakeTransport()
-    _queue_contact_and_leads(
+    _queue_contact_and_customers(
         transport,
         contact_id=_CONTACT_ID,
-        leads=[
-            _lead_payload(10, [_CONTACT_ID]),
-            _lead_payload(20, [_CONTACT_ID]),
+        customers=[
+            _customer_payload(10, [_CONTACT_ID]),
+            _customer_payload(20, [_CONTACT_ID]),
         ],
     )
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.AMBIGUOUS
-    assert result.eligible_lead_ids == ("10", "20")
+    assert result.eligible_customer_ids == ("10", "20")
     mapped = buyer_card_reconcile_candidates_from_discovery(result)
     assert mapped is not None
     assert mapped.candidate_buyer_card_ids == ("10", "20")
 
 
 @pytest.mark.asyncio
-async def test_technical_id_excluded() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[_lead_payload(9, [_CONTACT_ID])],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(
-        contact_id=str(_CONTACT_ID),
-        known_technical_deal_ids=("9",),
-    )
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
-    assert result.eligible_lead_ids == ()
-    assert result.known_technical_deal_ids == ("9",)
-    mapped = buyer_card_reconcile_candidates_from_discovery(result)
-    assert mapped is not None
-    assert mapped.candidate_buyer_card_ids == ()
-    assert mapped.candidate_technical_deal_ids == ("9",)
-
-
-@pytest.mark.asyncio
-async def test_closed_lead_excluded() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[_lead_payload(8, [_CONTACT_ID], closed_at=1_700_000_000)],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
-
-
-@pytest.mark.asyncio
-async def test_deleted_lead_excluded() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[_lead_payload(8, [_CONTACT_ID], is_deleted=True)],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
-
-
-@pytest.mark.asyncio
-async def test_closed_technical_and_one_open_exactly_one_candidate() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[
-            _lead_payload(1, [_CONTACT_ID], closed_at=1_700_000_000),
-            _lead_payload(2, [_CONTACT_ID]),
-            _lead_payload(3, [_CONTACT_ID]),
-        ],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(
-        contact_id=str(_CONTACT_ID),
-        known_technical_deal_ids=("2",),
-    )
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
-    assert result.eligible_lead_ids == ("3",)
-    mapped = buyer_card_reconcile_candidates_from_discovery(result)
-    assert mapped is not None
-    assert mapped.candidate_buyer_card_ids == ("3",)
-    assert mapped.candidate_technical_deal_ids == ("2",)
-
-
-@pytest.mark.asyncio
-async def test_lead_response_id_mismatch() -> None:
+async def test_customer_response_id_mismatch() -> None:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [7])))
-    transport.responses.append(_json_response(200, _lead_payload(99, [_CONTACT_ID])))
+    transport.responses.append(_json_response(200, _customer_payload(99, [_CONTACT_ID])))
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR
-    assert result.error_code == "AMOCRM_CRM_LEAD_ID_MISMATCH"
-    assert result.eligible_lead_ids == ()
+    assert result.error_code == "AMOCRM_CRM_CUSTOMER_ID_MISMATCH"
+    assert result.eligible_customer_ids == ()
 
 
 @pytest.mark.asyncio
-async def test_lead_no_longer_linked_to_contact_incomplete() -> None:
+async def test_customer_no_longer_linked_to_contact_incomplete() -> None:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [7])))
-    transport.responses.append(_json_response(200, _lead_payload(7, [999])))
+    transport.responses.append(_json_response(200, _customer_payload(7, [999])))
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE
-    assert result.error_code == "AMOCRM_BUYER_CARD_LEAD_CONTACT_UNLINKED"
+    assert result.error_code == "AMOCRM_BUYER_CARD_CUSTOMER_CONTACT_UNLINKED"
     assert buyer_card_reconcile_candidates_from_discovery(result) is None
 
 
@@ -350,7 +279,7 @@ async def test_malformed_contact_permanent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_malformed_lead_permanent() -> None:
+async def test_malformed_customer_permanent() -> None:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [7])))
     transport.responses.append(
@@ -359,12 +288,12 @@ async def test_malformed_lead_permanent() -> None:
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR
-    assert result.error_code == "AMOCRM_CRM_LEAD_BODY_INVALID"
+    assert result.error_code == "AMOCRM_CRM_CUSTOMER_BODY_INVALID"
     assert result.outcome is not AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
     assert result.outcome is not AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
 
 
-async def _discover_one_lead(payload: dict) -> AmoCrmBuyerCardDiscoveryResult:
+async def _discover_one_customer(payload: dict) -> AmoCrmBuyerCardDiscoveryResult:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [7])))
     transport.responses.append(_json_response(200, payload))
@@ -372,89 +301,33 @@ async def _discover_one_lead(payload: dict) -> AmoCrmBuyerCardDiscoveryResult:
     return await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
 
 
-def _assert_lead_body_invalid(result: AmoCrmBuyerCardDiscoveryResult) -> None:
+def _assert_customer_body_invalid(result: AmoCrmBuyerCardDiscoveryResult) -> None:
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR
-    assert result.error_code == "AMOCRM_CRM_LEAD_BODY_INVALID"
+    assert result.error_code == "AMOCRM_CRM_CUSTOMER_BODY_INVALID"
     assert result.outcome is not AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
     assert result.outcome is not AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
-    assert result.eligible_lead_ids == ()
+    assert result.eligible_customer_ids == ()
 
 
 @pytest.mark.asyncio
-async def test_missing_is_deleted_permanent() -> None:
-    payload = _lead_payload(7, [_CONTACT_ID])
-    del payload["is_deleted"]
-    result = await _discover_one_lead(payload)
-    _assert_lead_body_invalid(result)
+async def test_missing_embedded_contacts_malformed() -> None:
+    payload = {"id": 7, "name": "Buyer Customer Name"}
+    result = await _discover_one_customer(payload)
+    _assert_customer_body_invalid(result)
 
 
 @pytest.mark.asyncio
-async def test_missing_closed_at_permanent() -> None:
-    payload = _lead_payload(7, [_CONTACT_ID])
-    del payload["closed_at"]
-    result = await _discover_one_lead(payload)
-    _assert_lead_body_invalid(result)
-
-
-@pytest.mark.asyncio
-async def test_invalid_is_deleted_type_permanent() -> None:
-    payload = _lead_payload(7, [_CONTACT_ID])
-    payload["is_deleted"] = 0
-    result = await _discover_one_lead(payload)
-    _assert_lead_body_invalid(result)
-
-
-@pytest.mark.parametrize("bad_closed_at", ["1700000000", True, 1.5, []])
-@pytest.mark.asyncio
-async def test_invalid_closed_at_type_permanent(bad_closed_at: object) -> None:
-    payload = _lead_payload(7, [_CONTACT_ID])
-    payload["closed_at"] = bad_closed_at
-    result = await _discover_one_lead(payload)
-    _assert_lead_body_invalid(result)
-
-
-@pytest.mark.asyncio
-async def test_closed_at_null_and_is_deleted_false_eligible() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[_lead_payload(7, [_CONTACT_ID], closed_at=None, is_deleted=False)],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
+async def test_customer_status_fields_are_ignored() -> None:
+    payload = _customer_payload(7, [_CONTACT_ID])
+    payload["is_deleted"] = True
+    payload["closed_at"] = 1_700_000_000
+    result = await _discover_one_customer(payload)
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
-    assert result.eligible_lead_ids == ("7",)
+    assert result.eligible_customer_ids == ("7",)
 
 
 @pytest.mark.asyncio
-async def test_closed_at_int_excluded() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[_lead_payload(8, [_CONTACT_ID], closed_at=1_700_000_000, is_deleted=False)],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
-
-
-@pytest.mark.asyncio
-async def test_is_deleted_true_excluded() -> None:
-    transport = _FakeTransport()
-    _queue_contact_and_leads(
-        transport,
-        contact_id=_CONTACT_ID,
-        leads=[_lead_payload(8, [_CONTACT_ID], closed_at=None, is_deleted=True)],
-    )
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND
-
-
-@pytest.mark.asyncio
-async def test_missing_embedded_leads_malformed() -> None:
+async def test_missing_embedded_customers_malformed() -> None:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, {"id": _CONTACT_ID, "name": _NAME}))
     service = await _make_service(transport)
@@ -484,14 +357,14 @@ async def test_transport_and_5xx_transient() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lead_5xx_does_not_found_or_not_found() -> None:
+async def test_customer_5xx_does_not_found_or_not_found() -> None:
     transport = _FakeTransport()
     transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [7])))
     transport.responses.append(S2sHttpResponse(status_code=503, headers={}, body=b""))
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.TRANSIENT_ERROR
-    assert result.eligible_lead_ids == ()
+    assert result.eligible_customer_ids == ()
 
 
 @pytest.mark.parametrize("status", [402, 403])
@@ -514,7 +387,7 @@ async def test_401_one_refresh_then_continue() -> None:
         [
             S2sHttpResponse(status_code=401, headers={}, body=b""),
             _json_response(200, _contact_payload(_CONTACT_ID, [7])),
-            _json_response(200, _lead_payload(7, [_CONTACT_ID])),
+            _json_response(200, _customer_payload(7, [_CONTACT_ID])),
         ]
     )
 
@@ -543,7 +416,7 @@ async def test_later_401_does_not_second_refresh() -> None:
         [
             S2sHttpResponse(status_code=401, headers={}, body=b""),
             _json_response(200, _contact_payload(_CONTACT_ID, [7, 8])),
-            _json_response(200, _lead_payload(7, [_CONTACT_ID])),
+            _json_response(200, _customer_payload(7, [_CONTACT_ID])),
             S2sHttpResponse(status_code=401, headers={}, body=b""),
         ]
     )
@@ -594,17 +467,17 @@ async def test_proactive_refresh_then_later_401_no_second_refresh() -> None:
 
 
 @pytest.mark.asyncio
-async def test_over_max_linked_leads_incomplete() -> None:
+async def test_over_max_linked_customers_incomplete() -> None:
     transport = _FakeTransport()
-    too_many = list(range(1, MAX_LINKED_LEADS_PER_DISCOVERY + 2))
+    too_many = list(range(1, MAX_LINKED_CUSTOMERS_PER_DISCOVERY + 2))
     transport.responses.append(
         _json_response(200, _contact_payload(_CONTACT_ID, too_many))
     )
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE
-    assert result.error_code == "AMOCRM_BUYER_CARD_LINKED_LEADS_LIMIT"
-    assert result.eligible_lead_ids == ()
+    assert result.error_code == "AMOCRM_BUYER_CARD_LINKED_CUSTOMERS_LIMIT"
+    assert result.eligible_customer_ids == ()
     assert len(transport.calls) == 1
     assert buyer_card_reconcile_candidates_from_discovery(result) is None
 
@@ -614,18 +487,6 @@ async def test_invalid_contact_id_no_http() -> None:
     transport = _FakeTransport()
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id="abc")
-    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.INVALID_INPUT
-    assert transport.calls == []
-
-
-@pytest.mark.asyncio
-async def test_invalid_technical_id_no_http() -> None:
-    transport = _FakeTransport()
-    service = await _make_service(transport)
-    result = await service.discover_buyer_card_candidates(
-        contact_id="1",
-        known_technical_deal_ids=("not-id",),
-    )
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.INVALID_INPUT
     assert transport.calls == []
 
@@ -644,24 +505,34 @@ async def test_disabled_zero_http() -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_linked_lead_ids_deduped() -> None:
+async def test_duplicate_linked_customer_ids_deduped() -> None:
     transport = _FakeTransport()
     payload = _contact_payload(_CONTACT_ID, [7, 7, 7])
     transport.responses.append(_json_response(200, payload))
-    transport.responses.append(_json_response(200, _lead_payload(7, [_CONTACT_ID])))
+    transport.responses.append(_json_response(200, _customer_payload(7, [_CONTACT_ID])))
     service = await _make_service(transport)
     result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
     assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
-    assert result.eligible_lead_ids == ("7",)
+    assert result.eligible_customer_ids == ("7",)
     assert len(transport.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_customer_missing_incomplete() -> None:
+    transport = _FakeTransport()
+    transport.responses.append(_json_response(200, _contact_payload(_CONTACT_ID, [7])))
+    transport.responses.append(S2sHttpResponse(status_code=404, headers={}, body=b""))
+    service = await _make_service(transport)
+    result = await service.discover_buyer_card_candidates(contact_id=str(_CONTACT_ID))
+    assert result.outcome is AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE
+    assert result.error_code == "AMOCRM_CRM_HTTP_404"
 
 
 def test_result_repr_no_pii() -> None:
     result = AmoCrmBuyerCardDiscoveryResult(
         outcome=AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE,
         contact_id="42",
-        eligible_lead_ids=("7",),
-        known_technical_deal_ids=("9",),
+        eligible_customer_ids=("7",),
     )
     text = repr(result)
     assert "42" in text
@@ -669,22 +540,25 @@ def test_result_repr_no_pii() -> None:
     assert _NAME not in text
     assert _PHONE not in text
     assert _EMAIL not in text
-    parsed = parse_contact_with_leads_body(
+    parsed = parse_contact_with_customers_body(
         json.dumps(_contact_payload(42, [7], name=_NAME)).encode()
     )
     assert parsed is not None
     assert _NAME not in repr(parsed)
     assert _PHONE not in repr(parsed)
-    lead = parse_lead_inspect_body(json.dumps(_lead_payload(7, [42])).encode())
-    assert lead is not None
-    assert "Buyer Deal Name" not in repr(lead)
-    assert "vip" not in repr(lead)
+    customer = parse_customer_inspect_body(
+        json.dumps(_customer_payload(7, [42])).encode()
+    )
+    assert customer is not None
+    assert "Buyer Customer Name" not in repr(customer)
+    assert "vip" not in repr(customer)
 
 
 def test_http_client_has_no_write_methods() -> None:
     client = AmoCrmBuyerCardHttpClient(_enabled_config(), transport=_FakeTransport())
     names = dir(client)
     assert "create_lead" not in names
+    assert "create_customer" not in names
     assert "link_contact" not in names
     assert not any(name.startswith("post") for name in names)
 
@@ -702,6 +576,25 @@ def test_no_entity_mutating_http_in_ir3_modules() -> None:
             if isinstance(node, ast.Constant) and type(node.value) is str:
                 if node.value in forbidden:
                     raise AssertionError(f"{path.name} contains {node.value!r}")
+
+
+def test_buyer_card_discovery_path_has_no_lead_calls() -> None:
+    service_src = (_REPO / "app/services/amocrm_buyer_card_discovery.py").read_text(
+        encoding="utf-8"
+    )
+    types_src = (_REPO / "app/core/amocrm_buyer_card_discovery.py").read_text(
+        encoding="utf-8"
+    )
+    for src in (service_src, types_src):
+        assert "GET_LEAD_" not in src
+        assert "with=leads" not in src
+        assert "get_lead_with_contacts" not in src
+        assert "get_contact_with_leads" not in src
+        assert "closed_at" not in src
+        assert "is_deleted" not in src
+    assert "GET_CUSTOMER_" not in service_src
+    assert "get_customer_with_contacts" in service_src
+    assert "get_contact_with_customers" in service_src
 
 
 def test_ir3_not_wired_into_webhook_worker_or_glue() -> None:
@@ -743,6 +636,6 @@ def test_mapper_skips_incomplete() -> None:
     result = AmoCrmBuyerCardDiscoveryResult(
         outcome=AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE,
         contact_id="42",
-        error_code="AMOCRM_BUYER_CARD_LINKED_LEADS_LIMIT",
+        error_code="AMOCRM_BUYER_CARD_LINKED_CUSTOMERS_LIMIT",
     )
     assert buyer_card_reconcile_candidates_from_discovery(result) is None

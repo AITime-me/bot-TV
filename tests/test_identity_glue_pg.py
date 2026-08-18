@@ -406,7 +406,7 @@ async def test_archived_canonical_cannot_attach(
 
 
 @pytest.mark.asyncio
-async def test_technical_deal_buyer_card_protection_untouched(
+async def test_technical_deal_is_not_auto_bound_as_buyer_card(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
@@ -424,12 +424,14 @@ async def test_technical_deal_buyer_card_protection_untouched(
             external_id="tech-deal-9",
             canonical_identity_id=created.canonical_identity_id,
         )
-        bad = await identity.reconcile_buyer_card(
+        result = await identity.reconcile_buyer_card(
             canonical_identity_id=created.canonical_identity_id,
             candidate_buyer_card_ids=("tech-deal-9",),
             candidate_technical_deal_ids=("tech-deal-9",),
         )
-        assert bad.outcome is ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED
+        assert result.outcome is ReconcileBuyerCardOutcome.NOT_FOUND
+        assert result.reason == "buyer_card_not_linked"
+        assert result.buyer_card_external_id is None
 
 
 @pytest.mark.asyncio

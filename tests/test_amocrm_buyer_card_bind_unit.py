@@ -6,7 +6,6 @@ import ast
 import inspect
 import io
 import json
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -77,20 +76,16 @@ class _FakeLookup:
 class _FakeDiscovery:
     def __init__(self) -> None:
         self.result: AmoCrmBuyerCardDiscoveryResult | None = None
-        self.calls: list[tuple[object, object]] = []
+        self.calls: list[object] = []
 
     async def discover_buyer_card_candidates(
         self,
         *,
         contact_id: object,
-        known_technical_deal_ids: object = (),
     ) -> AmoCrmBuyerCardDiscoveryResult:
-        self.calls.append((contact_id, known_technical_deal_ids))
+        self.calls.append(contact_id)
         assert self.result is not None
-        return replace(
-            self.result,
-            known_technical_deal_ids=tuple(known_technical_deal_ids),  # type: ignore[arg-type]
-        )
+        return self.result
 
 
 class _QueuedSnapshots:
@@ -158,14 +153,14 @@ def _disc(
     kwargs: dict = {
         "outcome": outcome,
         "error_code": error_code,
-        "http_calls": ("GET_CONTACT_WITH_LEADS",),
+        "http_calls": ("GET_CONTACT_WITH_CUSTOMERS",),
         "contact_id": contact_id,
     }
     if outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE:
-        kwargs["eligible_lead_ids"] = eligible
-        kwargs["http_calls"] = ("GET_CONTACT_WITH_LEADS", "GET_LEAD_7")
+        kwargs["eligible_customer_ids"] = eligible
+        kwargs["http_calls"] = ("GET_CONTACT_WITH_CUSTOMERS", "GET_CUSTOMER_7")
     elif outcome is AmoCrmBuyerCardDiscoveryOutcome.AMBIGUOUS:
-        kwargs["eligible_lead_ids"] = eligible
+        kwargs["eligible_customer_ids"] = eligible
     return AmoCrmBuyerCardDiscoveryResult(**kwargs)
 
 
@@ -371,7 +366,6 @@ async def test_happy_bind_calls_attach_once() -> None:
         {
             "canonical_identity_id": cid,
             "candidate_buyer_card_ids": ("7",),
-            "candidate_technical_deal_ids": ("9",),
         }
     ]
     assert att.calls[0]["external_id"] == "7"
@@ -551,7 +545,7 @@ async def test_discovered_candidate_not_expected_manual() -> None:
 
 
 @pytest.mark.asyncio
-async def test_technical_role_conflict_from_reconcile() -> None:
+async def test_customer_id_overlapping_technical_lead_still_binds() -> None:
     cid = uuid4()
     lookup, discovery = _FakeLookup(), _FakeDiscovery()
     lookup.by_id = _found_id("42")
@@ -560,8 +554,9 @@ async def test_technical_role_conflict_from_reconcile() -> None:
     )
     rec = _FakeReconcile(
         ReconcileBuyerCardResult(
-            outcome=ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED,
-            reason="buyer_card_technical_deal_conflict",
+            outcome=ReconcileBuyerCardOutcome.NOT_FOUND,
+            canonical_identity_id=cid,
+            reason="buyer_card_not_linked",
         )
     )
     att = _FakeAttach(_linked(cid))
@@ -578,9 +573,9 @@ async def test_technical_role_conflict_from_reconcile() -> None:
     result = await service.bind_buyer_card(
         canonical_identity_id=cid, contact_id="42", buyer_card_id="7"
     )
-    assert result.outcome is AmoCrmBuyerCardBindOutcome.MANUAL_REVIEW_REQUIRED
-    assert result.reason == "buyer_card_technical_deal_conflict"
-    assert att.calls == []
+    assert result.outcome is AmoCrmBuyerCardBindOutcome.BOUND
+    assert result.buyer_card_id == "7"
+    assert att.calls
 
 
 @pytest.mark.asyncio
@@ -691,7 +686,7 @@ async def test_attach_conflict_other_canonical_manual() -> None:
     att = _FakeAttach(
         AttachIdentityLinkResult(
             outcome=AttachIdentityLinkOutcome.CONFLICT,
-            reason="buyer_card_technical_deal_conflict",
+            reason="deal_technical_deal_conflict",
         )
     )
     service = _flow(

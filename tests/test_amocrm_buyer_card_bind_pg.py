@@ -58,15 +58,14 @@ class _FakeLookup:
 class _FakeDiscovery:
     def __init__(self, eligible: tuple[str, ...] = (_CARD,)) -> None:
         self.eligible = eligible
-        self.calls: list[tuple[object, object]] = []
+        self.calls: list[object] = []
 
     async def discover_buyer_card_candidates(
         self,
         *,
         contact_id: object,
-        known_technical_deal_ids: object = (),
     ) -> AmoCrmBuyerCardDiscoveryResult:
-        self.calls.append((contact_id, known_technical_deal_ids))
+        self.calls.append(contact_id)
         outcome = (
             AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE
             if len(self.eligible) == 1
@@ -75,9 +74,8 @@ class _FakeDiscovery:
         return AmoCrmBuyerCardDiscoveryResult(
             outcome=outcome,
             contact_id=str(contact_id),
-            eligible_lead_ids=self.eligible,
-            known_technical_deal_ids=tuple(known_technical_deal_ids),  # type: ignore[arg-type]
-            http_calls=("GET_CONTACT_WITH_LEADS",),
+            eligible_customer_ids=self.eligible,
+            http_calls=("GET_CONTACT_WITH_CUSTOMERS",),
         )
 
 
@@ -199,7 +197,7 @@ async def test_existing_different_buyer_card_manual(
 
 
 @pytest.mark.asyncio
-async def test_technical_role_conflict(
+async def test_customer_id_overlapping_technical_lead_binds(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     cid = await _seed_contact(session_factory)
@@ -216,8 +214,20 @@ async def test_technical_role_conflict(
         contact_id=_CONTACT,
         buyer_card_id=_CARD,
     )
-    assert result.outcome is AmoCrmBuyerCardBindOutcome.MANUAL_REVIEW_REQUIRED
-    assert result.reason == "technical_deal_is_not_buyer_card"
+    assert result.outcome is AmoCrmBuyerCardBindOutcome.BOUND
+    assert result.buyer_card_id == _CARD
+    async with session_scope(session_factory) as session:
+        inspected = await IdentityResolutionService(session).inspect(
+            canonical_identity_id=cid
+        )
+        assert inspected.graph is not None
+        kinds = {
+            link.entity_kind
+            for link in inspected.graph.links
+            if link.status is IdentityLinkStatus.ACTIVE
+        }
+        assert IdentityEntityKind.AMOCRM_BUYER_CARD in kinds
+        assert IdentityEntityKind.AMOCRM_TECHNICAL_DEAL in kinds
 
 
 @pytest.mark.asyncio

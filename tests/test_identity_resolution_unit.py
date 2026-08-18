@@ -235,6 +235,19 @@ def test_migration_defines_partial_unique_active_key() -> None:
     assert "canonical_identities" in migration
 
 
+def test_migration_27_lead_role_xor_excludes_buyer_card() -> None:
+    migration = (
+        _REPO / "alembic/versions/20260818_27_amocrm_deal_kind.py"
+    ).read_text(encoding="utf-8")
+    assert "AMOCRM_DEAL" in migration
+    assert "uq_external_identity_links_active_amocrm_deal_role" in migration
+    assert "('AMOCRM_DEAL', 'AMOCRM_TECHNICAL_DEAL')" in migration
+    upgrade = migration.split("def downgrade")[0]
+    assert "('AMOCRM_BUYER_CARD', 'AMOCRM_TECHNICAL_DEAL')" not in upgrade
+    assert "UPDATE " not in migration
+    assert "DELETE FROM" not in migration
+
+
 def test_service_has_no_network_or_crm_imports() -> None:
     service = (_REPO / "app/services/identity_resolution.py").read_text(
         encoding="utf-8"
@@ -273,7 +286,12 @@ def test_adr_020_documents_invariants() -> None:
     assert "email alone never returns" in adr
     assert "AMOCRM_BUYER_CARD" in adr
     assert "AMOCRM_TECHNICAL_DEAL" in adr
+    assert "AMOCRM_DEAL" in adr
     assert "active_amocrm_deal_role" in adr
+    assert "deal_technical_deal_conflict" in adr
+    assert "Customer" in adr
+    assert "143" in adr
+    assert "142" in adr
     assert "RU-domain" in adr or "RU-oriented" in adr
     assert "ARCHIVED" in adr
     assert "Never" in adr or "never" in adr

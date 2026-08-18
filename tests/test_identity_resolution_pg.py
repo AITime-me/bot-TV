@@ -16,7 +16,7 @@ from app.core.identity_resolution import (
     DEFAULT_CONNECTION_SCOPE,
     EMAIL_PROVIDER,
     PHONE_PROVIDER,
-    REASON_BUYER_TECH_ROLE_CONFLICT,
+    REASON_DEAL_TECH_ROLE_CONFLICT,
     REASON_EMAIL_ONLY_SECONDARY,
     AttachIdentityLinkOutcome,
     IdentityEntityKind,
@@ -390,7 +390,7 @@ async def test_conflicting_durable_links_manual_review(
 
 
 @pytest.mark.asyncio
-async def test_buyer_card_reuse_and_technical_deal_not_buyer(
+async def test_buyer_card_reuse_and_customer_lead_namespace_overlap(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_scope(session_factory) as session:
@@ -413,19 +413,29 @@ async def test_buyer_card_reuse_and_technical_deal_not_buyer(
         assert reused.outcome is ReconcileBuyerCardOutcome.REUSED
         assert reused.buyer_card_external_id == _BUYER_CARD
 
-        bad = await svc.reconcile_buyer_card(
+        mismatched = await svc.reconcile_buyer_card(
             canonical_identity_id=created.canonical_identity_id,
             candidate_buyer_card_ids=(_TECH_DEAL,),
             candidate_technical_deal_ids=(_TECH_DEAL,),
         )
-        assert bad.outcome is ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED
-        assert bad.reason == "technical_deal_is_not_buyer_card"
+        assert mismatched.outcome is ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED
+        assert mismatched.reason == "ambiguous_buyer_cards"
 
-        tech_as_buyer = await svc.reconcile_buyer_card(
+        overlap = "123"
+        tech = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_TECHNICAL_DEAL,
+            external_id=overlap,
             canonical_identity_id=created.canonical_identity_id,
-            candidate_buyer_card_ids=(_TECH_DEAL,),
         )
-        assert tech_as_buyer.outcome is ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED
+        buyer = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_BUYER_CARD,
+            external_id=overlap,
+            canonical_identity_id=created.canonical_identity_id,
+        )
+        assert tech.outcome is AttachIdentityLinkOutcome.LINKED
+        assert buyer.outcome is AttachIdentityLinkOutcome.LINKED
 
 
 @pytest.mark.asyncio
@@ -689,63 +699,62 @@ async def test_no_pii_in_service_logs(
 
 
 @pytest.mark.asyncio
-async def test_tech_then_buyer_attach_rejected(
+async def test_tech_then_buyer_same_id_allowed(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    deal_id = "amo-deal-shared-1"
+    shared_id = "amo-namespace-shared-1"
     async with session_scope(session_factory) as session:
         svc = IdentityResolutionService(session)
         tech = await svc.attach(
             provider="amocrm",
             entity_kind=IdentityEntityKind.AMOCRM_TECHNICAL_DEAL,
-            external_id=deal_id,
+            external_id=shared_id,
             create_canonical=True,
         )
         assert tech.outcome is AttachIdentityLinkOutcome.CREATED
         buyer = await svc.attach(
             provider="amocrm",
             entity_kind=IdentityEntityKind.AMOCRM_BUYER_CARD,
-            external_id=deal_id,
+            external_id=shared_id,
             create_canonical=True,
         )
-        assert buyer.outcome is AttachIdentityLinkOutcome.CONFLICT
-        assert buyer.reason == REASON_BUYER_TECH_ROLE_CONFLICT
+        assert buyer.outcome is AttachIdentityLinkOutcome.CREATED
+        assert buyer.canonical_identity_id != tech.canonical_identity_id
 
 
 @pytest.mark.asyncio
-async def test_buyer_then_tech_attach_rejected(
+async def test_buyer_then_tech_same_id_allowed(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    deal_id = "amo-deal-shared-2"
+    shared_id = "amo-namespace-shared-2"
     async with session_scope(session_factory) as session:
         svc = IdentityResolutionService(session)
         buyer = await svc.attach(
             provider="amocrm",
             entity_kind=IdentityEntityKind.AMOCRM_BUYER_CARD,
-            external_id=deal_id,
+            external_id=shared_id,
             create_canonical=True,
         )
         assert buyer.outcome is AttachIdentityLinkOutcome.CREATED
         tech = await svc.attach(
             provider="amocrm",
             entity_kind=IdentityEntityKind.AMOCRM_TECHNICAL_DEAL,
-            external_id=deal_id,
+            external_id=shared_id,
             create_canonical=True,
         )
-        assert tech.outcome is AttachIdentityLinkOutcome.CONFLICT
-        assert tech.reason == REASON_BUYER_TECH_ROLE_CONFLICT
+        assert tech.outcome is AttachIdentityLinkOutcome.CREATED
         reused = await svc.reconcile_buyer_card(
             canonical_identity_id=buyer.canonical_identity_id,
         )
         assert reused.outcome is ReconcileBuyerCardOutcome.REUSED
-        assert reused.buyer_card_external_id == deal_id
+        assert reused.buyer_card_external_id == shared_id
 
 
 @pytest.mark.asyncio
-async def test_concurrent_cross_kind_amocrm_deal_attach(
+async def test_concurrent_customer_and_technical_same_id_both_active(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    deal_id = "amo-deal-race-1"
+    shared_id = "amo-namespace-race-1"
 
     async def _attach(kind: IdentityEntityKind) -> AttachIdentityLinkOutcome:
         async with session_scope(session_factory) as session:
@@ -753,7 +762,7 @@ async def test_concurrent_cross_kind_amocrm_deal_attach(
             result = await svc.attach(
                 provider="amocrm",
                 entity_kind=kind,
-                external_id=deal_id,
+                external_id=shared_id,
                 create_canonical=True,
             )
             assert result.outcome is not AttachIdentityLinkOutcome.INVALID_INPUT
@@ -761,6 +770,49 @@ async def test_concurrent_cross_kind_amocrm_deal_attach(
 
     first, second = await asyncio.gather(
         _attach(IdentityEntityKind.AMOCRM_BUYER_CARD),
+        _attach(IdentityEntityKind.AMOCRM_TECHNICAL_DEAL),
+    )
+    assert first is AttachIdentityLinkOutcome.CREATED
+    assert second is AttachIdentityLinkOutcome.CREATED
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.scalars(
+                    select(ExternalIdentityLink).where(
+                        ExternalIdentityLink.provider == "amocrm",
+                        ExternalIdentityLink.external_id == shared_id,
+                        ExternalIdentityLink.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        )
+        assert len(rows) == 2
+        assert {row.entity_kind for row in rows} == {
+            IdentityEntityKind.AMOCRM_BUYER_CARD.value,
+            IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value,
+        }
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deal_and_technical_same_lead_id_conflict(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    lead_id = "amo-lead-role-race-1"
+
+    async def _attach(kind: IdentityEntityKind) -> AttachIdentityLinkOutcome:
+        async with session_scope(session_factory) as session:
+            svc = IdentityResolutionService(session)
+            result = await svc.attach(
+                provider="amocrm",
+                entity_kind=kind,
+                external_id=lead_id,
+                create_canonical=True,
+            )
+            assert result.outcome is not AttachIdentityLinkOutcome.INVALID_INPUT
+            return result.outcome
+
+    first, second = await asyncio.gather(
+        _attach(IdentityEntityKind.AMOCRM_DEAL),
         _attach(IdentityEntityKind.AMOCRM_TECHNICAL_DEAL),
     )
     assert AttachIdentityLinkOutcome.CREATED in {first, second}
@@ -771,7 +823,7 @@ async def test_concurrent_cross_kind_amocrm_deal_attach(
                 await session.scalars(
                     select(ExternalIdentityLink).where(
                         ExternalIdentityLink.provider == "amocrm",
-                        ExternalIdentityLink.external_id == deal_id,
+                        ExternalIdentityLink.external_id == lead_id,
                         ExternalIdentityLink.status == "ACTIVE",
                     )
                 )
@@ -779,35 +831,75 @@ async def test_concurrent_cross_kind_amocrm_deal_attach(
         )
         assert len(rows) == 1
         assert rows[0].entity_kind in {
-            IdentityEntityKind.AMOCRM_BUYER_CARD.value,
+            IdentityEntityKind.AMOCRM_DEAL.value,
             IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value,
         }
+
+
+@pytest.mark.asyncio
+async def test_db_customer_and_technical_same_id_allowed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    shared_id = "amo-namespace-db-ok"
+    async with session_scope(session_factory) as session:
+        svc = IdentityResolutionService(session)
+        created = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_BUYER_CARD,
+            external_id=shared_id,
+            create_canonical=True,
+        )
+        assert created.outcome is AttachIdentityLinkOutcome.CREATED
+        other = uuid.uuid4()
+        now = func.statement_timestamp()
+        session.add(
+            CanonicalIdentity(
+                id=other,
+                status="ACTIVE",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.flush()
+        session.add(
+            ExternalIdentityLink(
+                id=uuid.uuid4(),
+                canonical_identity_id=other,
+                provider="amocrm",
+                connection_scope=DEFAULT_CONNECTION_SCOPE,
+                entity_kind=IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value,
+                external_id=shared_id,
+                status="ACTIVE",
+                confidence="CONFIRMED",
+                source="SYSTEM",
+                linked_at=now,
+                revoked_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.flush()
 
 
 @pytest.mark.asyncio
 async def test_db_amocrm_deal_role_partial_unique_enforced(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    deal_id = "amo-deal-db-constraint"
+    lead_id = "amo-lead-db-constraint"
     async with session_scope(session_factory) as session:
         svc = IdentityResolutionService(session)
         created = await svc.attach(
             provider="amocrm",
-            entity_kind=IdentityEntityKind.AMOCRM_BUYER_CARD,
-            external_id=deal_id,
+            entity_kind=IdentityEntityKind.AMOCRM_DEAL,
+            external_id=lead_id,
             create_canonical=True,
         )
         assert created.outcome is AttachIdentityLinkOutcome.CREATED
-        cid = created.canonical_identity_id
-        assert cid is not None
 
     with pytest.raises((IntegrityError, Exception)):
         async with session_scope(session_factory) as session:
             now = func.statement_timestamp()
-            # Separate canonical to avoid unrelated FK noise.
             other = uuid.uuid4()
-            from app.models.canonical_identity import CanonicalIdentity
-
             session.add(
                 CanonicalIdentity(
                     id=other,
@@ -824,7 +916,7 @@ async def test_db_amocrm_deal_role_partial_unique_enforced(
                     provider="amocrm",
                     connection_scope=DEFAULT_CONNECTION_SCOPE,
                     entity_kind=IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value,
-                    external_id=deal_id,
+                    external_id=lead_id,
                     status="ACTIVE",
                     confidence="CONFIRMED",
                     source="SYSTEM",
@@ -835,6 +927,53 @@ async def test_db_amocrm_deal_role_partial_unique_enforced(
                 )
             )
             await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_deal_then_technical_attach_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    lead_id = "amo-lead-shared-role"
+    async with session_scope(session_factory) as session:
+        svc = IdentityResolutionService(session)
+        deal = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_DEAL,
+            external_id=lead_id,
+            create_canonical=True,
+        )
+        assert deal.outcome is AttachIdentityLinkOutcome.CREATED
+        tech = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_TECHNICAL_DEAL,
+            external_id=lead_id,
+            create_canonical=True,
+        )
+        assert tech.outcome is AttachIdentityLinkOutcome.CONFLICT
+        assert tech.reason == REASON_DEAL_TECH_ROLE_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_customer_and_business_lead_same_id_allowed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    shared_id = "123"
+    async with session_scope(session_factory) as session:
+        svc = IdentityResolutionService(session)
+        customer = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_BUYER_CARD,
+            external_id=shared_id,
+            create_canonical=True,
+        )
+        deal = await svc.attach(
+            provider="amocrm",
+            entity_kind=IdentityEntityKind.AMOCRM_DEAL,
+            external_id=shared_id,
+            create_canonical=True,
+        )
+        assert customer.outcome is AttachIdentityLinkOutcome.CREATED
+        assert deal.outcome is AttachIdentityLinkOutcome.CREATED
 
 
 @pytest.mark.asyncio

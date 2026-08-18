@@ -1,28 +1,24 @@
-"""Read-only amoCRM Buyer Card (Customer) candidate discovery (IR-3).
+"""Read-only amoCRM business Deal (Lead) discovery.
 
-Collects linked-customer evidence for a later
-IdentityResolutionService.reconcile_buyer_card call. No Lead status, no
-attach, no CRM writes, no webhook/worker wiring. OAuth refresh reuses the
-existing token-store fencing with a one-refresh budget per discovery.
+Classifies linked Leads without treating them as Buyer Cards (Customers).
+Only amoCRM system status 143 (closed/unrealized) is a reanimation candidate.
+Status 142 is successful history, not reanimation. Known AMOCRM_TECHNICAL_DEAL
+ids are excluded from business candidates. No auto-reanimation. No CRM writes.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.amocrm_buyer_card_discovery import (
-    AmoCrmBuyerCardDiscoveryOutcome,
-    AmoCrmBuyerCardDiscoveryResult,
-)
 from app.core.amocrm_crm_buyer_card_http import (
     AmoCrmBuyerCardHttpClient,
-    AmoCrmContactWithCustomersRecord,
-    AmoCrmCustomerInspectRecord,
+    AmoCrmContactWithLeadsRecord,
+    AmoCrmLeadInspectRecord,
 )
 from app.core.amocrm_crm_oauth_keys import (
     AmoCrmOauthKeyProvider,
@@ -38,17 +34,23 @@ from app.core.amocrm_crm_rest_http import (
     AmoCrmCrmRestTransport,
     _CrmHttpStdlibTransport,
 )
+from app.core.amocrm_deal_discovery import (
+    AMOCRM_SYSTEM_LEAD_STATUS_SUCCESS,
+    AMOCRM_SYSTEM_LEAD_STATUS_UNREALIZED,
+    AmoCrmDealDiscoveryOutcome,
+    AmoCrmDealDiscoveryResult,
+)
 from app.db.clock import resolve_moment
 from app.db.session import session_scope
 from app.repositories import amocrm_crm_oauth_tokens as oauth_repo
 
 __all__ = (
-    "AmoCrmBuyerCardDiscoveryService",
-    "MAX_LINKED_CUSTOMERS_PER_DISCOVERY",
+    "AmoCrmDealDiscoveryService",
+    "MAX_LINKED_LEADS_PER_DISCOVERY",
 )
 
 _REFRESH_SKEW = timedelta(seconds=60)
-MAX_LINKED_CUSTOMERS_PER_DISCOVERY: Final[int] = 20
+MAX_LINKED_LEADS_PER_DISCOVERY: Final[int] = 20
 
 _ResolveAccessToken = Callable[[], Awaitable[str | None]]
 
@@ -62,8 +64,8 @@ class _OauthRefreshBudget:
         self.spent = False
 
 
-class AmoCrmBuyerCardDiscoveryService:
-    """Fail-closed read-only Buyer Card (Customer) candidate discovery."""
+class AmoCrmDealDiscoveryService:
+    """Fail-closed read-only business Deal (Lead) classification."""
 
     def __init__(
         self,
@@ -87,7 +89,7 @@ class AmoCrmBuyerCardDiscoveryService:
         self._transport = (
             transport if transport is not None else _CrmHttpStdlibTransport()
         )
-        self._worker_id = worker_id or f"crm-buyer-disc-{uuid.uuid4().hex[:12]}"
+        self._worker_id = worker_id or f"crm-deal-disc-{uuid.uuid4().hex[:12]}"
         if oauth is not None:
             self._oauth = oauth
         elif self._config.enabled:
@@ -106,202 +108,259 @@ class AmoCrmBuyerCardDiscoveryService:
             transport=self._transport,
         )
 
-    async def discover_buyer_card_candidates(
+    async def discover_deal_candidates(
         self,
         *,
         contact_id: object,
-    ) -> AmoCrmBuyerCardDiscoveryResult:
+        known_technical_deal_ids: Sequence[object] = (),
+    ) -> AmoCrmDealDiscoveryResult:
         if not self._config.enabled:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.DISABLED,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.DISABLED,
                 error_code="AMOCRM_CRM_REST_DISABLED",
             )
         cid = self._normalize_entity_id(contact_id)
         if cid is None:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.INVALID_INPUT,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.INVALID_INPUT,
                 error_code="AMOCRM_CONTACT_ID_INVALID",
             )
+        tech_ids = self._normalize_id_tuple(known_technical_deal_ids)
+        if tech_ids is None:
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.INVALID_INPUT,
+                error_code="AMOCRM_TECHNICAL_DEAL_ID_INVALID",
+            )
+        tech_set = set(tech_ids)
         budget = _OauthRefreshBudget()
         access = await self._resolve_access_token(budget)
         if access is None:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
+                known_technical_deal_ids=tech_ids,
                 error_code="AMOCRM_CRM_OAUTH_NOT_FOUND",
                 http_calls=tuple(self._http.http_calls),
             )
         contact_result = await self._with_401_retry(
-            self._http.get_contact_with_customers,
+            self._http.get_contact_with_leads,
             access_token=access,
             budget=budget,
             contact_id=cid,
         )
-        mapped_contact = self._map_contact_error(contact_result)
+        mapped_contact = self._map_contact_error(contact_result, tech_ids)
         if mapped_contact is not None:
             return mapped_contact
         contact = getattr(contact_result, "contact", None)
-        if not isinstance(contact, AmoCrmContactWithCustomersRecord):
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+        if not isinstance(contact, AmoCrmContactWithLeadsRecord):
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
+                known_technical_deal_ids=tech_ids,
                 error_code="AMOCRM_CRM_CONTACT_BODY_INVALID",
                 http_calls=tuple(self._http.http_calls),
             )
         reloaded = await self._load_access_token()
         if reloaded is not None:
             access = reloaded
-        linked = contact.linked_customer_ids
-        if len(linked) > MAX_LINKED_CUSTOMERS_PER_DISCOVERY:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE,
+        linked = contact.linked_lead_ids
+        if len(linked) > MAX_LINKED_LEADS_PER_DISCOVERY:
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.INCOMPLETE,
                 contact_id=contact.contact_id,
-                error_code="AMOCRM_BUYER_CARD_LINKED_CUSTOMERS_LIMIT",
+                known_technical_deal_ids=tech_ids,
+                error_code="AMOCRM_DEAL_LINKED_LEADS_LIMIT",
                 http_calls=tuple(self._http.http_calls),
             )
-        eligible: list[str] = []
-        for customer_id in linked:
-            customer_result = await self._with_401_retry(
-                self._http.get_customer_with_contacts,
+        if len(linked) == 0:
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.NOT_FOUND,
+                contact_id=contact.contact_id,
+                known_technical_deal_ids=tech_ids,
+                http_calls=tuple(self._http.http_calls),
+            )
+        business_active: list[str] = []
+        reanimation: list[str] = []
+        successfully_closed: list[str] = []
+        technical: list[str] = []
+        for lead_id in linked:
+            lead_result = await self._with_401_retry(
+                self._http.get_lead_with_contacts,
                 access_token=access,
                 budget=budget,
-                customer_id=customer_id,
+                lead_id=lead_id,
             )
-            mapped_customer = self._map_customer_inspect_error(
-                customer_result,
+            mapped_lead = self._map_lead_inspect_error(
+                lead_result,
                 contact_id=contact.contact_id,
+                tech_ids=tech_ids,
             )
-            if mapped_customer is not None:
-                return mapped_customer
-            customer = getattr(customer_result, "customer", None)
-            if not isinstance(customer, AmoCrmCustomerInspectRecord):
-                return AmoCrmBuyerCardDiscoveryResult(
-                    outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+            if mapped_lead is not None:
+                return mapped_lead
+            lead = getattr(lead_result, "lead", None)
+            if not isinstance(lead, AmoCrmLeadInspectRecord):
+                return AmoCrmDealDiscoveryResult(
+                    outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
                     contact_id=contact.contact_id,
-                    error_code="AMOCRM_CRM_CUSTOMER_BODY_INVALID",
+                    known_technical_deal_ids=tech_ids,
+                    error_code="AMOCRM_CRM_LEAD_BODY_INVALID",
                     http_calls=tuple(self._http.http_calls),
                 )
-            if contact.contact_id not in customer.linked_contact_ids:
-                return AmoCrmBuyerCardDiscoveryResult(
-                    outcome=AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE,
+            if contact.contact_id not in lead.linked_contact_ids:
+                return AmoCrmDealDiscoveryResult(
+                    outcome=AmoCrmDealDiscoveryOutcome.INCOMPLETE,
                     contact_id=contact.contact_id,
-                    error_code="AMOCRM_BUYER_CARD_CUSTOMER_CONTACT_UNLINKED",
+                    known_technical_deal_ids=tech_ids,
+                    error_code="AMOCRM_DEAL_LEAD_CONTACT_UNLINKED",
                     http_calls=tuple(self._http.http_calls),
                 )
-            eligible.append(customer.customer_id)
+            classified = self._classify_lead(
+                lead,
+                tech_set=tech_set,
+                contact_id=contact.contact_id,
+                tech_ids=tech_ids,
+            )
+            if isinstance(classified, AmoCrmDealDiscoveryResult):
+                return classified
+            bucket, lead_token = classified
+            if bucket == "technical":
+                technical.append(lead_token)
+            elif bucket == "reanimation":
+                reanimation.append(lead_token)
+            elif bucket == "successfully_closed":
+                successfully_closed.append(lead_token)
+            elif bucket == "business_active":
+                business_active.append(lead_token)
             reloaded = await self._load_access_token()
             if reloaded is not None:
                 access = reloaded
-        return self._finish_eligible(
+        return AmoCrmDealDiscoveryResult(
+            outcome=AmoCrmDealDiscoveryOutcome.FOUND,
             contact_id=contact.contact_id,
-            eligible=tuple(eligible),
+            business_active_lead_ids=tuple(business_active),
+            reanimation_candidate_lead_ids=tuple(reanimation),
+            successfully_closed_lead_ids=tuple(successfully_closed),
+            technical_lead_ids=tuple(technical),
+            known_technical_deal_ids=tech_ids,
+            http_calls=tuple(self._http.http_calls),
         )
 
-    def _finish_eligible(
+    def _classify_lead(
         self,
+        lead: AmoCrmLeadInspectRecord,
         *,
+        tech_set: set[str],
         contact_id: str,
-        eligible: tuple[str, ...],
-    ) -> AmoCrmBuyerCardDiscoveryResult:
-        calls = tuple(self._http.http_calls)
-        if len(eligible) == 0:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND,
-                contact_id=contact_id,
-                http_calls=calls,
-            )
-        if len(eligible) == 1:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE,
-                contact_id=contact_id,
-                eligible_customer_ids=eligible,
-                http_calls=calls,
-            )
-        return AmoCrmBuyerCardDiscoveryResult(
-            outcome=AmoCrmBuyerCardDiscoveryOutcome.AMBIGUOUS,
+        tech_ids: tuple[str, ...],
+    ) -> tuple[str, str] | AmoCrmDealDiscoveryResult:
+        if lead.lead_id in tech_set:
+            return "technical", lead.lead_id
+        if lead.is_deleted:
+            return "deleted", lead.lead_id
+        if lead.status_id == AMOCRM_SYSTEM_LEAD_STATUS_UNREALIZED:
+            return "reanimation", lead.lead_id
+        if lead.status_id == AMOCRM_SYSTEM_LEAD_STATUS_SUCCESS:
+            return "successfully_closed", lead.lead_id
+        if lead.closed_at is None:
+            return "business_active", lead.lead_id
+        return AmoCrmDealDiscoveryResult(
+            outcome=AmoCrmDealDiscoveryOutcome.INCOMPLETE,
             contact_id=contact_id,
-            eligible_customer_ids=eligible,
-            http_calls=calls,
+            known_technical_deal_ids=tech_ids,
+            error_code="AMOCRM_DEAL_LEAD_STATUS_CLOSED_INCONSISTENT",
+            http_calls=tuple(self._http.http_calls),
         )
 
     def _map_contact_error(
         self,
         result: object,
-    ) -> AmoCrmBuyerCardDiscoveryResult | None:
+        tech_ids: tuple[str, ...],
+    ) -> AmoCrmDealDiscoveryResult | None:
         calls = tuple(self._http.http_calls)
         outcome = getattr(result, "outcome", None)
         if getattr(result, "not_found", False):
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.NOT_FOUND,
+                known_technical_deal_ids=tech_ids,
                 error_code=getattr(result, "error_code", None),
                 http_calls=calls,
             )
         if outcome is AmoCrmCrmRestOutcome.DISABLED:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.DISABLED,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.DISABLED,
+                known_technical_deal_ids=tech_ids,
                 error_code="AMOCRM_CRM_REST_DISABLED",
                 http_calls=calls,
             )
         if getattr(result, "unauthorized", False):
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
+                known_technical_deal_ids=tech_ids,
                 error_code=getattr(result, "error_code", None) or "AMOCRM_CRM_HTTP_401",
                 http_calls=calls,
             )
         if outcome is AmoCrmCrmRestOutcome.SUCCESS:
             return None
         if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.TRANSIENT_ERROR,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.TRANSIENT_ERROR,
+                known_technical_deal_ids=tech_ids,
                 error_code=getattr(result, "error_code", None),
                 http_calls=calls,
             )
-        return AmoCrmBuyerCardDiscoveryResult(
-            outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+        return AmoCrmDealDiscoveryResult(
+            outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
+            known_technical_deal_ids=tech_ids,
             error_code=getattr(result, "error_code", None),
             http_calls=calls,
         )
 
-    def _map_customer_inspect_error(
+    def _map_lead_inspect_error(
         self,
         result: object,
         *,
         contact_id: str,
-    ) -> AmoCrmBuyerCardDiscoveryResult | None:
+        tech_ids: tuple[str, ...],
+    ) -> AmoCrmDealDiscoveryResult | None:
         calls = tuple(self._http.http_calls)
         outcome = getattr(result, "outcome", None)
         if getattr(result, "not_found", False):
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.INCOMPLETE,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.INCOMPLETE,
                 contact_id=contact_id,
+                known_technical_deal_ids=tech_ids,
                 error_code=getattr(result, "error_code", None)
-                or "AMOCRM_BUYER_CARD_CUSTOMER_MISSING",
+                or "AMOCRM_DEAL_LEAD_MISSING",
                 http_calls=calls,
             )
         if outcome is AmoCrmCrmRestOutcome.DISABLED:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.DISABLED,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.DISABLED,
                 contact_id=contact_id,
+                known_technical_deal_ids=tech_ids,
                 error_code="AMOCRM_CRM_REST_DISABLED",
                 http_calls=calls,
             )
         if getattr(result, "unauthorized", False):
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
                 contact_id=contact_id,
+                known_technical_deal_ids=tech_ids,
                 error_code=getattr(result, "error_code", None) or "AMOCRM_CRM_HTTP_401",
                 http_calls=calls,
             )
         if outcome is AmoCrmCrmRestOutcome.SUCCESS:
             return None
         if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR:
-            return AmoCrmBuyerCardDiscoveryResult(
-                outcome=AmoCrmBuyerCardDiscoveryOutcome.TRANSIENT_ERROR,
+            return AmoCrmDealDiscoveryResult(
+                outcome=AmoCrmDealDiscoveryOutcome.TRANSIENT_ERROR,
                 contact_id=contact_id,
+                known_technical_deal_ids=tech_ids,
                 error_code=getattr(result, "error_code", None),
                 http_calls=calls,
             )
-        return AmoCrmBuyerCardDiscoveryResult(
-            outcome=AmoCrmBuyerCardDiscoveryOutcome.PERMANENT_ERROR,
+        return AmoCrmDealDiscoveryResult(
+            outcome=AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
             contact_id=contact_id,
+            known_technical_deal_ids=tech_ids,
             error_code=getattr(result, "error_code", None),
             http_calls=calls,
         )
@@ -315,6 +374,21 @@ class AmoCrmBuyerCardDiscoveryService:
         if not value.isdigit() or value.startswith("0"):
             return None
         return value
+
+    def _normalize_id_tuple(self, values: Sequence[object]) -> tuple[str, ...] | None:
+        if type(values) is not tuple and type(values) is not list:
+            return None
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            token = self._normalize_entity_id(item)
+            if token is None:
+                return None
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+        return tuple(sorted(out, key=lambda value: int(value)))
 
     async def _with_401_retry(
         self,

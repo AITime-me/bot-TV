@@ -157,7 +157,6 @@ class AmoCrmBuyerCardBindService:
 
         discovery = await self._discovery.discover_buyer_card_candidates(
             contact_id=expected_contact,
-            known_technical_deal_ids=snapshot.technical_deal_ids,
         )
         http_calls = looked.http_calls + discovery.http_calls
         mapped_discovery = self._map_discovery(
@@ -279,7 +278,7 @@ class AmoCrmBuyerCardBindService:
     ) -> AmoCrmBuyerCardBindResult | None:
         outcome = discovery.outcome
         if outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE:
-            eligible = discovery.eligible_lead_ids
+            eligible = discovery.eligible_customer_ids
             if len(eligible) != 1 or eligible[0] != expected_card:
                 return AmoCrmBuyerCardBindResult(
                     outcome=AmoCrmBuyerCardBindOutcome.MANUAL_REVIEW_REQUIRED,
@@ -372,7 +371,6 @@ class AmoCrmBuyerCardBindService:
             reconciled = await self._reconcile(
                 canonical_identity_id=canonical_id,
                 candidate_buyer_card_ids=(expected_card,),
-                candidate_technical_deal_ids=fresh.technical_deal_ids,
             )
             mapped = self._map_reconcile(
                 reconciled,
@@ -419,7 +417,6 @@ class AmoCrmBuyerCardBindService:
             reconciled = await identity.reconcile_buyer_card(
                 canonical_identity_id=canonical_id,
                 candidate_buyer_card_ids=(expected_card,),
-                candidate_technical_deal_ids=fresh.technical_deal_ids,  # type: ignore[union-attr]
             )
             mapped = self._map_reconcile(
                 reconciled,
@@ -582,19 +579,16 @@ class AmoCrmBuyerCardBindService:
         *,
         canonical_identity_id: uuid.UUID,
         candidate_buyer_card_ids: tuple[str, ...],
-        candidate_technical_deal_ids: tuple[str, ...],
     ) -> ReconcileBuyerCardResult:
         if self._reconcile_override is not None:
             return await self._reconcile_override(
                 canonical_identity_id=canonical_identity_id,
                 candidate_buyer_card_ids=candidate_buyer_card_ids,
-                candidate_technical_deal_ids=candidate_technical_deal_ids,
             )
         async with session_scope(self._session_factory) as session:
             return await IdentityResolutionService(session).reconcile_buyer_card(
                 canonical_identity_id=canonical_identity_id,
                 candidate_buyer_card_ids=candidate_buyer_card_ids,
-                candidate_technical_deal_ids=candidate_technical_deal_ids,
             )
 
     async def _attach(
