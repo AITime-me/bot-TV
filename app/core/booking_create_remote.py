@@ -51,6 +51,7 @@ _REQUEST_JSON_KEYS: Final[frozenset[str]] = frozenset(
         "phone",
         "personalDataConsent",
         "offerAcknowledgement",
+        "clientRef",
     }
 )
 _SUCCESS_JSON_KEYS: Final[frozenset[str]] = frozenset(
@@ -127,6 +128,23 @@ class BookingCreateMachineOutcome(StrEnum):
 
 def _contains_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
+def require_canonical_client_ref(value: object) -> str:
+    """Require optional wire clientRef as canonical lowercase UUID. Never echoes value."""
+
+    if type(value) is not str or not value:
+        raise ValueError("BOOKING_CREATE_CLIENT_REF_INVALID") from None
+    if any(ch.isspace() for ch in value) or _contains_control_chars(value):
+        raise ValueError("BOOKING_CREATE_CLIENT_REF_INVALID") from None
+    if value != value.lower():
+        raise ValueError("BOOKING_CREATE_CLIENT_REF_INVALID") from None
+    if len(value) != 36 or _CANONICAL_UUID_RE.fullmatch(value) is None:
+        raise ValueError("BOOKING_CREATE_CLIENT_REF_INVALID") from None
+    try:
+        return require_canonical_backend_uuid(value)
+    except BookingEligibilityHttpError:
+        raise ValueError("BOOKING_CREATE_CLIENT_REF_INVALID") from None
 
 
 def require_canonical_idempotency_key(value: object) -> str:
@@ -265,9 +283,10 @@ class BookingCreateRemoteRequest:
     phone: str
     personal_data_consent: Literal[True]
     offer_acknowledgement: Literal[True]
+    client_ref: str | None = None
 
     def to_json_object(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "idempotencyKey": self.idempotency_key,
             "slotId": self.slot_id,
             "clientName": self.client_name,
@@ -275,14 +294,21 @@ class BookingCreateRemoteRequest:
             "personalDataConsent": True,
             "offerAcknowledgement": True,
         }
+        if self.client_ref is not None:
+            payload["clientRef"] = self.client_ref
+        return payload
 
     def __repr__(self) -> str:
+        client_ref_part = (
+            "client_ref=<redacted>, " if self.client_ref is not None else ""
+        )
         return (
             "BookingCreateRemoteRequest("
             "idempotency_key=<redacted>, "
             "slot_id=<redacted>, "
             "client_name=<redacted>, "
             "phone=<redacted>, "
+            f"{client_ref_part}"
             "personal_data_consent=True, "
             "offer_acknowledgement=True)"
         )
@@ -296,6 +322,7 @@ def build_booking_create_remote_request(
     phone: object,
     personal_data_consent: object,
     offer_acknowledgement: object,
+    client_ref: object = None,
 ) -> BookingCreateRemoteRequest:
     """Validate and build a wire request. Fail closed before any HTTP I/O."""
 
@@ -309,6 +336,9 @@ def build_booking_create_remote_request(
     parse_bot_slot_id(slot_id)
     name = require_confirmed_client_name(client_name)
     phone_value = require_confirmed_phone(phone)
+    canonical_client_ref: str | None = None
+    if client_ref is not None:
+        canonical_client_ref = require_canonical_client_ref(client_ref)
     return BookingCreateRemoteRequest(
         idempotency_key=key,
         slot_id=slot_id,
@@ -316,6 +346,7 @@ def build_booking_create_remote_request(
         phone=phone_value,
         personal_data_consent=True,
         offer_acknowledgement=True,
+        client_ref=canonical_client_ref,
     )
 
 

@@ -21,6 +21,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
+from app.core.client_ref_resolution import (
+    ClientRefResolutionOutcome,
+    ClientRefResolutionResult,
+)
 from app.core.booking_availability_http import (
     BookingAvailabilityHttpError,
     require_calendar_date,
@@ -79,6 +83,7 @@ _ALLOWED_CONSUMER_LOG_CODES: frozenset[str] = frozenset(
         BookingInternalReasonCode.UNKNOWN_OUTCOME.value,
         BookingInternalReasonCode.MALFORMED_ELIGIBILITY.value,
         "BOOKING_CREATE_CLIENT_UNAVAILABLE",
+        "BOOKING_CREATE_CLIENT_REF_UNAVAILABLE",
         "BOOKING_CREATE_REQUEST_INVALID",
         "BOOKING_CREATE_FAIL_CLOSED",
         "BOOKING_CREATE_RETRY_LATER",
@@ -201,7 +206,18 @@ class BookingCreatePort(Protocol):
         phone: object,
         personal_data_consent: object,
         offer_acknowledgement: object,
+        client_ref: object = None,
     ) -> BookingCreateRemoteSuccess: ...
+
+
+class ClientRefResolverPort(Protocol):
+    """Read-only clientRef resolver port (CLIENTREF-03)."""
+
+    async def resolve_for_conversation(
+        self,
+        *,
+        conversation_id: object,
+    ) -> ClientRefResolutionResult: ...
 
 
 def _log_consumer_event(event: str, code: str) -> None:
@@ -659,6 +675,7 @@ class BookingFlowService:
         phone: object,
         personal_data_consent: object,
         offer_acknowledgement: object,
+        client_ref: object = None,
     ) -> BookingCreateApplicationResult:
         """Confirm a backend-provided slot via at most one create S2S call.
 
@@ -712,6 +729,7 @@ class BookingFlowService:
                 phone=phone,
                 personal_data_consent=True,
                 offer_acknowledgement=True,
+                client_ref=client_ref,
             )
         except ValueError:
             return _create_rejected(
@@ -738,6 +756,7 @@ class BookingFlowService:
                 phone=remote_request.phone,
                 personal_data_consent=True,
                 offer_acknowledgement=True,
+                client_ref=remote_request.client_ref,
             )
         except BookingCreateHttpError as exc:
             return _map_create_http_error(exc, idempotency_key=key)
@@ -787,3 +806,60 @@ class BookingFlowService:
             idempotent_replay=remote.idempotent_replay,
             idempotency_key=key,
         )
+
+
+def _client_ref_resolution_reason(result: ClientRefResolutionResult) -> str:
+    if result.outcome is ClientRefResolutionOutcome.NOT_FOUND:
+        return "CLIENT_REF_NOT_FOUND"
+    if result.outcome is ClientRefResolutionOutcome.REFUSED:
+        if type(result.reason_code) is str and result.reason_code:
+            return result.reason_code
+        return "CLIENT_REF_REFUSED"
+    if type(result.error_code) is str and result.error_code:
+        return result.error_code
+    return "CLIENT_REF_INVALID"
+
+
+async def confirm_selected_slot_for_conversation(
+    flow: BookingFlowService,
+    client_ref_resolver: ClientRefResolverPort,
+    slot: AvailableSlot,
+    *,
+    conversation_id: object,
+    idempotency_key: object,
+    client_name: object,
+    phone: object,
+    personal_data_consent: object,
+    offer_acknowledgement: object,
+) -> BookingCreateApplicationResult:
+    """Identity-aware confirm: resolve clientRef before any booking-create HTTP I/O.
+
+    FOUND → exactly one create call carrying the resolved canonical clientRef.
+    NOT_FOUND / REFUSED / INVALID_INPUT → fail closed with zero create calls.
+    Never falls back to phone/name as client identity.
+    """
+
+    resolution = await client_ref_resolver.resolve_for_conversation(
+        conversation_id=conversation_id,
+    )
+    if resolution.outcome is not ClientRefResolutionOutcome.FOUND:
+        try:
+            key = require_canonical_idempotency_key(idempotency_key)
+        except ValueError:
+            key = "00000000-0000-4000-8000-000000000000"
+        return _create_rejected(
+            outcome=BookingCreateMachineOutcome.FAIL_CLOSED,
+            reason=_client_ref_resolution_reason(resolution),
+            idempotency_key=key,
+            log_code="BOOKING_CREATE_CLIENT_REF_UNAVAILABLE",
+        )
+
+    return flow.confirm_selected_slot(
+        slot,
+        idempotency_key=idempotency_key,
+        client_name=client_name,
+        phone=phone,
+        personal_data_consent=personal_data_consent,
+        offer_acknowledgement=offer_acknowledgement,
+        client_ref=resolution.client_ref,
+    )

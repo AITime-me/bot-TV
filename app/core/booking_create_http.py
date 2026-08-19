@@ -222,6 +222,7 @@ class BookingCreateHttpClient:
         phone: object,
         personal_data_consent: object,
         offer_acknowledgement: object,
+        client_ref: object = None,
     ) -> BookingCreateRemoteSuccess:
         """Perform exactly one create POST. Never generates an idempotency key."""
 
@@ -233,6 +234,7 @@ class BookingCreateHttpClient:
                 phone=phone,
                 personal_data_consent=personal_data_consent,
                 offer_acknowledgement=offer_acknowledgement,
+                client_ref=client_ref,
             )
         except ValueError:
             _fail(BookingCreateAdapterReasonCode.REQUEST_INVALID)
