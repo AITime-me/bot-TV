@@ -4,7 +4,8 @@ Usage:
   python -B -m app.amocrm_buyer_card_bind_ops \\
     --canonical-identity-id UUID < approval.json
 
-stdin JSON must contain only contact_id and buyer_card_id. Unknown keys fail
+stdin JSON must contain only contact_id and buyer_card_id. buyer_card_id is
+the amoCRM Customer ID (Buyer Card), not a Lead id. Unknown keys fail
 closed. External ids are never placed in argv, shell examples, logs, or errors.
 """
 

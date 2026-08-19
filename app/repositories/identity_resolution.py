@@ -271,7 +271,7 @@ async def list_active_amocrm_deal_roles(
     connection_scope: str,
     external_id: str,
 ) -> list[ExternalIdentityLink]:
-    """ACTIVE Buyer Card or technical deal rows for the same amo external id."""
+    """ACTIVE business Lead or technical/chat Lead rows for the same Lead id."""
 
     stmt = select(ExternalIdentityLink).where(
         ExternalIdentityLink.provider == provider,
@@ -280,7 +280,7 @@ async def list_active_amocrm_deal_roles(
         ExternalIdentityLink.status == IdentityLinkStatus.ACTIVE.value,
         ExternalIdentityLink.entity_kind.in_(
             (
-                IdentityEntityKind.AMOCRM_BUYER_CARD.value,
+                IdentityEntityKind.AMOCRM_DEAL.value,
                 IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value,
             )
         ),
@@ -305,7 +305,7 @@ async def lock_active_amocrm_deal_roles(
             ExternalIdentityLink.status == IdentityLinkStatus.ACTIVE.value,
             ExternalIdentityLink.entity_kind.in_(
                 (
-                    IdentityEntityKind.AMOCRM_BUYER_CARD.value,
+                    IdentityEntityKind.AMOCRM_DEAL.value,
                     IdentityEntityKind.AMOCRM_TECHNICAL_DEAL.value,
                 )
             ),

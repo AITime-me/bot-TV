@@ -1,8 +1,8 @@
-"""Read-only amoCRM HTTP for Buyer Card discovery (IR-3).
+"""Read-only amoCRM HTTP for Buyer Card (Customer) and Deal (Lead) discovery.
 
-GET contact with linked leads and GET lead with linked contacts.
-Never creates/updates CRM entities. Completely separate from Chat HMAC
-and from the write-capable leads client.
+GET contact with linked customers/leads, GET customer with contacts,
+GET lead with contacts. Never creates/updates CRM entities. Completely
+separate from Chat HMAC and from the write-capable leads client.
 """
 
 from __future__ import annotations
@@ -28,9 +28,15 @@ __all__ = (
     "AmoCrmContactWithLeadsResult",
     "AmoCrmLeadInspectRecord",
     "AmoCrmLeadInspectResult",
+    "AmoCrmContactWithCustomersRecord",
+    "AmoCrmContactWithCustomersResult",
+    "AmoCrmCustomerInspectRecord",
+    "AmoCrmCustomerInspectResult",
     "AmoCrmBuyerCardHttpClient",
     "parse_contact_with_leads_body",
     "parse_lead_inspect_body",
+    "parse_contact_with_customers_body",
+    "parse_customer_inspect_body",
 )
 
 _TIMEOUT_SECONDS: Final[float] = 10.0
@@ -107,6 +113,7 @@ class AmoCrmContactWithLeadsResult:
 @dataclass(frozen=True, slots=True, repr=False)
 class AmoCrmLeadInspectRecord:
     lead_id: str
+    status_id: int
     is_deleted: bool = False
     closed_at: int | None = None
     linked_contact_ids: tuple[str, ...] = ()
@@ -114,7 +121,8 @@ class AmoCrmLeadInspectRecord:
     def __repr__(self) -> str:
         return (
             "AmoCrmLeadInspectRecord("
-            f"lead_id={self.lead_id!r}, is_deleted={self.is_deleted!r}, "
+            f"lead_id={self.lead_id!r}, status_id={self.status_id!r}, "
+            f"is_deleted={self.is_deleted!r}, "
             f"closed={self.closed_at is not None}, "
             f"linked_contact_ids={self.linked_contact_ids!r})"
         )
@@ -134,6 +142,72 @@ class AmoCrmLeadInspectResult:
             "AmoCrmLeadInspectResult("
             f"outcome={self.outcome!r}, "
             f"lead_id={None if self.lead is None else self.lead.lead_id!r}, "
+            f"error_code={self.error_code!r}, not_found={self.not_found!r}, "
+            f"unauthorized={self.unauthorized!r}, status_code={self.status_code!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AmoCrmContactWithCustomersRecord:
+    contact_id: str
+    linked_customer_ids: tuple[str, ...] = ()
+
+    def __repr__(self) -> str:
+        return (
+            "AmoCrmContactWithCustomersRecord("
+            f"contact_id={self.contact_id!r}, "
+            f"linked_customer_ids={self.linked_customer_ids!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AmoCrmContactWithCustomersResult:
+    outcome: AmoCrmCrmRestOutcome
+    contact: AmoCrmContactWithCustomersRecord | None = None
+    error_code: str | None = None
+    not_found: bool = False
+    unauthorized: bool = False
+    status_code: int | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "AmoCrmContactWithCustomersResult("
+            f"outcome={self.outcome!r}, "
+            f"contact_id={None if self.contact is None else self.contact.contact_id!r}, "
+            f"linked_customer_count="
+            f"{0 if self.contact is None else len(self.contact.linked_customer_ids)}, "
+            f"error_code={self.error_code!r}, not_found={self.not_found!r}, "
+            f"unauthorized={self.unauthorized!r}, status_code={self.status_code!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AmoCrmCustomerInspectRecord:
+    customer_id: str
+    linked_contact_ids: tuple[str, ...] = ()
+
+    def __repr__(self) -> str:
+        return (
+            "AmoCrmCustomerInspectRecord("
+            f"customer_id={self.customer_id!r}, "
+            f"linked_contact_ids={self.linked_contact_ids!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AmoCrmCustomerInspectResult:
+    outcome: AmoCrmCrmRestOutcome
+    customer: AmoCrmCustomerInspectRecord | None = None
+    error_code: str | None = None
+    not_found: bool = False
+    unauthorized: bool = False
+    status_code: int | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "AmoCrmCustomerInspectResult("
+            f"outcome={self.outcome!r}, "
+            f"customer_id={None if self.customer is None else self.customer.customer_id!r}, "
             f"error_code={self.error_code!r}, not_found={self.not_found!r}, "
             f"unauthorized={self.unauthorized!r}, status_code={self.status_code!r})"
         )
@@ -196,6 +270,11 @@ def parse_lead_inspect_body(body: bytes) -> AmoCrmLeadInspectRecord | None:
         closed_at = raw_closed
     else:
         return None
+    if "status_id" not in payload:
+        return None
+    raw_status = payload["status_id"]
+    if type(raw_status) is not int or isinstance(raw_status, bool) or raw_status <= 0:
+        return None
     if "_embedded" not in payload:
         return None
     embedded = payload["_embedded"]
@@ -211,8 +290,77 @@ def parse_lead_inspect_body(body: bytes) -> AmoCrmLeadInspectRecord | None:
         return None
     return AmoCrmLeadInspectRecord(
         lead_id=str(lead_id),
+        status_id=raw_status,
         is_deleted=raw_deleted,
         closed_at=closed_at,
+        linked_contact_ids=linked,
+    )
+
+
+def parse_contact_with_customers_body(
+    body: bytes,
+) -> AmoCrmContactWithCustomersRecord | None:
+    """Parse GET /contacts/{{id}}?with=customers. Name/email/tags ignored."""
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    contact_id = payload.get("id")
+    if type(contact_id) is not int or isinstance(contact_id, bool) or contact_id <= 0:
+        return None
+    if "_embedded" not in payload:
+        return None
+    embedded = payload["_embedded"]
+    if not isinstance(embedded, dict):
+        return None
+    if "customers" not in embedded:
+        return None
+    customers_raw = embedded["customers"]
+    if not isinstance(customers_raw, list):
+        return None
+    linked = _sorted_unique_positive_ids(customers_raw)
+    if linked is None:
+        return None
+    return AmoCrmContactWithCustomersRecord(
+        contact_id=str(contact_id),
+        linked_customer_ids=linked,
+    )
+
+
+def parse_customer_inspect_body(body: bytes) -> AmoCrmCustomerInspectRecord | None:
+    """Parse GET /customers/{{id}}?with=contacts. Name/tags ignored."""
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    customer_id = payload.get("id")
+    if (
+        type(customer_id) is not int
+        or isinstance(customer_id, bool)
+        or customer_id <= 0
+    ):
+        return None
+    if "_embedded" not in payload:
+        return None
+    embedded = payload["_embedded"]
+    if not isinstance(embedded, dict):
+        return None
+    if "contacts" not in embedded:
+        return None
+    contacts_raw = embedded["contacts"]
+    if not isinstance(contacts_raw, list):
+        return None
+    linked = _sorted_unique_positive_ids(contacts_raw)
+    if linked is None:
+        return None
+    return AmoCrmCustomerInspectRecord(
+        customer_id=str(customer_id),
         linked_contact_ids=linked,
     )
 
@@ -235,8 +383,26 @@ def _not_found_lead(status_code: int) -> AmoCrmLeadInspectResult:
     )
 
 
+def _not_found_contact_customers(status_code: int) -> AmoCrmContactWithCustomersResult:
+    return AmoCrmContactWithCustomersResult(
+        outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
+        not_found=True,
+        status_code=status_code,
+        error_code=f"AMOCRM_CRM_HTTP_{status_code}",
+    )
+
+
+def _not_found_customer(status_code: int) -> AmoCrmCustomerInspectResult:
+    return AmoCrmCustomerInspectResult(
+        outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
+        not_found=True,
+        status_code=status_code,
+        error_code=f"AMOCRM_CRM_HTTP_{status_code}",
+    )
+
+
 class AmoCrmBuyerCardHttpClient:
-    """v4 GET helpers for Buyer Card discovery. Callers supply access tokens."""
+    """v4 GET helpers for Customer and Lead discovery. Callers supply access tokens."""
 
     def __init__(
         self,
@@ -359,6 +525,122 @@ class AmoCrmBuyerCardHttpClient:
         return AmoCrmLeadInspectResult(
             outcome=AmoCrmCrmRestOutcome.SUCCESS,
             lead=parsed,
+            status_code=response.status_code,
+        )
+
+    def get_contact_with_customers(
+        self,
+        *,
+        contact_id: str,
+        access_token: str,
+    ) -> AmoCrmContactWithCustomersResult:
+        if not self._config.enabled:
+            return AmoCrmContactWithCustomersResult(
+                outcome=AmoCrmCrmRestOutcome.DISABLED
+            )
+        self._require_entity_id(contact_id, code="AMOCRM_CRM_CONTACT_ID_INVALID")
+        outcome, response = self._request(
+            path=f"/api/v4/contacts/{contact_id}?with=customers",
+            access_token=access_token,
+            call_label="GET_CONTACT_WITH_CUSTOMERS",
+        )
+        if response is not None and response.status_code in {204, 404}:
+            return _not_found_contact_customers(response.status_code)
+        mapped = self._map_transport(
+            outcome,
+            response,
+            unauthorized=lambda: AmoCrmContactWithCustomersResult(
+                outcome=AmoCrmCrmRestOutcome.UNAUTHORIZED,
+                unauthorized=True,
+                status_code=401,
+                error_code="AMOCRM_CRM_HTTP_401",
+            ),
+            transport=lambda: AmoCrmContactWithCustomersResult(
+                outcome=AmoCrmCrmRestOutcome.TRANSIENT_ERROR,
+                error_code="AMOCRM_CRM_TRANSPORT",
+            ),
+            other=lambda status, code: AmoCrmContactWithCustomersResult(
+                outcome=outcome,
+                error_code=code,
+                status_code=status,
+            ),
+        )
+        if mapped is not None:
+            return mapped
+        assert response is not None
+        parsed = parse_contact_with_customers_body(response.body)
+        if parsed is None:
+            return AmoCrmContactWithCustomersResult(
+                outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
+                error_code="AMOCRM_CRM_CONTACT_BODY_INVALID",
+                status_code=response.status_code,
+            )
+        if parsed.contact_id != contact_id:
+            return AmoCrmContactWithCustomersResult(
+                outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
+                error_code="AMOCRM_CRM_CONTACT_ID_MISMATCH",
+                status_code=response.status_code,
+            )
+        return AmoCrmContactWithCustomersResult(
+            outcome=AmoCrmCrmRestOutcome.SUCCESS,
+            contact=parsed,
+            status_code=response.status_code,
+        )
+
+    def get_customer_with_contacts(
+        self,
+        *,
+        customer_id: str,
+        access_token: str,
+    ) -> AmoCrmCustomerInspectResult:
+        if not self._config.enabled:
+            return AmoCrmCustomerInspectResult(outcome=AmoCrmCrmRestOutcome.DISABLED)
+        self._require_entity_id(customer_id, code="AMOCRM_CRM_CUSTOMER_ID_INVALID")
+        outcome, response = self._request(
+            path=f"/api/v4/customers/{customer_id}?with=contacts",
+            access_token=access_token,
+            call_label=f"GET_CUSTOMER_{customer_id}",
+        )
+        if response is not None and response.status_code in {204, 404}:
+            return _not_found_customer(response.status_code)
+        mapped = self._map_transport(
+            outcome,
+            response,
+            unauthorized=lambda: AmoCrmCustomerInspectResult(
+                outcome=AmoCrmCrmRestOutcome.UNAUTHORIZED,
+                unauthorized=True,
+                status_code=401,
+                error_code="AMOCRM_CRM_HTTP_401",
+            ),
+            transport=lambda: AmoCrmCustomerInspectResult(
+                outcome=AmoCrmCrmRestOutcome.TRANSIENT_ERROR,
+                error_code="AMOCRM_CRM_TRANSPORT",
+            ),
+            other=lambda status, code: AmoCrmCustomerInspectResult(
+                outcome=outcome,
+                error_code=code,
+                status_code=status,
+            ),
+        )
+        if mapped is not None:
+            return mapped
+        assert response is not None
+        parsed = parse_customer_inspect_body(response.body)
+        if parsed is None:
+            return AmoCrmCustomerInspectResult(
+                outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
+                error_code="AMOCRM_CRM_CUSTOMER_BODY_INVALID",
+                status_code=response.status_code,
+            )
+        if parsed.customer_id != customer_id:
+            return AmoCrmCustomerInspectResult(
+                outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
+                error_code="AMOCRM_CRM_CUSTOMER_ID_MISMATCH",
+                status_code=response.status_code,
+            )
+        return AmoCrmCustomerInspectResult(
+            outcome=AmoCrmCrmRestOutcome.SUCCESS,
+            customer=parsed,
             status_code=response.status_code,
         )
 

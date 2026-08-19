@@ -126,7 +126,6 @@ class AmoCrmBuyerCardReadFlowService:
 
         discovery = await self._discovery.discover_buyer_card_candidates(
             contact_id=contact_id,
-            known_technical_deal_ids=snapshot.technical_deal_ids,
         )
         http_calls = http_calls + discovery.http_calls
         if discovery.outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND:

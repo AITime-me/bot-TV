@@ -52,7 +52,8 @@ __all__ = (
     "PHONE_PROVIDER",
     "EMAIL_PROVIDER",
     "REASON_EMAIL_ONLY_SECONDARY",
-    "REASON_BUYER_TECH_ROLE_CONFLICT",
+    "REASON_DEAL_TECH_ROLE_CONFLICT",
+    "AMOCRM_LEAD_ROLE_ENTITY_KINDS",
     "AMOCRM_DEAL_ENTITY_KINDS",
 )
 
@@ -82,8 +83,8 @@ EMAIL_PROVIDER: Final[str] = "email"
 # Safe resolve reason when email matched but no primary (a–c) candidate exists.
 REASON_EMAIL_ONLY_SECONDARY: Final[str] = "EMAIL_ONLY_SECONDARY"
 
-# Safe attach/reconcile reason when Buyer Card and technical deal share an id.
-REASON_BUYER_TECH_ROLE_CONFLICT: Final[str] = "buyer_card_technical_deal_conflict"
+# Safe attach reason when a business Lead and a technical/chat Lead share an id.
+REASON_DEAL_TECH_ROLE_CONFLICT: Final[str] = "deal_technical_deal_conflict"
 
 
 class IdentityEntityKind(str, enum.Enum):
@@ -96,13 +97,20 @@ class IdentityEntityKind(str, enum.Enum):
     AMOCRM_CONTACT = "AMOCRM_CONTACT"
     AMOCRM_BUYER_CARD = "AMOCRM_BUYER_CARD"
     AMOCRM_TECHNICAL_DEAL = "AMOCRM_TECHNICAL_DEAL"
+    AMOCRM_DEAL = "AMOCRM_DEAL"
 
 
-AMOCRM_DEAL_ENTITY_KINDS: Final[frozenset[IdentityEntityKind]] = frozenset(
+# Lead-namespace roles: one Lead id cannot be ACTIVE in both roles at once.
+# Buyer Card (Customer) is a different amoCRM namespace and is not included.
+AMOCRM_LEAD_ROLE_ENTITY_KINDS: Final[frozenset[IdentityEntityKind]] = frozenset(
     {
-        IdentityEntityKind.AMOCRM_BUYER_CARD,
+        IdentityEntityKind.AMOCRM_DEAL,
         IdentityEntityKind.AMOCRM_TECHNICAL_DEAL,
     }
+)
+# Back-compat alias used by older comments/tests; Lead roles only.
+AMOCRM_DEAL_ENTITY_KINDS: Final[frozenset[IdentityEntityKind]] = (
+    AMOCRM_LEAD_ROLE_ENTITY_KINDS
 )
 
 

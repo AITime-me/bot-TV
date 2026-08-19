@@ -34,6 +34,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260813_24_amo_entity_links.py",
     "!alembic/versions/20260813_25_amo_deal_reserve.py",
     "!alembic/versions/20260816_26_identity_glue.py",
+    "!alembic/versions/20260818_27_amocrm_deal_kind.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -86,6 +87,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/amocrm_crm_contacts_http.py",
     "!app/core/amocrm_identity_lookup.py",
     "!app/core/amocrm_buyer_card_discovery.py",
+    "!app/core/amocrm_deal_discovery.py",
     "!app/core/amocrm_crm_buyer_card_http.py",
     "!app/core/amocrm_buyer_card_read_flow.py",
     "!app/core/amocrm_buyer_card_bind.py",
@@ -170,6 +172,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/amocrm_technical_deal.py",
     "!app/services/amocrm_identity_lookup.py",
     "!app/services/amocrm_buyer_card_discovery.py",
+    "!app/services/amocrm_deal_discovery.py",
     "!app/services/amocrm_buyer_card_read_flow.py",
     "!app/services/amocrm_buyer_card_bind.py",
     "!app/services/amocrm_crm_mirror_adapter.py",
@@ -272,11 +275,18 @@ IR2_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/services/amocrm_identity_lookup.py",
 )
 
-# IR-3 read-only amoCRM Buyer Card candidate discovery.
+# IR-3 read-only amoCRM Buyer Card (Customer) candidate discovery.
 IR3_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/core/amocrm_buyer_card_discovery.py",
     "app/core/amocrm_crm_buyer_card_http.py",
     "app/services/amocrm_buyer_card_discovery.py",
+)
+
+# Read-only amoCRM business Deal (Lead) discovery.
+DEAL_DISCOVERY_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260818_27_amocrm_deal_kind.py",
+    "app/core/amocrm_deal_discovery.py",
+    "app/services/amocrm_deal_discovery.py",
 )
 
 # IR-4 read-only Buyer Card orchestration (lookup + discovery + reconcile).

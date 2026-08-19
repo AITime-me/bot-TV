@@ -406,6 +406,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260816_26_identity_glue"].down_revision
         == "20260813_25_amo_deal_reserve"
     )
+    assert "20260818_27_amocrm_deal_kind" in by_id
+    assert (
+        by_id["20260818_27_amocrm_deal_kind"].down_revision
+        == "20260816_26_identity_glue"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -426,6 +431,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260813_24_amo_entity_links",
         "20260813_25_amo_deal_reserve",
         "20260816_26_identity_glue",
+        "20260818_27_amocrm_deal_kind",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -461,7 +467,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260813_25_amo_deal_reserve") <= 32
     assert "20260816_26_identity_glue" in revision_ids
     assert len("20260816_26_identity_glue") <= 32
-    assert heads == ["20260816_26_identity_glue"]
+    assert "20260818_27_amocrm_deal_kind" in revision_ids
+    assert len("20260818_27_amocrm_deal_kind") <= 32
+    assert heads == ["20260818_27_amocrm_deal_kind"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -551,6 +559,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_26 = (
         root / "alembic" / "versions" / "20260816_26_identity_glue.py"
+    ).read_text(encoding="utf-8")
+    migration_27 = (
+        root / "alembic" / "versions" / "20260818_27_amocrm_deal_kind.py"
     ).read_text(encoding="utf-8")
 
     model_checks: dict[str, str] = {}
@@ -750,6 +761,16 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert "uq_identity_review_cases_open_conversation_reason" in migration_26
     for forbidden in ("normalize_phone", "send_silent_text", "create_contact"):
         assert forbidden not in migration_26
+
+    assert "AMOCRM_DEAL" in migration_27
+    assert "uq_external_identity_links_active_amocrm_deal_role" in migration_27
+    assert "('AMOCRM_DEAL', 'AMOCRM_TECHNICAL_DEAL')" in migration_27
+    upgrade_27 = migration_27.split("def downgrade")[0]
+    assert "('AMOCRM_BUYER_CARD', 'AMOCRM_TECHNICAL_DEAL')" not in upgrade_27
+    assert "def upgrade()" in migration_27
+    assert "def downgrade()" in migration_27
+    assert "UPDATE " not in migration_27
+    assert "DELETE FROM" not in migration_27
 
     for complex_check in (
         "ck_conversations_handoff_consistency",

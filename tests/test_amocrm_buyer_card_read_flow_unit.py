@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import inspect
 import uuid
-from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -67,20 +66,16 @@ class _FakeLookup:
 class _FakeDiscovery:
     def __init__(self) -> None:
         self.result: AmoCrmBuyerCardDiscoveryResult | None = None
-        self.calls: list[tuple[object, object]] = []
+        self.calls: list[object] = []
 
     async def discover_buyer_card_candidates(
         self,
         *,
         contact_id: object,
-        known_technical_deal_ids: object = (),
     ) -> AmoCrmBuyerCardDiscoveryResult:
-        self.calls.append((contact_id, known_technical_deal_ids))
+        self.calls.append(contact_id)
         assert self.result is not None
-        return replace(
-            self.result,
-            known_technical_deal_ids=tuple(known_technical_deal_ids),  # type: ignore[arg-type]
-        )
+        return self.result
 
 
 class _QueuedSnapshots:
@@ -139,22 +134,20 @@ def _disc(
     *,
     contact_id: str | None = "42",
     eligible: tuple[str, ...] = (),
-    technical: tuple[str, ...] = (),
     error_code: str | None = None,
 ) -> AmoCrmBuyerCardDiscoveryResult:
     kwargs: dict = {
         "outcome": outcome,
-        "known_technical_deal_ids": technical,
         "error_code": error_code,
-        "http_calls": ("GET_CONTACT_WITH_LEADS",),
+        "http_calls": ("GET_CONTACT_WITH_CUSTOMERS",),
     }
     if outcome is AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE:
         kwargs["contact_id"] = contact_id
-        kwargs["eligible_lead_ids"] = eligible
-        kwargs["http_calls"] = ("GET_CONTACT_WITH_LEADS", "GET_LEAD_7")
+        kwargs["eligible_customer_ids"] = eligible
+        kwargs["http_calls"] = ("GET_CONTACT_WITH_CUSTOMERS", "GET_CUSTOMER_7")
     elif outcome is AmoCrmBuyerCardDiscoveryOutcome.AMBIGUOUS:
         kwargs["contact_id"] = contact_id
-        kwargs["eligible_lead_ids"] = eligible
+        kwargs["eligible_customer_ids"] = eligible
     elif outcome is AmoCrmBuyerCardDiscoveryOutcome.NOT_FOUND:
         kwargs["contact_id"] = contact_id
     else:
@@ -287,10 +280,10 @@ async def test_one_durable_contact_uses_ir2_by_id() -> None:
     assert result.contact_source is BuyerCardContactSource.DURABLE_LINK
     assert lookup.by_id_calls == ["42"]
     assert lookup.by_phone_calls == []
-    assert discovery.calls == [("42", ("9",))]
+    assert discovery.calls == ["42"]
     assert rec.calls
     assert rec.calls[0]["candidate_buyer_card_ids"] == ("7",)
-    assert rec.calls[0]["candidate_technical_deal_ids"] == ("9",)
+    assert rec.calls[0]["candidate_technical_deal_ids"] == ()
 
 
 @pytest.mark.asyncio
@@ -646,20 +639,21 @@ async def test_one_eligible_no_linked_card_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_candidate_conflicts_with_technical_deal_manual() -> None:
+async def test_customer_id_overlapping_technical_lead_still_reused() -> None:
     cid = uuid4()
     lookup, discovery = _FakeLookup(), _FakeDiscovery()
     lookup.by_id = _found_id("42")
     discovery.result = _disc(
         AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE,
         eligible=("7",),
-        technical=("7",),
     )
-    rec = _FakeReconcile(
-        ReconcileBuyerCardResult(
-            outcome=ReconcileBuyerCardOutcome.MANUAL_REVIEW_REQUIRED,
-            reason="technical_deal_is_not_buyer_card",
-        )
+    rec = _reuse_reconcile(cid)
+    rec.result = ReconcileBuyerCardResult(
+        outcome=ReconcileBuyerCardOutcome.REUSED,
+        canonical_identity_id=cid,
+        buyer_card_external_id="7",
+        confidence=IdentityLinkConfidence.CONFIRMED,
+        reason="existing_buyer_card",
     )
     service = _flow(
         snapshots=[
@@ -671,10 +665,10 @@ async def test_candidate_conflicts_with_technical_deal_manual() -> None:
         reconcile=rec,
     )
     result = await service.read_buyer_card(canonical_identity_id=cid)
-    assert result.outcome is AmoCrmBuyerCardReadOutcome.MANUAL_REVIEW_REQUIRED
-    assert result.reason == "technical_deal_is_not_buyer_card"
+    assert result.outcome is AmoCrmBuyerCardReadOutcome.REUSED
+    assert result.buyer_card_external_id == "7"
     assert rec.calls[0]["candidate_buyer_card_ids"] == ("7",)
-    assert rec.calls[0]["candidate_technical_deal_ids"] == ("7",)
+    assert rec.calls[0]["candidate_technical_deal_ids"] == ()
 
 
 @pytest.mark.asyncio
@@ -866,13 +860,13 @@ async def test_mixed_technical_ids_no_crash_fail_closed() -> None:
     lookup, discovery = _FakeLookup(), _FakeDiscovery()
     lookup.by_id = _found_id("42")
     discovery.result = _disc(
-        AmoCrmBuyerCardDiscoveryOutcome.INVALID_INPUT,
-        contact_id="42",
-        error_code="AMOCRM_TECHNICAL_DEAL_ID_INVALID",
+        AmoCrmBuyerCardDiscoveryOutcome.FOUND_CANDIDATE,
+        eligible=("7",),
     )
-    rec = _FakeReconcile(ReconcileBuyerCardResult(outcome=ReconcileBuyerCardOutcome.NOT_FOUND))
+    rec = _reuse_reconcile(cid)
     service = _flow(
         snapshots=[
+            _snap(cid, contacts=("42",), technical=("9", "legacy-bad-id")),
             _snap(cid, contacts=("42",), technical=("9", "legacy-bad-id")),
         ],
         lookup=lookup,
@@ -880,10 +874,9 @@ async def test_mixed_technical_ids_no_crash_fail_closed() -> None:
         reconcile=rec,
     )
     result = await service.read_buyer_card(canonical_identity_id=cid)
-    assert result.outcome is AmoCrmBuyerCardReadOutcome.INVALID_INPUT
-    assert result.error_code == "AMOCRM_TECHNICAL_DEAL_ID_INVALID"
-    assert discovery.calls == [("42", ("9", "legacy-bad-id"))]
-    assert rec.calls == []
+    assert result.outcome is AmoCrmBuyerCardReadOutcome.REUSED
+    assert discovery.calls == ["42"]
+    assert rec.calls
 
 
 @pytest.mark.asyncio
