@@ -96,6 +96,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/identity_resolution.py",
     "!app/core/identity_provider_port.py",
     "!app/core/identity_glue.py",
+    "!app/core/client_ref_resolution.py",
     "!app/core/master_command_types.py",
     "!app/core/master_command_parser.py",
     "!app/core/master_command_remote.py",
