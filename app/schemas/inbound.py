@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 from app.schemas.booking_input import SyntheticBookingInput
+from app.schemas.self_booking_confirm_action import SyntheticConfirmSelectedSlotAction
 
 
 class SyntheticInboundEvent(BaseModel):
@@ -16,8 +17,9 @@ class SyntheticInboundEvent(BaseModel):
     Only synthetic fixture data is accepted. extra="forbid" rejects accidental
     PII-shaped fields (phone, email, tokens, etc.) at the schema boundary.
     Optional ``booking`` is a typed fixture for CLIENT_REPLY wiring — never
-    inferred from free-form text. This stage does not claim full PII filtering
-    of free-form text.
+    inferred from free-form text. Optional ``action`` is an explicit structured
+    confirm (CONFIRM_SELECTED_SLOT) — never inferred from text/LLM.
+    This stage does not claim full PII filtering of free-form text.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -28,6 +30,7 @@ class SyntheticInboundEvent(BaseModel):
     text: str = Field(min_length=1, max_length=2000, repr=False)
     received_at: datetime | None = None
     booking: SyntheticBookingInput | None = None
+    action: SyntheticConfirmSelectedSlotAction | None = None
 
     @field_validator("external_conversation_id", "external_message_id")
     @classmethod
@@ -43,6 +46,12 @@ class SyntheticInboundEvent(BaseModel):
             raise ValueError("text contains control characters")
         return value
 
+    @model_validator(mode="after")
+    def _booking_xor_action(self) -> SyntheticInboundEvent:
+        if self.booking is not None and self.action is not None:
+            raise ValueError("booking and action are mutually exclusive")
+        return self
+
     def channel_enum(self) -> Channel:
         return Channel.SYNTHETIC
 
@@ -53,10 +62,19 @@ class SyntheticInboundEvent(BaseModel):
             return self.received_at.replace(tzinfo=timezone.utc)
         return self.received_at.astimezone(timezone.utc)
 
+    def preserves_active_offer(self) -> bool:
+        """True when inbound carries explicit CONFIRM_SELECTED_SLOT action."""
+
+        return (
+            self.action is not None
+            and self.action.kind == "CONFIRM_SELECTED_SLOT"
+        )
+
     def safe_payload(self) -> dict[str, Any]:
         """Storage-only payload with plaintext text for PostgreSQL persistence.
 
         Never use for logs, repr, diagnostics, or exception messages.
+        Booking/action fixtures are not copied into inbox storage.
         """
         return {
             "schema": "synthetic.inbound.v1",
@@ -77,6 +95,9 @@ class SyntheticInboundEvent(BaseModel):
             ),
             "text": "<redacted>",
             "booking_present": self.booking is not None,
+            "action_kind": (
+                self.action.kind if self.action is not None else None
+            ),
         }
 
     def __repr__(self) -> str:

@@ -329,15 +329,28 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
         ("reply_outbound", reply),
     ):
         assert "BookingCreateHttpClient" not in text, label
-        assert "confirm_selected_slot" not in text, label
+        assert ".confirm_selected_slot" not in text, label
         assert "clientName" not in text, label
         assert "personalDataConsent" not in text, label
-    # Synthetic booking input must remain PII-free.
+    # Synthetic booking input must remain PII-free (consents live on confirm action).
     schema = _source(_REPO_ROOT / Path("app/schemas/booking_input.py"))
     assert "client_name" not in schema
     assert "phone" not in schema
     assert "personal_data_consent" not in schema
     assert "No PII" in schema or "No free-text" in schema
+    # Confirm action is structured inbound only; no admit/CREATE wiring yet.
+    confirm = _source(
+        _REPO_ROOT / Path("app/schemas/self_booking_confirm_action.py")
+    )
+    assert "CONFIRM_SELECTED_SLOT" in confirm
+    assert "personal_data_consent" in confirm
+    assert "idempotency_key" not in confirm
+    assert "phone_ref" not in confirm
+    assert "name_ref" not in confirm
+    assert "starts_at" not in confirm
+    assert "admit_confirmed" not in inbound
+    assert ".confirm_selected_slot" not in inbound
+    assert "SelfBookingCreatePending" not in inbound
 
 
 def test_booking_create_http_has_no_automatic_retry_or_uuid_mint() -> None:

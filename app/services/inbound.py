@@ -48,7 +48,11 @@ class InboundService:
     """Persist synthetic inbound events and advance reply orchestration.
 
     Optional typed ``booking`` fixtures are copied into CLIENT_REPLY payloads
-    only (never inferred from text). No AI, live booking HTTP, or client send.
+    only (never inferred from text). Optional structured ``action``
+    (CONFIRM_SELECTED_SLOT) is accepted as an explicit field only — never
+    inferred from text/LLM — and does not invoke pending admission or CREATE.
+    New non-confirm inbound invalidates the active offer snapshot; confirm
+    inbound preserves it. No AI, live booking HTTP, or client send.
     INTERNAL_DRAFT remains a manager-hint artifact; CLIENT_REPLY ReplyPlan is
     the orchestration unit for 01C / CURSOR-20.
     """
@@ -137,6 +141,16 @@ class InboundService:
                 self._session,
                 conversation_id=conversation.id,
             )
+            # SELF-BOOKING-COMMAND-03D: confirm preserves active offer;
+            # any other new inbound clears it. No PII/admission on this path.
+            if not event.preserves_active_offer():
+                from app.services.self_booking_active_offer import (
+                    SelfBookingActiveOfferService,
+                )
+
+                await SelfBookingActiveOfferService(self._session).invalidate(
+                    conversation_id=conversation.id,
+                )
             if conversation_allows_automatic_reply(conversation):
                 reply_plan = await reply_plan_repo.create_client_reply_plan(
                     self._session,
