@@ -6,7 +6,6 @@ Does not touch ingress, Inbox, outbox, confirm actions, or booking CREATE.
 
 from __future__ import annotations
 
-import re
 import uuid
 from uuid import UUID
 
@@ -24,16 +23,14 @@ from app.core.pii_admission_mac import (
 from app.core.pii_admission_mac_keys import PiiAdmissionMacKeyProvider
 from app.core.pii_admission_mac_types import PiiAdmissionMacError
 from app.core.self_booking_pii_admission_types import (
-    REQUEST_ID_MAX_LENGTH,
     PiiAdmissionError,
     PiiAdmissionResult,
+    require_pii_admission_request_id,
 )
 from app.db.session import session_scope
 from app.models.self_booking_pii_admission import SelfBookingPiiAdmission
 from app.repositories import self_booking_pii_admissions as admission_repo
 from app.services.ephemeral_pii_store import EphemeralPiiStore
-
-_REQUEST_ID_RE = re.compile(r"^[!-~]+$")
 
 
 class _ConcurrentAdmission(Exception):
@@ -244,13 +241,10 @@ def _require_conversation_id(value: object) -> UUID:
 
 
 def _require_request_id(value: object) -> str:
-    if type(value) is not str or value == "":
+    try:
+        return require_pii_admission_request_id(value)
+    except ValueError:
         raise PiiAdmissionError("PII_ADMISSION_INPUT_INVALID") from None
-    if len(value) > REQUEST_ID_MAX_LENGTH:
-        raise PiiAdmissionError("PII_ADMISSION_INPUT_INVALID") from None
-    if _REQUEST_ID_RE.fullmatch(value) is None:
-        raise PiiAdmissionError("PII_ADMISSION_INPUT_INVALID") from None
-    return value
 
 
 def _canonicalize_pii(*, phone: object, client_name: object) -> tuple[str, str]:

@@ -344,6 +344,8 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
     )
     assert "CONFIRM_SELECTED_SLOT" in confirm
     assert "personal_data_consent" in confirm
+    assert "pii_admission_request_id" in confirm
+    assert "require_pii_admission_request_id" in confirm
     assert "idempotency_key" not in confirm
     assert "phone_ref" not in confirm
     assert "name_ref" not in confirm
@@ -351,6 +353,7 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
     assert "admit_confirmed" not in inbound
     assert ".confirm_selected_slot" not in inbound
     assert "SelfBookingCreatePending" not in inbound
+    assert "SelfBookingPiiAdmissionService" not in confirm
     # PII admission is a separate pre-durability boundary (03H), not confirm wiring.
     pii_adm = _source(
         _REPO_ROOT / Path("app/services/self_booking_pii_admission.py")

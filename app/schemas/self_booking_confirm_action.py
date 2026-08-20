@@ -1,9 +1,11 @@
-"""External structured confirm action for synthetic inbound (SELF-BOOKING-COMMAND-03D).
+"""External structured confirm action for synthetic inbound (SELF-BOOKING-COMMAND-03D/03J).
 
 CONFIRM_SELECTED_SLOT is an explicit action field — never inferred from text/LLM.
 Envelope supplies channel / external_message_id / external_conversation_id.
-Forbidden on this contract: wall-clock slot time, plaintext PII, PII refs,
-idempotency key. Schema-only stage: no pending admission and no CREATE.
+Required ``pii_admission_request_id`` is an opaque request identity only (same
+canonical contract as PII admission). Forbidden on this contract: wall-clock
+slot time, plaintext PII, PII refs, idempotency key. Schema-only stage: no PII
+lookup, no pending admission, and no CREATE.
 """
 
 from __future__ import annotations
@@ -14,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.booking_create_remote import parse_bot_slot_id
 from app.core.self_booking_create_types import require_true_consent
+from app.core.self_booking_pii_admission_types import (
+    REQUEST_ID_MAX_LENGTH,
+    require_pii_admission_request_id,
+)
 
 __all__ = (
     "CONFIRM_SELECTED_SLOT_KIND",
@@ -32,6 +38,9 @@ class SyntheticConfirmSelectedSlotAction(BaseModel):
 
     kind: Literal["CONFIRM_SELECTED_SLOT"]
     slot_id: str = Field(min_length=1, max_length=_MAX_SLOT_ID_LENGTH)
+    pii_admission_request_id: str = Field(
+        min_length=1, max_length=REQUEST_ID_MAX_LENGTH
+    )
     personal_data_consent: Literal[True]
     offer_acknowledgement: Literal[True]
 
@@ -46,6 +55,14 @@ class SyntheticConfirmSelectedSlotAction(BaseModel):
             raise ValueError("slot_id invalid") from exc
         return value
 
+    @field_validator("pii_admission_request_id")
+    @classmethod
+    def _canonical_pii_admission_request_id(cls, value: object) -> str:
+        try:
+            return require_pii_admission_request_id(value)
+        except ValueError as exc:
+            raise ValueError("pii_admission_request_id invalid") from exc
+
     @field_validator("personal_data_consent", "offer_acknowledgement", mode="before")
     @classmethod
     def _exact_true_consent(cls, value: object) -> Literal[True]:
@@ -58,6 +75,7 @@ class SyntheticConfirmSelectedSlotAction(BaseModel):
         return {
             "kind": self.kind,
             "slot_id": self.slot_id,
+            "pii_admission_request_id": self.pii_admission_request_id,
             "personal_data_consent": True,
             "offer_acknowledgement": True,
         }
@@ -66,6 +84,7 @@ class SyntheticConfirmSelectedSlotAction(BaseModel):
         return {
             "kind": self.kind,
             "slot_id": "<redacted>",
+            "pii_admission_request_id": "<redacted>",
             "personal_data_consent": True,
             "offer_acknowledgement": True,
         }
