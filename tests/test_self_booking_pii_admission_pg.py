@@ -45,6 +45,14 @@ _MAC_KEY2_B64 = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"
 _TTL_SECONDS = 900
 
 
+def _as_uuid(value: object) -> uuid.UUID:
+    """Builtin uuid.UUID for strict PII admission / store exact-type checks."""
+
+    if type(value) is uuid.UUID:
+        return value
+    return uuid.UUID(str(value))
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def pii_admission_row_cleanup(
     request: pytest.FixtureRequest,
@@ -150,14 +158,14 @@ async def test_first_admission_stores_pair_and_map(
     request_id = f"req-{uuid.uuid4().hex[:12]}"
 
     result = await service.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=request_id,
         phone=_PHONE,
         client_name=_NAME,
     )
 
     assert result.reused is False
-    assert result.conversation_id == conversation.id
+    assert result.conversation_id == _as_uuid(conversation.id)
     assert result.request_id == request_id
     phone_ref = EphemeralPiiReference.parse(result.phone_ref_token)
     name_ref = EphemeralPiiReference.parse(result.name_ref_token)
@@ -207,7 +215,7 @@ async def test_first_admission_stores_pair_and_map(
 
     plaintext = await _pii_store(session_factory).read_plaintext(
         phone_ref,
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         kind=EphemeralPiiKind.PHONE,
         purpose=EphemeralPiiPurpose.BOOKING_PHONE_WRITE,
     )
@@ -223,13 +231,13 @@ async def test_exact_replay_returns_same_refs(
     request_id = f"req-{uuid.uuid4().hex[:12]}"
 
     first = await service.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=request_id,
         phone="8 (900) 123-45-67",
         client_name="  Test   Client ",
     )
     second = await service.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=request_id,
         phone=_PHONE,
         client_name=_NAME,
@@ -257,14 +265,14 @@ async def test_conflicting_replay_fail_closed(
     request_id = f"req-{uuid.uuid4().hex[:12]}"
 
     await service.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=request_id,
         phone=_PHONE,
         client_name=_NAME,
     )
     with pytest.raises(PiiAdmissionError) as exc_info:
         await service.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=request_id,
             phone=_PHONE_ALT,
             client_name=_NAME_ALT,
@@ -294,7 +302,7 @@ async def test_transaction_rollback_leaves_no_partial_state(
     )
     with pytest.raises(PiiAdmissionError) as exc_info:
         await service.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=request_id,
             phone=_PHONE,
             client_name=_NAME,
@@ -320,13 +328,13 @@ async def test_concurrent_duplicate_one_winner_same_refs(
 
     results = await asyncio.gather(
         service.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=request_id,
             phone=_PHONE,
             client_name=_NAME,
         ),
         service.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=request_id,
             phone=_PHONE,
             client_name=_NAME,
@@ -354,7 +362,7 @@ async def test_expired_ciphertext_fail_closed_no_reissue(
     request_id = f"req-{uuid.uuid4().hex[:12]}"
 
     first = await service.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=request_id,
         phone=_PHONE,
         client_name=_NAME,
@@ -370,7 +378,7 @@ async def test_expired_ciphertext_fail_closed_no_reissue(
 
     with pytest.raises(PiiAdmissionError) as exc_info:
         await service.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=request_id,
             phone=_PHONE,
             client_name=_NAME,
@@ -400,7 +408,7 @@ async def test_missing_ciphertext_fail_closed(
     request_id = f"req-{uuid.uuid4().hex[:12]}"
 
     await service.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=request_id,
         phone=_PHONE,
         client_name=_NAME,
@@ -411,7 +419,7 @@ async def test_missing_ciphertext_fail_closed(
 
     with pytest.raises(PiiAdmissionError) as exc_info:
         await service.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=request_id,
             phone=_PHONE,
             client_name=_NAME,
@@ -429,7 +437,7 @@ async def test_mac_key_rotation_replay_conflict_and_new_request(
 
     service_k1 = _service(session_factory, mac_environ=_mac_env_k1())
     first = await service_k1.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=old_request,
         phone=_PHONE,
         client_name=_NAME,
@@ -439,7 +447,7 @@ async def test_mac_key_rotation_replay_conflict_and_new_request(
         session_factory, mac_environ=_mac_env_rotated_keep_k1()
     )
     replay = await service_k2.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=old_request,
         phone=_PHONE,
         client_name=_NAME,
@@ -450,7 +458,7 @@ async def test_mac_key_rotation_replay_conflict_and_new_request(
 
     with pytest.raises(PiiAdmissionError) as conflict:
         await service_k2.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=old_request,
             phone=_PHONE_ALT,
             client_name=_NAME_ALT,
@@ -458,7 +466,7 @@ async def test_mac_key_rotation_replay_conflict_and_new_request(
     assert conflict.value.code == "PII_ADMISSION_CONFLICT"
 
     created = await service_k2.admit(
-        conversation_id=conversation.id,
+        conversation_id=_as_uuid(conversation.id),
         request_id=new_request,
         phone=_PHONE,
         client_name=_NAME,
@@ -489,7 +497,7 @@ async def test_mac_key_rotation_replay_conflict_and_new_request(
     )
     with pytest.raises(PiiAdmissionError) as missing:
         await service_dropped.admit(
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             request_id=old_request,
             phone=_PHONE,
             client_name=_NAME,
