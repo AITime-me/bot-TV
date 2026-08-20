@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Final
 from uuid import UUID
@@ -17,6 +18,22 @@ _ALLOWED_ERROR_CODES: Final[frozenset[str]] = frozenset(
 )
 
 REQUEST_ID_MAX_LENGTH: Final[int] = 128
+_REQUEST_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[!-~]+$")
+
+
+def require_pii_admission_request_id(value: object) -> str:
+    """Canonical opaque request_id for PII admission and CONFIRM binding.
+
+    Printable ASCII only, length 1..REQUEST_ID_MAX_LENGTH. Not PII and not a ref.
+    """
+
+    if type(value) is not str or value == "":
+        raise ValueError("request_id invalid")
+    if len(value) > REQUEST_ID_MAX_LENGTH:
+        raise ValueError("request_id invalid")
+    if _REQUEST_ID_RE.fullmatch(value) is None:
+        raise ValueError("request_id invalid")
+    return value
 
 
 class PiiAdmissionError(RuntimeError):

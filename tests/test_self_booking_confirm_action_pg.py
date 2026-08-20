@@ -142,6 +142,7 @@ async def test_confirm_inbound_preserves_active_offer(
                     {
                         "kind": "CONFIRM_SELECTED_SLOT",
                         "slot_id": _SLOT,
+                        "pii_admission_request_id": f"pii-req-{uuid.uuid4().hex[:10]}",
                         "personal_data_consent": True,
                         "offer_acknowledgement": True,
                     }

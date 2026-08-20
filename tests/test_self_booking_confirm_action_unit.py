@@ -1,4 +1,4 @@
-"""Unit tests for SELF-BOOKING-COMMAND-03D structured confirm action."""
+"""Unit tests for SELF-BOOKING-COMMAND-03D/03J structured confirm action."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from app.core.self_booking_pii_admission_types import (
+    REQUEST_ID_MAX_LENGTH,
+    require_pii_admission_request_id,
+)
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.ingress import SyntheticIngressEvent
 from app.schemas.self_booking_confirm_action import (
@@ -19,12 +23,14 @@ _REPO = Path(__file__).resolve().parents[1]
 _SERVICE = "11111111-1111-4111-8111-111111111111"
 _MASTER = "22222222-2222-4222-8222-222222222222"
 _SLOT = f"bs1.{_SERVICE}.{_MASTER}.2026-08-20.1000"
+_PII_REQ = "pii-req-confirm-1"
 
 
 def _valid_action(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "kind": CONFIRM_SELECTED_SLOT_KIND,
         "slot_id": _SLOT,
+        "pii_admission_request_id": _PII_REQ,
         "personal_data_consent": True,
         "offer_acknowledgement": True,
     }
@@ -36,8 +42,16 @@ def test_confirm_action_accepts_exact_true_consents_and_canonical_slot() -> None
     action = SyntheticConfirmSelectedSlotAction.model_validate(_valid_action())
     assert action.kind == "CONFIRM_SELECTED_SLOT"
     assert action.slot_id == _SLOT
+    assert action.pii_admission_request_id == _PII_REQ
     assert action.personal_data_consent is True
     assert action.offer_acknowledgement is True
+
+
+def test_confirm_requires_canonical_pii_admission_request_id() -> None:
+    action = SyntheticConfirmSelectedSlotAction.model_validate(_valid_action())
+    assert action.pii_admission_request_id == require_pii_admission_request_id(
+        _PII_REQ
+    )
 
 
 @pytest.mark.parametrize(
@@ -59,6 +73,33 @@ def test_confirm_action_rejects_invalid_consents_and_slot_ids(
 ) -> None:
     with pytest.raises(ValidationError):
         SyntheticConfirmSelectedSlotAction.model_validate(_valid_action(**overrides))
+
+
+@pytest.mark.parametrize(
+    "bad_request_id",
+    [
+        "",
+        " ",
+        "req id",
+        "req\nid",
+        "req\x00",
+        "требование",
+        "x" * (REQUEST_ID_MAX_LENGTH + 1),
+        123,
+        True,
+        None,
+    ],
+)
+def test_confirm_rejects_missing_or_invalid_pii_admission_request_id(
+    bad_request_id: object,
+) -> None:
+    payload = _valid_action()
+    if bad_request_id is None:
+        del payload["pii_admission_request_id"]
+    else:
+        payload["pii_admission_request_id"] = bad_request_id  # type: ignore[assignment]
+    with pytest.raises(ValidationError):
+        SyntheticConfirmSelectedSlotAction.model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -102,7 +143,9 @@ def test_inbound_action_uses_envelope_ids_not_action_body() -> None:
     }
     assert "action" not in payload
     assert "slot_id" not in payload
+    assert "pii_admission_request_id" not in payload
     assert _SLOT not in repr(event)
+    assert _PII_REQ not in repr(event)
     assert event.redacted_view()["action_kind"] == "CONFIRM_SELECTED_SLOT"
 
 
@@ -138,8 +181,13 @@ def test_ingress_envelope_roundtrips_action_without_admit_fields() -> None:
     envelope = ingress.safe_envelope()
     assert envelope["action"]["kind"] == "CONFIRM_SELECTED_SLOT"
     assert envelope["action"]["slot_id"] == _SLOT
+    assert envelope["action"]["pii_admission_request_id"] == _PII_REQ
     assert "starts_at" not in envelope["action"]
     assert "idempotency_key" not in envelope["action"]
+    assert "phone" not in envelope["action"]
+    assert "client_name" not in envelope["action"]
+    assert "phone_ref_token" not in envelope["action"]
+    assert "name_ref_token" not in envelope["action"]
     inbound = SyntheticInboundEvent(
         channel="synthetic",
         external_conversation_id=ingress.external_conversation_id,
@@ -150,6 +198,9 @@ def test_ingress_envelope_roundtrips_action_without_admit_fields() -> None:
         ),
     )
     assert inbound.preserves_active_offer() is True
+    assert inbound.action is not None
+    assert inbound.action.pii_admission_request_id == _PII_REQ
+    assert "pii_admission_request_id" not in inbound.safe_payload()
     plan = client_reply_plan_payload(inbox_id="inbox-x", booking=inbound.booking)
     assert "booking" not in plan or plan.get("booking") is None
 
@@ -159,9 +210,14 @@ def test_confirm_schema_source_has_no_admit_or_create_hooks() -> None:
         encoding="utf-8"
     )
     inbound = (_REPO / "app/services/inbound.py").read_text(encoding="utf-8")
+    assert "require_pii_admission_request_id" in confirm
+    assert "pii_admission_request_id" in confirm
     assert "admit_confirmed" not in confirm
     assert ".confirm_selected_slot" not in confirm
+    assert "SelfBookingPiiAdmissionService" not in confirm
+    assert "admit(" not in confirm
     assert "admit_confirmed" not in inbound
     assert ".confirm_selected_slot" not in inbound
+    assert "SelfBookingPiiAdmissionService" not in inbound
     assert "preserves_active_offer" in inbound
     assert "SelfBookingActiveOfferService" in inbound
