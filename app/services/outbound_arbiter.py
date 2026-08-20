@@ -162,6 +162,27 @@ class OutboundArbiter:
                 lease_version=claim.lease_version,
                 now=now,
             )
+            # SELF-BOOKING-COMMAND-03C: same UoW as mark_delivered.
+            # OFFER_SLOTS bind failures must roll back DELIVERED (no swallow).
+            # Non-offer outbounds return REJECTED/NOT_OFFER_SLOTS and continue.
+            from app.core.self_booking_active_offer_types import (
+                ActiveOfferActivateOutcome,
+            )
+            from app.services.self_booking_active_offer import (
+                SelfBookingActiveOfferService,
+            )
+
+            activate_result = await SelfBookingActiveOfferService(
+                session
+            ).activate_from_delivered_outbound(outbound=delivered)
+            if activate_result.outcome is ActiveOfferActivateOutcome.REJECTED:
+                if activate_result.reason_code != "NOT_OFFER_SLOTS":
+                    raise OutboundArbiterDenied(
+                        (
+                            "ACTIVE_OFFER_"
+                            f"{activate_result.reason_code or 'REJECTED'}"
+                        )[:64]
+                    )
             correlation_id = (
                 delivered.correlation_id
                 if delivered.correlation_id is not None
