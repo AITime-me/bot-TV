@@ -56,6 +56,14 @@ _NOW = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 _KEY_B64 = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
 
 
+def _as_uuid(value: object) -> uuid.UUID:
+    """Builtin uuid.UUID for EphemeralPiiStore exact-type checks (ORM/asyncpg)."""
+
+    if type(value) is uuid.UUID:
+        return value
+    return uuid.UUID(str(value))
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def self_booking_exec_cleanup(
     request: pytest.FixtureRequest,
@@ -144,18 +152,19 @@ async def _seed_conversation(
 async def _store_pii(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    conversation_id: uuid.UUID,
+    conversation_id: object,
 ) -> tuple[str, str]:
+    cid = _as_uuid(conversation_id)
     store = _pii_store(session_factory)
     phone_h = await store.store(
         _PHONE,
-        conversation_id=conversation_id,
+        conversation_id=cid,
         kind=EphemeralPiiKind.PHONE,
         purpose=_SELF_BOOKING_PII_PURPOSE,
     )
     name_h = await store.store(
         _NAME,
-        conversation_id=conversation_id,
+        conversation_id=cid,
         kind=EphemeralPiiKind.CLIENT_NAME,
         purpose=_SELF_BOOKING_PII_PURPOSE,
     )
@@ -456,7 +465,7 @@ async def test_terminal_success_pii_lifecycle(
         assert (
             await store.read_plaintext(
                 EphemeralPiiReference.parse(phone_ref),
-                conversation_id=conversation.id,
+                conversation_id=_as_uuid(conversation.id),
                 kind=EphemeralPiiKind.PHONE,
                 purpose=_SELF_BOOKING_PII_PURPOSE,
             )
@@ -470,14 +479,14 @@ async def test_terminal_success_pii_lifecycle(
     with pytest.raises(Exception):
         await store.read_plaintext(
             EphemeralPiiReference.parse(phone_ref),
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             kind=EphemeralPiiKind.PHONE,
             purpose=_SELF_BOOKING_PII_PURPOSE,
         )
     with pytest.raises(Exception):
         await store.read_plaintext(
             EphemeralPiiReference.parse(name_ref),
-            conversation_id=conversation.id,
+            conversation_id=_as_uuid(conversation.id),
             kind=EphemeralPiiKind.CLIENT_NAME,
             purpose=_SELF_BOOKING_PII_PURPOSE,
         )
