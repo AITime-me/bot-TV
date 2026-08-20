@@ -132,6 +132,7 @@ def test_create_app_enabled_registers_routes(monkeypatch: pytest.MonkeyPatch) ->
     paths = _closed_test_paths(application)
     assert "/internal/closed-test/events" in paths
     assert "/internal/closed-test/events/{event_id}" in paths
+    assert "/internal/closed-test/pii-admissions" in paths
     # Reachable (auth runs) — not a bare 404 from missing registration.
     client = TestClient(application)
     response = client.post(
