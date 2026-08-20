@@ -120,6 +120,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_self_booking_active_offer = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.self_booking_active_offers') "
+                    "IS NOT NULL"
+                )
+            )
             has_identity_links = await session.scalar(
                 text(
                     "SELECT to_regclass('public.external_identity_links') "
@@ -179,6 +185,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "master_command_pendings")
             if has_self_booking_create:
                 tables.insert(0, "self_booking_create_pendings")
+            if has_self_booking_active_offer:
+                tables.insert(0, "self_booking_active_offers")
             if has_master_bindings:
                 tables.insert(0, "master_channel_bindings")
             if has_identity_review_cases:

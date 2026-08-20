@@ -40,6 +40,8 @@ from tests.pg_harness import truncate_foundation_tables
 _SERVICE = "11111111-1111-4111-8111-111111111111"
 _MASTER = "22222222-2222-4222-8222-222222222222"
 _SLOT_START = datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc)
+# Canonical bs1 slot: UTC 05:00 → studio 10:00+05:00 on 2026-08-06.
+_SLOT_ID = f"bs1.{_SERVICE}.{_MASTER}.2026-08-06.1000"
 _DECISION_AT = datetime(2026, 8, 5, 12, 0, tzinfo=timezone(timedelta(hours=5)))
 
 
@@ -88,7 +90,7 @@ def _booking_inbound(event_id: str, conv: str = "durable-text-conv") -> Syntheti
             alternate_master_consent=False,
             slots=(
                 SyntheticBookingSlot(
-                    slot_id="durable-s1",
+                    slot_id=_SLOT_ID,
                     starts_at=_SLOT_START,
                     master_id=_MASTER,
                     service_id=_SERVICE,
@@ -187,7 +189,7 @@ async def test_booking_outbound_persists_exact_text_and_reclaim_uses_db_only(
         payload = dict(outbound.payload_json)
         assert payload.get("text") == expected_text
         assert payload.get("booking_action") == BookingDialogAction.OFFER_SLOTS.value
-        assert payload.get("booking_offered_slot_ids") == ["durable-s1"]
+        assert payload.get("booking_offered_slot_ids") == [_SLOT_ID]
         assert "booking_offered_slots" in payload
         assert payload.get("text") != "client-inbound-must-not-become-body"
         assert payload.get("text") != payload.get("synthetic_token")

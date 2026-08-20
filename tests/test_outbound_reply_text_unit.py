@@ -153,10 +153,16 @@ async def test_retry_delivery_uses_persisted_text_without_rerender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     persisted = "Могу предложить ближайшие свободные окна. Выберите удобное время."
+    service_id = "11111111-1111-4111-8111-111111111111"
+    master_id = "22222222-2222-4222-8222-222222222222"
+    slot_id = f"bs1.{service_id}.{master_id}.2026-08-20.1000"
+    starts_at = "2026-08-20T10:00:00+05:00"
     payload = {
         "schema": "synthetic.outbound.v1",
         "synthetic_token": "SYNTHETIC_OK",
         "booking_action": BookingDialogAction.OFFER_SLOTS.value,
+        "booking_offered_slot_ids": [slot_id],
+        "booking_offered_slots": [{"slot_id": slot_id, "starts_at": starts_at}],
         "text": persisted,
     }
 
@@ -212,8 +218,15 @@ async def test_retry_delivery_uses_persisted_text_without_rerender(
     outbound.lease_token = claim.lease_token
     outbound.lease_version = claim.lease_version
     outbound.context_version = 1
+    outbound.manager_epoch = 0
+    outbound.event_seq_hwm = 1
     outbound.correlation_id = claim.correlation_id
     outbound.payload_json = payload
+
+    async def _mark_delivered_with_lease(*_a: object, **_k: object) -> MagicMock:
+        # Honest mark_delivered_with_lease contract: ADMITTED → DELIVERED.
+        outbound.delivery_status = DeliveryStatus.DELIVERED.value
+        return outbound
 
     session = AsyncMock()
     session.get = AsyncMock(return_value=outbound)
@@ -230,16 +243,25 @@ async def test_retry_delivery_uses_persisted_text_without_rerender(
     )
     monkeypatch.setattr(
         "app.services.outbound_arbiter.outbound_repo.mark_delivered_with_lease",
-        AsyncMock(return_value=outbound),
+        AsyncMock(side_effect=_mark_delivered_with_lease),
     )
     monkeypatch.setattr(
         "app.services.outbound_arbiter.enqueue_outbound_delivered",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.repositories.self_booking_active_offers.upsert_if_newer_or_same_outbound",
+        AsyncMock(return_value="activated"),
+    )
+    monkeypatch.setattr(
+        "app.services.outbound_arbiter.enqueue_bot_outbound_projection",
         AsyncMock(),
     )
 
     result = await arbiter.admit_claimed(claim, now=_FIXED_NOW)
     assert result.admitted is True
     assert arbiter.sink.calls[0]._text == persisted
+    assert outbound.delivery_status == DeliveryStatus.DELIVERED.value
 
 
 def _fake_session_scope(session: AsyncMock):
