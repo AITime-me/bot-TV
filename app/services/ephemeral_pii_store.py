@@ -78,6 +78,131 @@ class EphemeralPiiStore:
         _require_kind(kind)
         _require_purpose(purpose)
 
+        handle: EphemeralPiiHandle | None = None
+        try:
+            async with session_scope(self._session_factory) as session:
+                handle = await self._store_one_in_session(
+                    session,
+                    plaintext,
+                    conversation_id=conversation_id,
+                    kind=kind,
+                    purpose=purpose,
+                )
+        except EphemeralPiiError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
+
+        if handle is None:
+            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
+        return handle
+
+    async def store_booking_phone_write_pair(
+        self,
+        session: AsyncSession,
+        phone: str,
+        client_name: str,
+        *,
+        conversation_id: UUID,
+    ) -> tuple[EphemeralPiiHandle, EphemeralPiiHandle]:
+        """Encrypt+insert PHONE and CLIENT_NAME in the caller UoW (no commit).
+
+        Purpose is fixed to BOOKING_PHONE_WRITE. Both rows flush in ``session``;
+        caller must commit or roll back atomically with any admission map row.
+        """
+
+        _require_plaintext(phone)
+        _require_plaintext(client_name)
+        _require_conversation_id(conversation_id)
+        if session is None:
+            raise EphemeralPiiError("EPHEMERAL_PII_CONFIG_INVALID") from None
+
+        purpose = EphemeralPiiPurpose.BOOKING_PHONE_WRITE
+        try:
+            phone_handle = await self._store_one_in_session(
+                session,
+                phone,
+                conversation_id=conversation_id,
+                kind=EphemeralPiiKind.PHONE,
+                purpose=purpose,
+            )
+            name_handle = await self._store_one_in_session(
+                session,
+                client_name,
+                conversation_id=conversation_id,
+                kind=EphemeralPiiKind.CLIENT_NAME,
+                purpose=purpose,
+            )
+        except EphemeralPiiError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
+        if phone_handle is None or name_handle is None:
+            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
+        return phone_handle, name_handle
+
+    async def booking_phone_write_pair_alive(
+        self,
+        session: AsyncSession,
+        *,
+        phone_ref_token: str,
+        name_ref_token: str,
+        conversation_id: UUID,
+    ) -> bool:
+        """True iff both unexpired ciphertext rows bind to conversation+purpose."""
+
+        _require_conversation_id(conversation_id)
+        purpose = EphemeralPiiPurpose.BOOKING_PHONE_WRITE
+        try:
+            phone_ref = EphemeralPiiReference.parse(phone_ref_token)
+            name_ref = EphemeralPiiReference.parse(name_ref_token)
+        except EphemeralPiiError:
+            return False
+        try:
+            phone_row = await ephemeral_pii_repo.select_for_read(
+                session,
+                reference_digest=phone_ref.digest(),
+            )
+            name_row = await ephemeral_pii_repo.select_for_read(
+                session,
+                reference_digest=name_ref.digest(),
+            )
+        except EphemeralPiiError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
+        if phone_row is None or name_row is None:
+            return False
+        return (
+            _bindings_match(
+                phone_row,
+                conversation_id,
+                EphemeralPiiKind.PHONE,
+                purpose,
+            )
+            and _bindings_match(
+                name_row,
+                conversation_id,
+                EphemeralPiiKind.CLIENT_NAME,
+                purpose,
+            )
+        )
+
+    async def _store_one_in_session(
+        self,
+        session: AsyncSession,
+        plaintext: str,
+        *,
+        conversation_id: UUID,
+        kind: EphemeralPiiKind,
+        purpose: EphemeralPiiPurpose,
+    ) -> EphemeralPiiHandle | None:
         active = self._key_provider.get_active_key()
         record_id = uuid.uuid4()
         aad = EphemeralPiiAad(
@@ -95,42 +220,29 @@ class EphemeralPiiStore:
             active_key=active,
         )
 
-        handle: EphemeralPiiHandle | None = None
-        try:
-            async with session_scope(self._session_factory) as session:
-                for _ in range(MAX_REFERENCE_COLLISION_RETRIES):
-                    reference = self._reference_factory()
-                    digest = reference.digest()
-                    inserted = await ephemeral_pii_repo.insert_if_reference_available(
-                        session,
-                        row_id=record_id,
-                        reference_digest=digest,
-                        conversation_id=conversation_id,
-                        pii_kind=kind.value,
-                        allowed_purpose=purpose.value,
-                        ciphertext=encrypted.ciphertext,
-                        nonce=encrypted.nonce,
-                        key_id=encrypted.key_id,
-                        crypto_version=encrypted.crypto_version,
-                        ttl_seconds=self._ttl_policy.ttl_seconds,
-                    )
-                    if inserted:
-                        handle = EphemeralPiiHandle(
-                            reference=reference,
-                            kind=kind,
-                            purpose=purpose,
-                        )
-                        break
-        except EphemeralPiiError:
-            raise
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
-
-        if handle is None:
-            raise EphemeralPiiError("EPHEMERAL_PII_STORE_FAILED") from None
-        return handle
+        for _ in range(MAX_REFERENCE_COLLISION_RETRIES):
+            reference = self._reference_factory()
+            digest = reference.digest()
+            inserted = await ephemeral_pii_repo.insert_if_reference_available(
+                session,
+                row_id=record_id,
+                reference_digest=digest,
+                conversation_id=conversation_id,
+                pii_kind=kind.value,
+                allowed_purpose=purpose.value,
+                ciphertext=encrypted.ciphertext,
+                nonce=encrypted.nonce,
+                key_id=encrypted.key_id,
+                crypto_version=encrypted.crypto_version,
+                ttl_seconds=self._ttl_policy.ttl_seconds,
+            )
+            if inserted:
+                return EphemeralPiiHandle(
+                    reference=reference,
+                    kind=kind,
+                    purpose=purpose,
+                )
+        return None
 
     async def read_plaintext(
         self,
