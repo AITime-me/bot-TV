@@ -99,3 +99,59 @@ class ClosedTestEventStatus(BaseModel):
     reply_plan: ClosedTestStageReplyPlan | None = None
     outbound: ClosedTestStageOutbound | None = None
     synthetic_result: dict[str, Any] | None = None
+
+
+class ClosedTestPiiAdmissionCreate(BaseModel):
+    """Pre-durability PII admission intake. Never persisted to ingress/Inbox."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128)
+    client_name: str = Field(min_length=1, max_length=256, repr=False)
+    phone: str = Field(min_length=1, max_length=32, repr=False)
+
+    @field_validator("session_id", "request_id")
+    @classmethod
+    def _safe_id(cls, value: str) -> str:
+        if _SAFE_ID_RE.fullmatch(value) is None:
+            raise ValueError("id must be ASCII alphanumeric with -/_")
+        return value
+
+    @field_validator("client_name", "phone")
+    @classmethod
+    def _no_control_chars(cls, value: str) -> str:
+        if any(ord(ch) < 32 for ch in value):
+            raise ValueError("value contains control characters")
+        return value
+
+    def __repr__(self) -> str:
+        return (
+            "ClosedTestPiiAdmissionCreate("
+            f"session_id={self.session_id!r}, "
+            f"request_id={self.request_id!r}, "
+            "client_name=<redacted>, "
+            "phone=<redacted>)"
+        )
+
+
+class ClosedTestPiiAdmissionAck(BaseModel):
+    """Safe PII admission acknowledgement — never returns opaque refs or PII."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    reused: bool
+    session_id: str
+    request_id: str
+    status: Literal["ADMITTED", "REUSED"]
+
+    def __repr__(self) -> str:
+        return (
+            "ClosedTestPiiAdmissionAck("
+            f"accepted={self.accepted!r}, "
+            f"reused={self.reused!r}, "
+            f"session_id={self.session_id!r}, "
+            f"request_id={self.request_id!r}, "
+            f"status={self.status!r})"
+        )

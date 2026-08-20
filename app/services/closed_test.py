@@ -14,16 +14,20 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.self_booking_pii_admission_types import PiiAdmissionError
 from app.db.session import session_scope
 from app.models.conversation import Channel
 from app.models.outbox import DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan
+from app.repositories import conversations as conversation_repo
 from app.repositories import ingress as ingress_repo
 from app.repositories import messages as messages_repo
 from app.schemas.closed_test import (
     ClosedTestEventAck,
     ClosedTestEventCreate,
     ClosedTestEventStatus,
+    ClosedTestPiiAdmissionAck,
+    ClosedTestPiiAdmissionCreate,
     ClosedTestStageInbound,
     ClosedTestStageIngress,
     ClosedTestStageOutbound,
@@ -32,6 +36,7 @@ from app.schemas.closed_test import (
 from app.schemas.ingress import SyntheticIngressEvent
 from app.services.booking_synthetic import sanitize_booking_result_fields
 from app.services.ingress import IngressPersistError, SyntheticIngressAdapter
+from app.services.self_booking_pii_admission import SelfBookingPiiAdmissionService
 
 _SAFE_RESULT_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -58,6 +63,16 @@ class ClosedTestIdempotencyConflict(Exception):
 
     def __repr__(self) -> str:
         return "ClosedTestIdempotencyConflict('IDEMPOTENCY_CONFLICT')"
+
+
+class ClosedTestConversationNotFound(Exception):
+    """session_id does not map to an existing synthetic conversation."""
+
+    def __init__(self) -> None:
+        super().__init__("CONVERSATION_NOT_FOUND")
+
+    def __repr__(self) -> str:
+        return "ClosedTestConversationNotFound('CONVERSATION_NOT_FOUND')"
 
 
 def project_safe_synthetic_result(payload: object) -> dict[str, Any] | None:
@@ -132,6 +147,50 @@ class ClosedTestService:
             event_id=ack.event_id,
             status=ack.status,
             correlation_id=ack.correlation_id,
+        )
+
+    async def admit_pii(
+        self,
+        body: ClosedTestPiiAdmissionCreate,
+        *,
+        admission: SelfBookingPiiAdmissionService,
+    ) -> ClosedTestPiiAdmissionAck:
+        """Admit phone/name for an existing synthetic conversation only.
+
+        Does not create conversations, write ingress/Inbox/outbox, or return
+        opaque PII refs.
+        """
+
+        async with session_scope(self._session_factory) as session:
+            conversation = await conversation_repo.get_by_channel_external(
+                session,
+                channel=Channel.SYNTHETIC,
+                external_conversation_id=body.session_id,
+            )
+            if conversation is None:
+                raise ClosedTestConversationNotFound()
+            conversation_id = (
+                conversation.id
+                if type(conversation.id) is uuid.UUID
+                else uuid.UUID(str(conversation.id))
+            )
+
+        try:
+            result = await admission.admit(
+                conversation_id=conversation_id,
+                request_id=body.request_id,
+                phone=body.phone,
+                client_name=body.client_name,
+            )
+        except PiiAdmissionError:
+            raise
+
+        return ClosedTestPiiAdmissionAck(
+            accepted=True,
+            reused=result.reused,
+            session_id=body.session_id,
+            request_id=result.request_id,
+            status="REUSED" if result.reused else "ADMITTED",
         )
 
     async def _assert_duplicate_matches(
