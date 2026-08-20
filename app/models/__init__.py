@@ -73,6 +73,7 @@ from app.models.canonical_identity import CanonicalIdentity, ExternalIdentityLin
 from app.models.identity_review_case import IdentityReviewCase
 from app.models.master_channel_binding import MasterChannelBinding
 from app.models.master_command_pending import MasterCommandPending
+from app.models.self_booking_create_pending import SelfBookingCreatePending
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
     DeliveryStatus,
@@ -158,6 +159,7 @@ __all__ = [
     "IdentityReviewCase",
     "MasterChannelBinding",
     "MasterCommandPending",
+    "SelfBookingCreatePending",
     "MirrorPayloadViolation",
     "OutboxMessage",
     "OUTBOUND_LOOP",
