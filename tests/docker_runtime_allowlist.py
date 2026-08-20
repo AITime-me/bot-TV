@@ -200,6 +200,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/master_channel_binding.py",
     "!app/services/master_command_flow.py",
     "!app/services/self_booking_create_pending.py",
+    "!app/services/self_booking_create_execution.py",
     "!app/services/vk_master_adapter.py",
     "!app/services/outbound_arbiter.py",
     "!app/services/reply_outbound.py",

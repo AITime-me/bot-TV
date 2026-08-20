@@ -1,7 +1,8 @@
-"""Self-booking confirmed-create pending types (SELF-BOOKING-COMMAND-01).
+"""Self-booking confirmed-create pending types (SELF-BOOKING-COMMAND-01/02).
 
-Durable foundation only: confirmation admission, lease, fence cancel.
-No dialog wiring, Booking HTTP, PII plaintext read, or CRM.
+COMMAND-01: confirmation admission, lease, fence cancel.
+COMMAND-02: execution outcome types for claim → CREATE → terminal/retry.
+No dialog admission, ReplyPlan, CRM, or online-zapis-tv changes.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ __all__ = (
     "TERMINAL_SELF_BOOKING_CREATE_STATES",
     "SelfBookingCreateAdmitOutcome",
     "SelfBookingCreateAdmitResult",
+    "SelfBookingCreateExecutionOutcome",
+    "SelfBookingCreateExecutionResult",
     "SelfBookingCreatePendingState",
     "SelfBookingCreateSafeSelection",
     "normalize_confirm_external_message_id",
@@ -82,6 +85,40 @@ class SelfBookingCreateAdmitOutcome(str, enum.Enum):
     CONVERSATION_MISSING = "CONVERSATION_MISSING"
     FENCE_STALE = "FENCE_STALE"
     HANDOFF_BLOCKED = "HANDOFF_BLOCKED"
+
+
+class SelfBookingCreateExecutionOutcome(str, enum.Enum):
+    """Machine-facing execution outcomes (COMMAND-02)."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+    RETRY_SCHEDULED = "RETRY_SCHEDULED"
+    CLAIM_DENIED = "CLAIM_DENIED"
+    LEASE_MISMATCH = "LEASE_MISMATCH"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SelfBookingCreateExecutionResult:
+    outcome: SelfBookingCreateExecutionOutcome
+    pending_id: uuid.UUID | None = None
+    pending_state: SelfBookingCreatePendingState | None = None
+    result_code: str | None = None
+    idempotency_key: str | None = None
+    booking_id: str | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "SelfBookingCreateExecutionResult("
+            f"outcome={self.outcome.value!r}, "
+            "pending_id=<redacted>, "
+            f"pending_state="
+            f"{None if self.pending_state is None else self.pending_state.value!r}, "
+            f"result_code={self.result_code!r}, "
+            "idempotency_key=<redacted>, "
+            "booking_id=<redacted>)"
+        )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
