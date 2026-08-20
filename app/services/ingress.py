@@ -21,6 +21,7 @@ from app.repositories.ingress import (
     StaleIngressLeaseError,
 )
 from app.schemas.booking_input import SyntheticBookingInput
+from app.schemas.self_booking_confirm_action import SyntheticConfirmSelectedSlotAction
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.ingress import SyntheticIngressEvent
 from app.schemas.manager_message import SyntheticManagerMessageEvent
@@ -364,14 +365,23 @@ def _envelope_to_inbound(claim: IngressClaim) -> SyntheticInboundEvent:
             booking = SyntheticBookingInput.model_validate(booking_raw)
         except Exception as exc:
             raise ValueError("INGRESS_BOOKING_INVALID") from exc
+    action_raw = envelope.get("action")
+    action = None
+    if action_raw is not None:
+        try:
+            action = SyntheticConfirmSelectedSlotAction.model_validate(action_raw)
+        except Exception as exc:
+            raise ValueError("INGRESS_ACTION_INVALID") from exc
     # external_message_id reuses the durable provider event id so inbox
     # uniqueness aligns with ingress uniqueness for synthetic traffic.
+    # channel / external ids come from the durable claim envelope, not action body.
     return SyntheticInboundEvent(
         channel="synthetic",
         external_conversation_id=claim.external_conversation_id,
         external_message_id=claim.external_event_id,
         text=text,
         booking=booking,
+        action=action,
     )
 
 

@@ -3,12 +3,13 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 from app.models.ingress import IngressEventType
 from app.schemas.booking_input import SyntheticBookingInput
+from app.schemas.self_booking_confirm_action import SyntheticConfirmSelectedSlotAction
 
 
 class SyntheticIngressEvent(BaseModel):
@@ -17,7 +18,8 @@ class SyntheticIngressEvent(BaseModel):
     extra="forbid" rejects PII-shaped fields (phone, email, token, signature).
     Text is kept only for downstream foundation persistence; it must never be
     logged, repr'd, or placed in exception messages. Optional ``booking`` is a
-    typed fixture only — never derived from free-form text.
+    typed fixture only — never derived from free-form text. Optional ``action``
+    is an explicit structured confirm — never inferred from text/LLM.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -29,6 +31,7 @@ class SyntheticIngressEvent(BaseModel):
     text: str = Field(min_length=1, max_length=2000, repr=False)
     correlation_id: uuid.UUID | None = None
     booking: SyntheticBookingInput | None = None
+    action: SyntheticConfirmSelectedSlotAction | None = None
 
     @field_validator("external_event_id", "external_conversation_id")
     @classmethod
@@ -43,6 +46,12 @@ class SyntheticIngressEvent(BaseModel):
         if any(ord(ch) < 32 and ch not in "\t\n\r" for ch in value):
             raise ValueError("text contains control characters")
         return value
+
+    @model_validator(mode="after")
+    def _booking_xor_action(self) -> SyntheticIngressEvent:
+        if self.booking is not None and self.action is not None:
+            raise ValueError("booking and action are mutually exclusive")
+        return self
 
     def channel_enum(self) -> Channel:
         return Channel.SYNTHETIC
@@ -62,6 +71,8 @@ class SyntheticIngressEvent(BaseModel):
         }
         if self.booking is not None:
             envelope["booking"] = self.booking.wire_dict()
+        if self.action is not None:
+            envelope["action"] = self.action.wire_dict()
         return envelope
 
     def redacted_view(self) -> dict[str, Any]:
@@ -84,6 +95,9 @@ class SyntheticIngressEvent(BaseModel):
             ),
             "text": "<redacted>",
             "booking_present": self.booking is not None,
+            "action_kind": (
+                self.action.kind if self.action is not None else None
+            ),
         }
 
     def __repr__(self) -> str:

@@ -170,6 +170,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/schemas/ingress.py",
     "!app/schemas/manager_message.py",
     "!app/schemas/booking_input.py",
+    "!app/schemas/self_booking_confirm_action.py",
     "!app/schemas/closed_test.py",
     "!app/schemas/amocrm_manager_ingress.py",
     "!app/services/",
