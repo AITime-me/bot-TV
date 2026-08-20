@@ -22,6 +22,7 @@ from app.models.self_booking_create_pending import SelfBookingCreatePending
 from app.repositories import conversations as conversation_repo
 from app.repositories import self_booking_create_pendings as pending_repo
 from app.services.self_booking_create_pending import SelfBookingCreatePendingService
+from app.services.takeover import apply_manager_takeover_in_session
 from tests.pg_harness import truncate_foundation_tables
 
 _SERVICE = "11111111-1111-4111-8111-111111111111"
@@ -244,17 +245,24 @@ async def test_manager_takeover_cancels(
         pending_id = admitted.pending_id
         assert pending_id is not None
 
-        locked = await conversation_repo.get_by_id_for_update(
-            session, conversation_id=conversation.id
+        takeover_conversation, _cancelled, changed = (
+            await apply_manager_takeover_in_session(
+                session,
+                conversation_id=conversation.id,
+                now=_NOW,
+            )
         )
-        assert locked is not None
-        locked.manager_takeover_at = _NOW
-        await session.flush()
+        assert changed is True
+        assert takeover_conversation.manager_takeover_at is not None
 
         cancelled = await svc.cancel_if_conversation_fences_stale(
             pending_id=pending_id
         )
         assert cancelled is True
+        row = await pending_repo.get_by_id(session, pending_id=pending_id)
+        assert row is not None
+        assert row.state == SelfBookingCreatePendingState.CANCELLED.value
+        assert row.result_code == "FENCE_STALE_OR_TAKEOVER"
 
 
 @pytest.mark.asyncio

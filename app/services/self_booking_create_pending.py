@@ -62,6 +62,16 @@ def _log(event: str) -> None:
         return
 
 
+def _as_uuid(value: object) -> uuid.UUID:
+    """Normalize ORM/asyncpg UUID values to stdlib uuid.UUID."""
+
+    if type(value) is uuid.UUID:
+        return value
+    if isinstance(value, uuid.UUID):
+        return uuid.UUID(str(value))
+    return uuid.UUID(str(value))
+
+
 class SelfBookingCreatePendingService:
     """Durable foundation boundary for confirmed self-booking create commands."""
 
@@ -142,7 +152,7 @@ class SelfBookingCreatePendingService:
             _log("SELF_BOOKING_DUPLICATE")
             return SelfBookingCreateAdmitResult(
                 outcome=SelfBookingCreateAdmitOutcome.DUPLICATE,
-                pending_id=existing.id,
+                pending_id=_as_uuid(existing.id),
                 idempotency_key=existing.idempotency_key,
                 reason_code="CONFIRM_DUPLICATE",
             )
@@ -184,7 +194,7 @@ class SelfBookingCreatePendingService:
             _log("SELF_BOOKING_ACTIVE_EXISTS")
             return SelfBookingCreateAdmitResult(
                 outcome=SelfBookingCreateAdmitOutcome.ACTIVE_EXISTS,
-                pending_id=active.id,
+                pending_id=_as_uuid(active.id),
                 idempotency_key=active.idempotency_key,
                 reason_code="ACTIVE_PENDING_EXISTS",
             )
@@ -222,7 +232,7 @@ class SelfBookingCreatePendingService:
                 _log("SELF_BOOKING_DUPLICATE")
                 return SelfBookingCreateAdmitResult(
                     outcome=SelfBookingCreateAdmitOutcome.DUPLICATE,
-                    pending_id=raced.id,
+                    pending_id=_as_uuid(raced.id),
                     idempotency_key=raced.idempotency_key,
                     reason_code="CONFIRM_DUPLICATE",
                 )
@@ -234,7 +244,7 @@ class SelfBookingCreatePendingService:
                 _log("SELF_BOOKING_ACTIVE_EXISTS")
                 return SelfBookingCreateAdmitResult(
                     outcome=SelfBookingCreateAdmitOutcome.ACTIVE_EXISTS,
-                    pending_id=active_raced.id,
+                    pending_id=_as_uuid(active_raced.id),
                     idempotency_key=active_raced.idempotency_key,
                     reason_code="ACTIVE_PENDING_EXISTS",
                 )
@@ -247,7 +257,7 @@ class SelfBookingCreatePendingService:
         _log("SELF_BOOKING_ADMITTED")
         return SelfBookingCreateAdmitResult(
             outcome=SelfBookingCreateAdmitOutcome.ADMITTED,
-            pending_id=row.id,
+            pending_id=_as_uuid(row.id),
             idempotency_key=row.idempotency_key,
         )
 

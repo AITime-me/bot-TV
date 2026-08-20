@@ -31,6 +31,7 @@ from app.models import (
     MasterCommandPending,
     OutboxMessage,
     ReplyPlan,
+    SelfBookingCreatePending,
     WorkerHeartbeat,
 )
 
@@ -287,6 +288,7 @@ def test_alembic_metadata_imports() -> None:
     assert AttachmentSpoolObject.__tablename__ == "attachment_spool_objects"
     assert MasterChannelBinding.__tablename__ == "master_channel_bindings"
     assert MasterCommandPending.__tablename__ == "master_command_pendings"
+    assert SelfBookingCreatePending.__tablename__ == "self_booking_create_pendings"
     assert CanonicalIdentity.__tablename__ == "canonical_identities"
     assert ExternalIdentityLink.__tablename__ == "external_identity_links"
     assert AmocrmChatBinding.__tablename__ == "amocrm_chat_bindings"
@@ -309,6 +311,7 @@ def test_alembic_metadata_imports() -> None:
         "attachment_spool_objects",
         "master_channel_bindings",
         "master_command_pendings",
+        "self_booking_create_pendings",
         "canonical_identities",
         "external_identity_links",
         "amocrm_chat_bindings",
@@ -411,6 +414,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260818_27_amocrm_deal_kind"].down_revision
         == "20260816_26_identity_glue"
     )
+    assert "20260820_28_self_booking_create" in by_id
+    assert (
+        by_id["20260820_28_self_booking_create"].down_revision
+        == "20260818_27_amocrm_deal_kind"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -432,6 +440,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260813_25_amo_deal_reserve",
         "20260816_26_identity_glue",
         "20260818_27_amocrm_deal_kind",
+        "20260820_28_self_booking_create",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -469,7 +478,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260816_26_identity_glue") <= 32
     assert "20260818_27_amocrm_deal_kind" in revision_ids
     assert len("20260818_27_amocrm_deal_kind") <= 32
-    assert heads == ["20260818_27_amocrm_deal_kind"]
+    assert "20260820_28_self_booking_create" in revision_ids
+    assert len("20260820_28_self_booking_create") <= 32
+    assert heads == ["20260820_28_self_booking_create"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation

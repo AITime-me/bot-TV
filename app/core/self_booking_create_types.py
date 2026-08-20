@@ -112,14 +112,18 @@ class SelfBookingCreateAdmitResult:
 
     def __post_init__(self) -> None:
         if self.outcome is SelfBookingCreateAdmitOutcome.ADMITTED:
-            if type(self.pending_id) is not uuid.UUID:
+            if not isinstance(self.pending_id, uuid.UUID):
                 raise TypeError("ADMITTED requires pending_id") from None
             if type(self.idempotency_key) is not str or not self.idempotency_key:
                 raise TypeError("ADMITTED requires idempotency_key") from None
             return
         if self.outcome is SelfBookingCreateAdmitOutcome.DUPLICATE:
-            if type(self.pending_id) is not uuid.UUID:
+            if not isinstance(self.pending_id, uuid.UUID):
                 raise TypeError("DUPLICATE requires pending_id") from None
+            return
+        if self.outcome is SelfBookingCreateAdmitOutcome.ACTIVE_EXISTS:
+            if not isinstance(self.pending_id, uuid.UUID):
+                raise TypeError("ACTIVE_EXISTS requires pending_id") from None
             return
 
     def __repr__(self) -> str:
