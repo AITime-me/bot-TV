@@ -1236,3 +1236,39 @@ def test_locked_row_asdict_would_expose_internal_fields() -> None:
     exported = asdict(row)
     assert exported["ciphertext"] == secret
     assert secret.hex() not in repr(row)
+
+
+@pytest.mark.asyncio
+async def test_store_booking_pair_inserts_both_without_own_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inserts: list[str] = []
+    tracker = TxnTracker()
+
+    async def _fake_insert(_session: object, **kwargs: Any) -> bool:
+        inserts.append(str(kwargs["pii_kind"]))
+        return True
+
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.ephemeral_pii_repo.insert_if_reference_available",
+        _fake_insert,
+    )
+    monkeypatch.setattr(
+        "app.services.ephemeral_pii_store.session_scope",
+        make_observing_session_scope(tracker),
+    )
+    store = EphemeralPiiStore(
+        session_factory=object(),  # type: ignore[arg-type]
+        key_provider=EnvEphemeralPiiKeyProvider(_key_env()),
+        ttl_policy=EphemeralPiiTtlPolicy(900),
+    )
+    phone_h, name_h = await store.store_booking_phone_write_pair(
+        object(),  # type: ignore[arg-type]
+        "+79001234567",
+        "Test Client",
+        conversation_id=uuid4(),
+    )
+    assert inserts == ["PHONE", "CLIENT_NAME"]
+    assert phone_h.purpose is EphemeralPiiPurpose.BOOKING_PHONE_WRITE
+    assert name_h.purpose is EphemeralPiiPurpose.BOOKING_PHONE_WRITE
+    assert tracker.events == []
