@@ -7,11 +7,10 @@ import base64
 import secrets
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.ephemeral_pii_keys import EnvEphemeralPiiKeyProvider
@@ -370,9 +369,15 @@ async def test_expired_ciphertext_fail_closed_no_reissue(
 
     async with session_factory() as session:
         async with session.begin():
+            # Preserve expires_at > created_at CHECK while making rows past TTL.
             await session.execute(
-                update(EphemeralPiiValue).values(
-                    expires_at=func.statement_timestamp() - timedelta(seconds=1)
+                text(
+                    """
+                    UPDATE ephemeral_pii_values
+                    SET
+                        created_at = statement_timestamp() - interval '2 hours',
+                        expires_at = statement_timestamp() - interval '1 second'
+                    """
                 )
             )
 
