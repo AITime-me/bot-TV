@@ -580,6 +580,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_12 = (
         root / "alembic" / "versions" / "20260729_12_worker_runtime.py"
     ).read_text(encoding="utf-8")
+    migration_31 = (
+        root / "alembic" / "versions" / "20260821_31_sbc_exec_loop.py"
+    ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
     ).read_text(encoding="utf-8")
@@ -715,6 +718,20 @@ def test_model_migration_check_and_unique_parity() -> None:
     for name, sql in _EXPECTED_CHECKS_12.items():
         assert name in migration_12
         assert model_checks[name] == sql
+        if name == "ck_worker_heartbeats_loop_name":
+            # Founding loops in 12; expand-only CHECK rewrite in 31.
+            assert name in migration_31
+            for token in (
+                "'ingress'",
+                "'handoff_expiry'",
+                "'reply_plan'",
+                "'outbound'",
+                "'amocrm_mirror'",
+            ):
+                assert token in migration_12, f"{name} missing {token} in 12"
+            for token in re.findall(r"'[a-z_]+'", sql):
+                assert token in migration_31, f"{name} missing {token} in 31"
+            continue
         for token in re.findall(r"'[a-z_]+'", sql):
             assert token in migration_12, f"{name} missing {token}"
 
