@@ -217,6 +217,7 @@ def test_confirm_schema_source_has_no_admit_or_create_hooks() -> None:
     assert "SelfBookingPiiAdmissionService" not in confirm
     assert "admit(" not in confirm
     assert "admit_confirmed" not in inbound
+    assert "admit_from_confirm" in inbound
     assert ".confirm_selected_slot" not in inbound
     assert "SelfBookingPiiAdmissionService" not in inbound
     assert "preserves_active_offer" in inbound

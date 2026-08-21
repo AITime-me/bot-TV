@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +31,37 @@ from app.services.amocrm_mirror import enqueue_client_message_received
 from app.services.amocrm_chat_projection import enqueue_client_inbound_projection
 from app.services.booking_synthetic import client_reply_plan_payload
 
+logger = logging.getLogger(__name__)
+
+_CONFIRM_ADMISSION_LOG_CODES: frozenset[str] = frozenset(
+    {
+        "INBOUND_CONFIRM_ADMISSION_SKIPPED_NO_PII_STORE",
+        "INBOUND_CONFIRM_ADMISSION_FAIL_CLOSED",
+    }
+)
+
+
+class _ConfirmAdmissionPiiStore(Protocol):
+    """Alive-check surface for confirm admission. No decrypt on inbound path."""
+
+    async def booking_phone_write_pair_alive(
+        self,
+        session: AsyncSession,
+        *,
+        phone_ref_token: str,
+        name_ref_token: str,
+        conversation_id: UUID,
+    ) -> bool: ...
+
+
+def _log_confirm_admission(event: str) -> None:
+    if type(event) is not str or event not in _CONFIRM_ADMISSION_LOG_CODES:
+        return
+    try:
+        logger.info("%s", event)
+    except Exception:
+        return
+
 
 @dataclass(frozen=True)
 class InboundAcceptResult:
@@ -50,11 +84,12 @@ class InboundService:
     Optional typed ``booking`` fixtures are copied into CLIENT_REPLY payloads
     only (never inferred from text). Optional structured ``action``
     (CONFIRM_SELECTED_SLOT) is accepted as an explicit field only — never
-    inferred from text/LLM — and does not invoke pending admission or CREATE.
-    New non-confirm inbound invalidates the active offer snapshot; confirm
-    inbound preserves it. No AI, live booking HTTP, or client send.
-    INTERNAL_DRAFT remains a manager-hint artifact; CLIENT_REPLY ReplyPlan is
-    the orchestration unit for 01C / CURSOR-20.
+    inferred from text/LLM. On new confirm inbox, inbound invokes
+    ``admit_from_confirm`` (soft outcomes; never CREATE HTTP). New non-confirm
+    inbound invalidates the active offer snapshot; confirm inbound preserves
+    it. No AI, live booking HTTP, or client send. INTERNAL_DRAFT remains a
+    manager-hint artifact; CLIENT_REPLY ReplyPlan is the orchestration unit
+    for 01C / CURSOR-20.
     """
 
     def __init__(
@@ -62,11 +97,13 @@ class InboundService:
         session: AsyncSession,
         *,
         handoff_pause_seconds: int = 15 * 60,
+        pii_store: _ConfirmAdmissionPiiStore | None = None,
     ) -> None:
         if not 10 * 60 <= handoff_pause_seconds <= 15 * 60:
             raise ValueError("handoff_pause_seconds must be between 600 and 900")
         self._session = session
         self._handoff_pause_seconds = handoff_pause_seconds
+        self._pii_store = pii_store
 
     async def accept(self, event: SyntheticInboundEvent) -> InboundAcceptResult:
         """Find/create conversation, idempotently store inbox and INTERNAL_DRAFT.
@@ -142,7 +179,7 @@ class InboundService:
                 conversation_id=conversation.id,
             )
             # SELF-BOOKING-COMMAND-03D: confirm preserves active offer;
-            # any other new inbound clears it. No PII/admission on this path.
+            # any other new inbound clears it.
             if not event.preserves_active_offer():
                 from app.services.self_booking_active_offer import (
                     SelfBookingActiveOfferService,
@@ -150,6 +187,13 @@ class InboundService:
 
                 await SelfBookingActiveOfferService(self._session).invalidate(
                     conversation_id=conversation.id,
+                )
+            else:
+                # SELF-BOOKING-COMMAND-03K2: confirm → pending admission only.
+                # Soft outcomes; CREATE stays on pending execution worker.
+                await self._admit_confirm_selected_slot(
+                    event=event,
+                    conversation=conversation,
                 )
             if conversation_allows_automatic_reply(conversation):
                 reply_plan = await reply_plan_repo.create_client_reply_plan(
@@ -259,6 +303,40 @@ class InboundService:
             reply_plan=reply_plan,
             reply_plan_created=reply_plan_created,
         )
+
+    async def _admit_confirm_selected_slot(
+        self,
+        *,
+        event: SyntheticInboundEvent,
+        conversation: Conversation,
+    ) -> None:
+        """Wire CONFIRM_SELECTED_SLOT → confirm admission. Never CREATE HTTP."""
+
+        if event.action is None or not event.preserves_active_offer():
+            return
+        if self._pii_store is None:
+            _log_confirm_admission("INBOUND_CONFIRM_ADMISSION_SKIPPED_NO_PII_STORE")
+            return
+        try:
+            from app.services.self_booking_confirm_admission import (
+                SelfBookingConfirmAdmissionService,
+            )
+
+            await SelfBookingConfirmAdmissionService(
+                self._session,
+                pii_store=self._pii_store,
+            ).admit_from_confirm(
+                conversation_id=conversation.id,
+                channel=event.channel,
+                confirm_external_message_id=event.external_message_id,
+                action=event.action,
+                fence_context_version=conversation.context_version,
+                fence_manager_epoch=conversation.manager_epoch,
+                fence_event_seq_hwm=conversation.current_event_seq,
+            )
+        except Exception:
+            _log_confirm_admission("INBOUND_CONFIRM_ADMISSION_FAIL_CLOSED")
+            return
 
 
 def assert_no_client_outbound_path() -> None:
