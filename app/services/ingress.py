@@ -136,6 +136,7 @@ class IngressWorker:
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
         handoff_pause_seconds: int = 15 * 60,
+        pii_store: object | None = None,
     ) -> None:
         if not 10 * 60 <= handoff_pause_seconds <= 15 * 60:
             raise ValueError("handoff_pause_seconds must be between 600 and 900")
@@ -144,6 +145,7 @@ class IngressWorker:
         self._lease_seconds = lease_seconds
         self._retry_delay_seconds = retry_delay_seconds
         self._handoff_pause_seconds = handoff_pause_seconds
+        self._pii_store = pii_store
 
     async def claim_one(self) -> IngressClaim | None:
         async with session_scope(self._session_factory) as session:
@@ -181,6 +183,7 @@ class IngressWorker:
                 accept = await InboundService(
                     session,
                     handoff_pause_seconds=self._handoff_pause_seconds,
+                    pii_store=self._pii_store,
                 ).accept(inbound)
                 event = await ingress_repo.complete_with_lease(
                     session,

@@ -14,6 +14,7 @@ from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
     rebind_booking_flow_to_runtime_settings,
 )
+from app.core.ephemeral_pii_types import EphemeralPiiError
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     AMOCRM_MIRROR_LOOP,
@@ -32,6 +33,7 @@ from app.services.amocrm_crm_mirror_adapter import CrmRestMirrorAdapter
 from app.services.amocrm_mirror import AmoCrmMirrorRejected, AmoCrmMirrorWorker
 from app.services.amocrm_chat_projection import AmocrmChatProjectionWorker
 from app.services.booking_flow import BookingFlowService
+from app.services.ephemeral_pii_store import build_ephemeral_pii_store_from_env
 from app.services.handoff_expiry import HandoffExpiryWorker
 from app.services.ingress import IngressWorker
 from app.services.outbound_arbiter import OutboundArbiter
@@ -275,10 +277,16 @@ def build_default_loop_specs(
         if booking_flow is not None
         else build_booking_flow_for_worker(settings)
     )
+    try:
+        ingress_pii_store = build_ephemeral_pii_store_from_env(session_factory)
+    except EphemeralPiiError:
+        # Partial/invalid EPHEMERAL_PII_* must not abort the worker process.
+        ingress_pii_store = None
     ingress = IngressWorker(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "ingress"),
         handoff_pause_seconds=settings.handoff_pause_seconds,
+        pii_store=ingress_pii_store,
     )
     handoff = HandoffExpiryWorker(session_factory)
     reply_plan = ReplyPlanWorker(

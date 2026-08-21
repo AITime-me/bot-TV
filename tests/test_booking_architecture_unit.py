@@ -338,7 +338,8 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
     assert "phone" not in schema
     assert "personal_data_consent" not in schema
     assert "No PII" in schema or "No free-text" in schema
-    # Confirm action is structured inbound only; no admit/CREATE wiring yet.
+    # Confirm action is structured inbound; 03K2 wires admit_from_confirm only.
+    # CREATE HTTP / plaintext PII / pending model remain forbidden on inbound.
     confirm = _source(
         _REPO_ROOT / Path("app/schemas/self_booking_confirm_action.py")
     )
@@ -351,8 +352,11 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
     assert "name_ref" not in confirm
     assert "starts_at" not in confirm
     assert "admit_confirmed" not in inbound
+    assert "admit_from_confirm" in inbound
+    assert "SelfBookingConfirmAdmissionService" in inbound
     assert ".confirm_selected_slot" not in inbound
     assert "SelfBookingCreatePending" not in inbound
+    assert "BookingCreateHttpClient" not in inbound
     assert "SelfBookingPiiAdmissionService" not in confirm
     # PII admission is a separate pre-durability boundary (03H), not confirm wiring.
     pii_adm = _source(
@@ -361,6 +365,25 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
     assert "store_booking_phone_write_pair" in pii_adm
     assert "CONFIRM_SELECTED_SLOT" not in pii_adm
     assert "admit_confirmed" not in pii_adm
+    # 03K1 orchestration stays free of ReplyPlan / ingress / CREATE.
+    confirm_adm = _source(
+        _REPO_ROOT / Path("app/services/self_booking_confirm_admission.py")
+    )
+    assert "admit_from_confirm" in confirm_adm
+    assert "admit_confirmed" in confirm_adm
+    assert "read_plaintext" not in confirm_adm
+    assert "confirm_selected_slot" not in confirm_adm
+    assert "ReplyPlan" not in confirm_adm
+    assert "IngressEvent" not in confirm_adm
+    # Worker DI may pass pii_store into IngressWorker; still no CREATE.
+    worker_rt = _source(_REPO_ROOT / Path("app/services/worker_runtime.py"))
+    ingress_src = _source(_REPO_ROOT / Path("app/services/ingress.py"))
+    assert "pii_store" in worker_rt
+    assert "pii_store" in ingress_src
+    assert "confirm_selected_slot" not in worker_rt
+    assert "confirm_selected_slot" not in ingress_src
+    assert "BookingCreateHttpClient" not in worker_rt
+    assert "BookingCreateHttpClient" not in ingress_src
 
 
 def test_booking_create_http_has_no_automatic_retry_or_uuid_mint() -> None:

@@ -125,6 +125,7 @@ Thumbs.db
 !app/core/self_booking_create_types.py
 !app/core/self_booking_active_offer_types.py
 !app/core/self_booking_pii_admission_types.py
+!app/core/self_booking_confirm_admission_types.py
 !app/core/pii_admission_mac_types.py
 !app/core/pii_admission_mac_keys.py
 !app/core/pii_admission_mac.py
@@ -237,6 +238,7 @@ Thumbs.db
 !app/services/self_booking_create_execution.py
 !app/services/self_booking_active_offer.py
 !app/services/self_booking_pii_admission.py
+!app/services/self_booking_confirm_admission.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py
