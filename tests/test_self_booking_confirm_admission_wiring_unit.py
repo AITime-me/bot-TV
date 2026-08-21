@@ -578,6 +578,7 @@ def test_inbound_source_wires_admit_not_create() -> None:
     assert "read_plaintext" not in inbound
     assert "pii_store" in ingress
     assert "pii_store" in worker
+    assert "SelfBookingCreateExecutionWorker" in worker
     assert ".confirm_selected_slot" not in ingress
     assert ".confirm_selected_slot" not in worker
     assert "BookingCreateHttpClient" not in ingress

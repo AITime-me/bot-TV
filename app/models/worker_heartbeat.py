@@ -14,6 +14,7 @@ HANDOFF_EXPIRY_LOOP = "handoff_expiry"
 REPLY_PLAN_LOOP = "reply_plan"
 OUTBOUND_LOOP = "outbound"
 AMOCRM_MIRROR_LOOP = "amocrm_mirror"
+SELF_BOOKING_CREATE_LOOP = "self_booking_create"
 
 REQUIRED_WORKER_LOOPS = (
     INGRESS_LOOP,
@@ -21,6 +22,7 @@ REQUIRED_WORKER_LOOPS = (
     REPLY_PLAN_LOOP,
     OUTBOUND_LOOP,
     AMOCRM_MIRROR_LOOP,
+    SELF_BOOKING_CREATE_LOOP,
 )
 
 _LOOP_CHECK = ", ".join(f"'{name}'" for name in REQUIRED_WORKER_LOOPS)
