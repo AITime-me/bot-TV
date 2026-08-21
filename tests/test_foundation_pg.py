@@ -415,6 +415,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "reply_plan",
                 "outbound",
                 "amocrm_mirror",
+                "self_booking_create",
             }
         ),
     ),

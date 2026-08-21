@@ -22,6 +22,8 @@ from app.models.worker_heartbeat import (
     INGRESS_LOOP,
     OUTBOUND_LOOP,
     REPLY_PLAN_LOOP,
+    REQUIRED_WORKER_LOOPS,
+    SELF_BOOKING_CREATE_LOOP,
 )
 from app.repositories import worker_heartbeats as heartbeat_repo
 from app.repositories.amocrm_mirror import StaleAmoCrmMirrorLeaseError
@@ -39,6 +41,9 @@ from app.services.ingress import IngressWorker
 from app.services.outbound_arbiter import OutboundArbiter
 from app.services.outbound_arbiter import OutboundArbiterDenied
 from app.services.reply_outbound import OutboundWorker, ReplyPlanWorker
+from app.services.self_booking_create_execution_worker import (
+    SelfBookingCreateExecutionWorker,
+)
 
 logger = logging.getLogger(__name__)
 _LEASE_OWNER_MAX_LENGTH = 128
@@ -136,13 +141,7 @@ class WorkerRuntime:
         names = tuple(spec.name for spec in loops)
         if len(names) != len(set(names)):
             raise ValueError("worker loop names must be unique")
-        if set(names) != {
-            INGRESS_LOOP,
-            HANDOFF_EXPIRY_LOOP,
-            REPLY_PLAN_LOOP,
-            OUTBOUND_LOOP,
-            AMOCRM_MIRROR_LOOP,
-        }:
+        if set(names) != set(REQUIRED_WORKER_LOOPS):
             raise ValueError("worker runtime must register every required loop")
         if any(spec.poll_seconds <= 0 for spec in loops):
             raise ValueError("worker poll seconds must be positive")
@@ -313,6 +312,11 @@ def build_default_loop_specs(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "amocht"),
     )
+    self_booking_create = SelfBookingCreateExecutionWorker(
+        session_factory,
+        booking_flow=resolved_booking_flow,
+        pii_store=ingress_pii_store,
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -375,6 +379,15 @@ def build_default_loop_specs(
                 # Permanent/transient failures already persisted on the row.
                 continue
 
+    async def self_booking_create_tick() -> None:
+        # CREATE HTTP can be slow; drain a small batch per tick.
+        for _ in range(min(settings.worker_batch_size, 5)):
+            pending_id = await self_booking_create.claim_one()
+            if pending_id is None:
+                return
+            # Expected outcomes are returned as result objects, not exceptions.
+            await self_booking_create.process_one(pending_id)
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -400,6 +413,11 @@ def build_default_loop_specs(
             name=AMOCRM_MIRROR_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=mirror_tick,
+        ),
+        WorkerLoopSpec(
+            name=SELF_BOOKING_CREATE_LOOP,
+            poll_seconds=settings.worker_poll_seconds,
+            tick=self_booking_create_tick,
         ),
     )
 

@@ -60,6 +60,7 @@ Thumbs.db
 !alembic/versions/20260820_28_self_booking_create.py
 !alembic/versions/20260820_29_active_offer.py
 !alembic/versions/20260820_30_pii_admission.py
+!alembic/versions/20260821_31_sbc_exec_loop.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -239,6 +240,7 @@ Thumbs.db
 !app/services/self_booking_active_offer.py
 !app/services/self_booking_pii_admission.py
 !app/services/self_booking_confirm_admission.py
+!app/services/self_booking_create_execution_worker.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py

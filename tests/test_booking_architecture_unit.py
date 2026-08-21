@@ -375,15 +375,24 @@ def test_booking_create_not_wired_into_live_channels_or_synthetic_pii() -> None:
     assert "confirm_selected_slot" not in confirm_adm
     assert "ReplyPlan" not in confirm_adm
     assert "IngressEvent" not in confirm_adm
-    # Worker DI may pass pii_store into IngressWorker; still no CREATE.
+    # Worker DI: confirm admission on ingress; CREATE only via execution worker.
     worker_rt = _source(_REPO_ROOT / Path("app/services/worker_runtime.py"))
     ingress_src = _source(_REPO_ROOT / Path("app/services/ingress.py"))
+    exec_worker = _source(
+        _REPO_ROOT / Path("app/services/self_booking_create_execution_worker.py")
+    )
     assert "pii_store" in worker_rt
     assert "pii_store" in ingress_src
-    assert "confirm_selected_slot" not in worker_rt
-    assert "confirm_selected_slot" not in ingress_src
+    assert "SelfBookingCreateExecutionWorker" in worker_rt
+    assert "SelfBookingCreateExecutionService" in exec_worker
+    assert "uuid.uuid4(" not in exec_worker
+    assert ".confirm_selected_slot" not in worker_rt
+    assert ".confirm_selected_slot" not in ingress_src
     assert "BookingCreateHttpClient" not in worker_rt
     assert "BookingCreateHttpClient" not in ingress_src
+    assert "BookingCreateHttpClient" not in exec_worker
+    assert "admit_from_confirm" not in exec_worker
+    assert "client_reply_plan" not in exec_worker
 
 
 def test_booking_create_http_has_no_automatic_retry_or_uuid_mint() -> None:

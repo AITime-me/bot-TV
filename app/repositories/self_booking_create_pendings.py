@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.self_booking_create_types import (
@@ -301,3 +301,40 @@ async def expire_exhausted_attempts(
     result = await session.execute(stmt)
     await session.flush()
     return bool(result.rowcount and result.rowcount == 1)
+
+
+async def lock_next_claimable_id(
+    session: AsyncSession,
+    *,
+    now: datetime,
+) -> uuid.UUID | None:
+    """Pick one claimable pending id with FOR UPDATE SKIP LOCKED.
+
+    Does not change state — caller must run claim_for_execution / execute.
+    READY under max attempts, or EXECUTING with expired lease under max.
+    """
+
+    stmt = text(
+        """
+        SELECT id
+        FROM self_booking_create_pendings
+        WHERE attempt_count < max_attempts
+          AND (
+                state = 'READY'
+             OR (
+                    state = 'EXECUTING'
+                AND execution_lease_expires_at IS NOT NULL
+                AND execution_lease_expires_at <= :now
+             )
+          )
+        ORDER BY created_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+        """
+    )
+    value = await session.scalar(stmt, {"now": now})
+    if value is None:
+        return None
+    if type(value) is uuid.UUID:
+        return value
+    return uuid.UUID(str(value))
