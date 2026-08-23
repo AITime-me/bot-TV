@@ -7,7 +7,11 @@ from http.client import HTTPResponse
 
 import pytest
 
-from app.core.s2s_http_stdlib import _inspect_response_framing, _read_body_bounded
+from app.core.s2s_http_stdlib import (
+    _inspect_response_framing,
+    _read_body_bounded,
+    _require_single_chunked_transfer_encoding,
+)
 from app.core.s2s_http_transport import S2sHttpTransportError
 
 
@@ -60,11 +64,11 @@ def test_valid_chunked_json_response_accepted() -> None:
     ) == body
 
 
-@pytest.mark.parametrize("te_value", ["chunked", "Chunked", "CHUNKED", " chunked "])
-def test_chunked_transfer_encoding_case_and_spacing(te_value: str) -> None:
+@pytest.mark.parametrize("te_value", ["chunked", "Chunked", "CHUNKED"])
+def test_chunked_transfer_encoding_case(te_value: str) -> None:
     body = b'{"ok":true}'
     response = _response(
-        f"Content-Type: application/json\r\nTransfer-Encoding:{te_value}\r\n".encode(
+        f"Content-Type: application/json\r\nTransfer-Encoding: {te_value}\r\n".encode(
             "ascii"
         ),
         _chunked(body),
@@ -75,6 +79,13 @@ def test_chunked_transfer_encoding_case_and_spacing(te_value: str) -> None:
         max_bytes=4096,
         declared_length=declared,
     ) == body
+
+
+def test_chunked_transfer_encoding_surrounding_ows_accepted_by_validator() -> None:
+    # Header parsers may normalize optional whitespace before exposing the value.
+    # Test our framing validator's normalization directly instead of relying on
+    # CPython HTTPResponse to classify deliberately irregular raw header syntax.
+    _require_single_chunked_transfer_encoding(" chunked ")
 
 
 def test_duplicate_transfer_encoding_rejected() -> None:
