@@ -31,3 +31,8 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local / accidental PostgreSQL dumps (must live outside git worktree on server)
+*.dump
+*.dump.manifest.env
+backups/
