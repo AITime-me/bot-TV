@@ -7,8 +7,10 @@ Framing notes (CPython http.client):
 - HTTPResponse.read() returns at most Content-Length bytes; trailing bytes after a
   truthful Content-Length are not part of the response body and are not measured
   here. Connections are always closed after one exchange.
-- Ambiguous framing (duplicate CL/TE/CE/CT, Transfer-Encoding present, malformed
-  CL) is rejected fail closed via get_all inspection before body parse.
+- Transfer-Encoding: only a single ``chunked`` coding is accepted. CPython's
+  HTTPResponse already decodes chunked framing before ``read()``.
+- Ambiguous framing (duplicate CL/TE/CE/CT, TE+CL together, unsupported TE,
+  malformed CL) is rejected fail closed via get_all inspection before body parse.
 """
 
 from __future__ import annotations
@@ -185,34 +187,72 @@ def _parse_content_length(raw: str | None, *, max_bytes: int) -> int | None:
     return length
 
 
+def _require_single_chunked_transfer_encoding(raw: str) -> None:
+    """Accept only exact single coding ``chunked`` (case-insensitive).
+
+    Rejects comma-lists, parameters, empty values, and any other coding.
+    """
+
+    if type(raw) is not str or not raw:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    if "," in raw or ";" in raw:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    coding = raw.strip().lower()
+    if not coding or any(ch.isspace() for ch in coding):
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    if coding != "chunked":
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+
+
+def _inspect_content_type(message: http.client.HTTPMessage) -> str | None:
+    content_type_values = _header_values(message, "Content-Type")
+    if content_type_values is None:
+        return None
+    if len(content_type_values) != 1:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    return content_type_values[0]
+
+
+def _inspect_content_encoding(message: http.client.HTTPMessage) -> None:
+    encoding_values = _header_values(message, "Content-Encoding")
+    if encoding_values is None:
+        return
+    if len(encoding_values) != 1:
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    normalized = encoding_values[0].strip().lower()
+    if normalized not in ("", "identity"):
+        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+
+
 def _inspect_response_framing(
     message: http.client.HTTPMessage,
     *,
     max_bytes: int,
 ) -> tuple[int | None, str | None, str | None]:
-    """Return (declared_length, content_type, content_length_header)."""
+    """Return (declared_length, content_type, content_length_header).
 
-    if _header_values(message, "Transfer-Encoding") is not None:
-        # Reject chunked / ambiguous TE; S2S JSON uses identity + Content-Length.
-        raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+    Allowed framing:
+    - Content-Length only (no Transfer-Encoding), or
+    - single Transfer-Encoding: chunked (no Content-Length).
+    """
 
-    encoding_values = _header_values(message, "Content-Encoding")
-    if encoding_values is not None:
-        if len(encoding_values) != 1:
-            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-        normalized = encoding_values[0].strip().lower()
-        if normalized not in ("", "identity"):
-            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-
-    content_type_values = _header_values(message, "Content-Type")
-    if content_type_values is None:
-        content_type = None
-    else:
-        if len(content_type_values) != 1:
-            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
-        content_type = content_type_values[0]
-
+    te_values = _header_values(message, "Transfer-Encoding")
     cl_values = _header_values(message, "Content-Length")
+
+    if te_values is not None:
+        if len(te_values) != 1:
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+        _require_single_chunked_transfer_encoding(te_values[0])
+        # RFC 9112: TE + CL is ambiguous for intermediaries; fail closed.
+        if cl_values is not None:
+            raise S2sHttpTransportError("TRANSPORT_ERROR") from None
+        _inspect_content_encoding(message)
+        content_type = _inspect_content_type(message)
+        return None, content_type, None
+
+    _inspect_content_encoding(message)
+    content_type = _inspect_content_type(message)
+
     if cl_values is None:
         return None, content_type, None
     if len(cl_values) != 1:
