@@ -35,7 +35,7 @@ bot-TV проверяет restore dump → схема/пользовательс
 
 ## Dump source
 
-Default dump dir: `/srv/automation-data/bot-tv/stage/backups/postgres/`  
+Default dump dir: `/srv/automation-data/bot-tv/stage/backups/postgres/`
 (override: `IRT_DUMP_DIR_OVERRIDE` / `BOT_TV_STAGING_BACKUPS_DIR`)
 
 Имя: `YYYYMMDDTHHMMSSZ_<label>.dump`. Возраст ≤ `IRT_DUMP_MAX_AGE_HOURS` (36).
@@ -87,7 +87,7 @@ bash scripts/ops/tests/isolated-restore-test-harness.sh
 Один полный прогон после свежего scheduled backup (не трогает рабочую БД):
 
 ```bash
-cd /path/to/bot-TV && \
+cd /srv/automation-data/bot-tv/stage/repo && \
 bash scripts/ops/staging-backup-db.sh && \
 bash scripts/ops/isolated-restore-test.sh --environment staging
 ```
