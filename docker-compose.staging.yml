@@ -1,0 +1,40 @@
+# Staging-only resource guardrails (cgroup ceilings).
+#
+# Canonical staging stack on the host (this file LAST):
+#   1. /srv/automation-data/bot-tv/stage/repo/docker-compose.yml
+#   2. /srv/automation-data/bot-tv/stage/config/compose.stage.yaml
+#   3. /srv/automation-data/bot-tv/stage/config/compose.maintenance-enabled.yaml
+#   4. this overlay (resource limits only)
+#
+# Example:
+#   docker compose -p tv_bot_stage \
+#     -f /srv/automation-data/bot-tv/stage/repo/docker-compose.yml \
+#     -f /srv/automation-data/bot-tv/stage/config/compose.stage.yaml \
+#     -f /srv/automation-data/bot-tv/stage/config/compose.maintenance-enabled.yaml \
+#     -f /srv/automation-data/bot-tv/stage/repo/docker-compose.staging.yml \
+#     ...
+#
+# This file must only declare mem_limit / cpus / pids_limit.
+# Do not redefine networks, env, volumes, commands, images, or ports.
+# Production must not use this overlay.
+
+services:
+  api:
+    mem_limit: 512m
+    cpus: 0.50
+    pids_limit: 256
+
+  worker:
+    mem_limit: 768m
+    cpus: 0.75
+    pids_limit: 256
+
+  attachment-maintenance:
+    mem_limit: 256m
+    cpus: 0.25
+    pids_limit: 128
+
+  postgres:
+    mem_limit: 512m
+    cpus: 0.50
+    pids_limit: 256
