@@ -1,0 +1,34 @@
+# Production-only resource guardrails (cgroup ceilings).
+#
+# Canonical production stack on the host (this file LAST):
+#   1. /srv/automation-data/bot-tv/prod/repo/docker-compose.yml
+#   2. /srv/automation-data/bot-tv/prod/config/compose.prod.yaml
+#   3. this overlay (resource limits only)
+#
+# Example (keep full production context: overrides + env-file + project):
+#   docker compose -p tv_bot_prod \
+#     --env-file /srv/automation-data/bot-tv/prod/config/.env \
+#     -f /srv/automation-data/bot-tv/prod/repo/docker-compose.yml \
+#     -f /srv/automation-data/bot-tv/prod/config/compose.prod.yaml \
+#     -f /srv/automation-data/bot-tv/prod/repo/docker-compose.production.yml \
+#     ...
+#
+# This file must only declare mem_limit / cpus / pids_limit.
+# Do not redefine networks, env, volumes, commands, images, or ports.
+# Staging must not use this overlay.
+
+services:
+  api:
+    mem_limit: 768m
+    cpus: 1.00
+    pids_limit: 256
+
+  worker:
+    mem_limit: 1g
+    cpus: 1.00
+    pids_limit: 256
+
+  postgres:
+    mem_limit: 768m
+    cpus: 0.75
+    pids_limit: 256
