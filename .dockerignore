@@ -61,6 +61,7 @@ Thumbs.db
 !alembic/versions/20260820_29_active_offer.py
 !alembic/versions/20260820_30_pii_admission.py
 !alembic/versions/20260821_31_sbc_exec_loop.py
+!alembic/versions/20260825_32_teya_req_orch.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -94,6 +95,11 @@ Thumbs.db
 !app/core/booking_availability_http.py
 !app/core/booking_create_remote.py
 !app/core/booking_create_http.py
+!app/core/booking_request_remote.py
+!app/core/booking_request_http.py
+!app/core/teya_request_types.py
+!app/core/amocrm_crm_writes_http.py
+!app/core/amocrm_crm_business_write_config.py
 !app/core/s2s_http_transport.py
 !app/core/s2s_http_stdlib.py
 !app/core/booking_eligibility_factory.py
@@ -167,6 +173,7 @@ Thumbs.db
 !app/models/master_channel_binding.py
 !app/models/master_command_pending.py
 !app/models/self_booking_create_pending.py
+!app/models/teya_request_pending.py
 !app/models/self_booking_active_offer.py
 !app/models/self_booking_pii_admission.py
 !app/models/outbox.py
@@ -189,6 +196,7 @@ Thumbs.db
 !app/repositories/master_channel_bindings.py
 !app/repositories/master_command_pendings.py
 !app/repositories/self_booking_create_pendings.py
+!app/repositories/teya_request_pendings.py
 !app/repositories/self_booking_active_offers.py
 !app/repositories/self_booking_pii_admissions.py
 !app/repositories/messages.py
@@ -241,6 +249,12 @@ Thumbs.db
 !app/services/self_booking_pii_admission.py
 !app/services/self_booking_confirm_admission.py
 !app/services/self_booking_create_execution_worker.py
+!app/services/teya_request_pending.py
+!app/services/teya_request_crm.py
+!app/services/teya_request_crm_wiring.py
+!app/services/teya_request_contact_route.py
+!app/services/teya_request_orchestrator.py
+!app/services/teya_request_orchestrator_worker.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py

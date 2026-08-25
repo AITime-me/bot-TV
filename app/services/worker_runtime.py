@@ -12,9 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
+    build_booking_s2s_config,
     rebind_booking_flow_to_runtime_settings,
 )
+from app.core.booking_request_http import BookingRequestHttpClient
 from app.core.ephemeral_pii_types import EphemeralPiiError
+from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     AMOCRM_MIRROR_LOOP,
@@ -24,6 +27,7 @@ from app.models.worker_heartbeat import (
     REPLY_PLAN_LOOP,
     REQUIRED_WORKER_LOOPS,
     SELF_BOOKING_CREATE_LOOP,
+    TEYA_REQUEST_ORCHESTRATOR_LOOP,
 )
 from app.repositories import worker_heartbeats as heartbeat_repo
 from app.repositories.amocrm_mirror import StaleAmoCrmMirrorLeaseError
@@ -43,6 +47,10 @@ from app.services.outbound_arbiter import OutboundArbiterDenied
 from app.services.reply_outbound import OutboundWorker, ReplyPlanWorker
 from app.services.self_booking_create_execution_worker import (
     SelfBookingCreateExecutionWorker,
+)
+from app.services.teya_request_crm_wiring import build_teya_request_crm_service
+from app.services.teya_request_orchestrator_worker import (
+    TeyaRequestOrchestratorWorker,
 )
 
 logger = logging.getLogger(__name__)
@@ -317,6 +325,29 @@ def build_default_loop_specs(
         booking_flow=resolved_booking_flow,
         pii_store=ingress_pii_store,
     )
+    booking_s2s_config = None
+    try:
+        booking_s2s_config = build_booking_s2s_config(settings)
+    except ValueError:
+        booking_s2s_config = None
+    teya_remote = (
+        BookingRequestHttpClient(booking_s2s_config, S2sHttpStdlibTransport())
+        if booking_s2s_config is not None
+        else None
+    )
+    teya_crm = None
+    try:
+        teya_crm = build_teya_request_crm_service(
+            session_factory, worker_id=_lease_worker_id(worker_id, "teya")
+        )
+    except (ValueError, TypeError, RuntimeError):
+        # CRM REST / business-write misconfiguration must not abort the worker.
+        teya_crm = None
+    teya_request_orchestrator = TeyaRequestOrchestratorWorker(
+        session_factory,
+        remote=teya_remote,
+        crm=teya_crm,
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -388,6 +419,14 @@ def build_default_loop_specs(
             # Expected outcomes are returned as result objects, not exceptions.
             await self_booking_create.process_one(pending_id)
 
+    async def teya_request_orchestrator_tick() -> None:
+        await teya_request_orchestrator.ingest_feed()
+        for _ in range(min(settings.worker_batch_size, 5)):
+            pending_id = await teya_request_orchestrator.claim_one()
+            if pending_id is None:
+                return
+            await teya_request_orchestrator.process_one(pending_id)
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -418,6 +457,11 @@ def build_default_loop_specs(
             name=SELF_BOOKING_CREATE_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=self_booking_create_tick,
+        ),
+        WorkerLoopSpec(
+            name=TEYA_REQUEST_ORCHESTRATOR_LOOP,
+            poll_seconds=settings.worker_poll_seconds,
+            tick=teya_request_orchestrator_tick,
         ),
     )
 
