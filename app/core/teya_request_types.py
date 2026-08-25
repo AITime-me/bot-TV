@@ -27,6 +27,7 @@ __all__ = (
 )
 
 TEYA_REQUEST_ORCHESTRATOR_LOOP: Final[str] = "teya_request_orchestrator"
+TEYA_REQUEST_RECONCILIATION_LOOP: Final[str] = "teya_request_reconciliation"
 EXECUTION_LEASE_SECONDS: Final[int] = 90
 DEFAULT_MAX_ATTEMPTS: Final[int] = 8
 
@@ -46,6 +47,7 @@ class TeyaRequestPendingState(str, enum.Enum):
     DONE = "DONE"
     FAIL_CLOSED = "FAIL_CLOSED"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
 
 
 TERMINAL_TEYA_REQUEST_STATES: Final[frozenset[TeyaRequestPendingState]] = frozenset(
@@ -53,6 +55,7 @@ TERMINAL_TEYA_REQUEST_STATES: Final[frozenset[TeyaRequestPendingState]] = frozen
         TeyaRequestPendingState.DONE,
         TeyaRequestPendingState.FAIL_CLOSED,
         TeyaRequestPendingState.RECONCILIATION_REQUIRED,
+        TeyaRequestPendingState.MANUAL_REVIEW,
     }
 )
 

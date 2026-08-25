@@ -25,7 +25,7 @@ from app.db.base import Base
 _STATE_SQL = (
     "'DISCOVERED', 'IDENTITY', 'CRM_READY', 'RECONCILED', 'CONTACT_ROUTE', "
     "'READY_TO_BOOK', 'WAITING_CONTACT', 'BOOKING', 'VERIFYING', 'DONE', "
-    "'FAIL_CLOSED', 'RECONCILIATION_REQUIRED'"
+    "'FAIL_CLOSED', 'RECONCILIATION_REQUIRED', 'MANUAL_REVIEW'"
 )
 _UUID_RE = (
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -84,6 +84,9 @@ class TeyaRequestPending(Base):
     )
     result_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manual_review_reason: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     contact_route_outcome: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )

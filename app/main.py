@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
 from app.amocrm_chat_webhook import build_amocrm_chat_router
 from app.channels.vk_master_config import VkMasterAdapterConfig, VkMasterConfigError
 from app.channels.vk_master_http import NullVkMasterSender, VkMasterHttpSender
+from app.teya_ops_router import build_teya_ops_router, load_teya_ops_config
 from app.closed_test_router import (
     build_closed_test_router,
     install_closed_test_validation_handler,
@@ -215,6 +216,12 @@ def create_app(
         engine=engine,
     )
 
+    # Teya reliability ops snapshot (default-off; token-gated).
+    _register_teya_ops_routes(
+        application,
+        engine=engine,
+    )
+
     # AMO-01A: amoCRM Chat manager webhook → durable ingress (default-off).
     _register_amocrm_chat_routes(
         application,
@@ -223,6 +230,20 @@ def create_app(
     )
 
     return application
+
+
+def _register_teya_ops_routes(
+    application: FastAPI,
+    *,
+    engine: AsyncEngine | None,
+) -> None:
+    config = load_teya_ops_config()
+    if config is None or engine is None:
+        return
+    session_factory = create_session_factory(engine)
+    application.include_router(
+        build_teya_ops_router(config=config, session_factory=session_factory)
+    )
 
 
 def _register_closed_test_routes(

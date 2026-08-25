@@ -77,6 +77,8 @@ from app.models.self_booking_create_pending import SelfBookingCreatePending
 from app.models.self_booking_active_offer import SelfBookingActiveOffer
 from app.models.self_booking_pii_admission import SelfBookingPiiAdmission
 from app.models.teya_request_pending import TeyaRequestPending
+from app.models.teya_request_feed_cursor import TeyaRequestFeedCursor
+from app.models.integration_circuit_breaker import IntegrationCircuitBreaker
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
     DeliveryStatus,

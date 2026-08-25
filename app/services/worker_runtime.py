@@ -28,6 +28,7 @@ from app.models.worker_heartbeat import (
     REQUIRED_WORKER_LOOPS,
     SELF_BOOKING_CREATE_LOOP,
     TEYA_REQUEST_ORCHESTRATOR_LOOP,
+    TEYA_REQUEST_RECONCILIATION_LOOP,
 )
 from app.repositories import worker_heartbeats as heartbeat_repo
 from app.repositories.amocrm_mirror import StaleAmoCrmMirrorLeaseError
@@ -51,6 +52,9 @@ from app.services.self_booking_create_execution_worker import (
 from app.services.teya_request_crm_wiring import build_teya_request_crm_service
 from app.services.teya_request_orchestrator_worker import (
     TeyaRequestOrchestratorWorker,
+)
+from app.services.teya_request_reconciliation_worker import (
+    TeyaRequestReconciliationWorker,
 )
 
 logger = logging.getLogger(__name__)
@@ -348,6 +352,11 @@ def build_default_loop_specs(
         remote=teya_remote,
         crm=teya_crm,
     )
+    teya_request_reconciliation = TeyaRequestReconciliationWorker(
+        session_factory,
+        remote=teya_remote,
+        crm=teya_crm,
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -427,6 +436,9 @@ def build_default_loop_specs(
                 return
             await teya_request_orchestrator.process_one(pending_id)
 
+    async def teya_request_reconciliation_tick() -> None:
+        await teya_request_reconciliation.tick()
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -462,6 +474,11 @@ def build_default_loop_specs(
             name=TEYA_REQUEST_ORCHESTRATOR_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=teya_request_orchestrator_tick,
+        ),
+        WorkerLoopSpec(
+            name=TEYA_REQUEST_RECONCILIATION_LOOP,
+            poll_seconds=settings.worker_poll_seconds,
+            tick=teya_request_reconciliation_tick,
         ),
     )
 

@@ -215,7 +215,8 @@ async def advance_state(
     if clear_lease or state in TERMINAL_TEYA_REQUEST_STATES:
         values["lease_token"] = None
         values["lease_expires_at"] = None
-    if next_retry_at is not None:
+        values["next_retry_at"] = None
+    if next_retry_at is not None and state not in TERMINAL_TEYA_REQUEST_STATES:
         values["next_retry_at"] = next_retry_at
 
     stmt = (
@@ -229,3 +230,61 @@ async def advance_state(
     result = await session.execute(stmt)
     await session.flush()
     return bool(result.rowcount and result.rowcount == 1)
+
+
+async def mark_manual_review(
+    session: AsyncSession,
+    *,
+    row: TeyaRequestPending,
+    now: datetime,
+    reason: str,
+    lease_token: uuid.UUID | None = None,
+) -> bool:
+    """Force terminal MANUAL_REVIEW; clears lease and next_retry_at."""
+
+    values: dict[str, object] = {
+        "state": TeyaRequestPendingState.MANUAL_REVIEW.value,
+        "result_code": reason,
+        "result_outcome": TeyaRequestPendingState.MANUAL_REVIEW.value,
+        "manual_review_reason": reason,
+        "lease_token": None,
+        "lease_expires_at": None,
+        "next_retry_at": None,
+        "updated_at": now,
+    }
+    conditions = [TeyaRequestPending.id == row.id]
+    if lease_token is not None:
+        conditions.append(TeyaRequestPending.lease_token == lease_token)
+    stmt = update(TeyaRequestPending).where(*conditions).values(**values)
+    result = await session.execute(stmt)
+    await session.flush()
+    return bool(result.rowcount and result.rowcount == 1)
+
+
+async def expire_exhausted_to_manual_review(
+    session: AsyncSession, *, now: datetime
+) -> int:
+    """Non-terminal rows with attempt_count >= max_attempts → MANUAL_REVIEW."""
+
+    stmt = (
+        update(TeyaRequestPending)
+        .where(
+            TeyaRequestPending.attempt_count >= TeyaRequestPending.max_attempts,
+            TeyaRequestPending.state.notin_(
+                [s.value for s in TERMINAL_TEYA_REQUEST_STATES]
+            ),
+        )
+        .values(
+            state=TeyaRequestPendingState.MANUAL_REVIEW.value,
+            result_code="MAX_ATTEMPTS_EXCEEDED",
+            result_outcome=TeyaRequestPendingState.MANUAL_REVIEW.value,
+            manual_review_reason="MAX_ATTEMPTS_EXCEEDED",
+            lease_token=None,
+            lease_expires_at=None,
+            next_retry_at=None,
+            updated_at=now,
+        )
+    )
+    result = await session.execute(stmt)
+    await session.flush()
+    return int(result.rowcount or 0)

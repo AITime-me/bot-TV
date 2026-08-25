@@ -62,6 +62,7 @@ Thumbs.db
 !alembic/versions/20260820_30_pii_admission.py
 !alembic/versions/20260821_31_sbc_exec_loop.py
 !alembic/versions/20260825_32_teya_req_orch.py
+!alembic/versions/20260825_33_teya_reliability.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -98,6 +99,8 @@ Thumbs.db
 !app/core/booking_request_remote.py
 !app/core/booking_request_http.py
 !app/core/teya_request_types.py
+!app/core/teya_request_retry.py
+!app/core/amocrm_circuit_breaker.py
 !app/core/amocrm_crm_writes_http.py
 !app/core/amocrm_crm_business_write_config.py
 !app/core/s2s_http_transport.py
@@ -148,6 +151,7 @@ Thumbs.db
 !app/db/worker_lock.py
 !app/http_healthcheck.py
 !app/closed_test_router.py
+!app/teya_ops_router.py
 !app/amocrm_chat_webhook.py
 !app/identity_glue_ops.py
 !app/amocrm_buyer_card_bind_ops.py
@@ -174,6 +178,8 @@ Thumbs.db
 !app/models/master_command_pending.py
 !app/models/self_booking_create_pending.py
 !app/models/teya_request_pending.py
+!app/models/teya_request_feed_cursor.py
+!app/models/integration_circuit_breaker.py
 !app/models/self_booking_active_offer.py
 !app/models/self_booking_pii_admission.py
 !app/models/outbox.py
@@ -197,6 +203,8 @@ Thumbs.db
 !app/repositories/master_command_pendings.py
 !app/repositories/self_booking_create_pendings.py
 !app/repositories/teya_request_pendings.py
+!app/repositories/teya_request_feed_cursors.py
+!app/repositories/integration_circuit_breakers.py
 !app/repositories/self_booking_active_offers.py
 !app/repositories/self_booking_pii_admissions.py
 !app/repositories/messages.py
@@ -255,6 +263,7 @@ Thumbs.db
 !app/services/teya_request_contact_route.py
 !app/services/teya_request_orchestrator.py
 !app/services/teya_request_orchestrator_worker.py
+!app/services/teya_request_reconciliation_worker.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py

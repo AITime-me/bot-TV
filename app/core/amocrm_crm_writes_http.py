@@ -186,7 +186,11 @@ class AmoCrmCrmWritesHttpClient:
         if outcome is not AmoCrmCrmRestOutcome.SUCCESS or response is None:
             return AmoCrmCrmWriteReceipt(
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
-                error_code="AMOCRM_CONTACT_CREATE_FAILED",
+                error_code=(
+                    "AMOCRM_CONTACT_CREATE_TRANSIENT"
+                    if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+                    else "AMOCRM_CONTACT_CREATE_FAILED"
+                ),
                 http_calls=tuple(self.http_calls),
             )
         contact_id = _parse_embedded_id(response.body, "contacts")
@@ -262,7 +266,11 @@ class AmoCrmCrmWritesHttpClient:
             return AmoCrmCrmWriteReceipt(
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
                 contact_id=contact_id,
-                error_code="AMOCRM_LEAD_CREATE_FAILED",
+                error_code=(
+                    "AMOCRM_LEAD_CREATE_TRANSIENT"
+                    if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+                    else "AMOCRM_LEAD_CREATE_FAILED"
+                ),
                 http_calls=tuple(self.http_calls),
             )
         lead_id = _parse_embedded_id(response.body, "leads")
@@ -306,7 +314,11 @@ class AmoCrmCrmWritesHttpClient:
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
                 contact_id=contact_id,
                 lead_id=lead_id,
-                error_code="AMOCRM_LEAD_REANIMATE_READ",
+                error_code=(
+                    "AMOCRM_LEAD_REANIMATE_TRANSIENT"
+                    if before_outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+                    else "AMOCRM_LEAD_REANIMATE_READ"
+                ),
                 http_calls=tuple(self.http_calls),
             )
         before_payload = _json_dict(before.body)
@@ -334,7 +346,11 @@ class AmoCrmCrmWritesHttpClient:
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
                 contact_id=contact_id,
                 lead_id=lead_id,
-                error_code="AMOCRM_LEAD_REANIMATE_FAILED",
+                error_code=(
+                    "AMOCRM_LEAD_REANIMATE_TRANSIENT"
+                    if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+                    else "AMOCRM_LEAD_REANIMATE_FAILED"
+                ),
                 http_calls=tuple(self.http_calls),
             )
         return self._postcheck_lead(
@@ -342,6 +358,112 @@ class AmoCrmCrmWritesHttpClient:
             contact_id=contact_id,
             access_token=access_token,
             expect_status=self._open_status_id,
+        )
+
+    def ensure_lead_note(
+        self,
+        *,
+        lead_id: str,
+        text: str,
+        access_token: str,
+    ) -> AmoCrmCrmWriteReceipt:
+        """List lead notes; reuse exact text fingerprint or create + postcheck."""
+
+        if type(lead_id) is not str or not lead_id.isdigit():
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                error_code="AMOCRM_LEAD_ID_INVALID",
+            )
+        if type(text) is not str or not text or len(text) > 2000:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                error_code="AMOCRM_NOTE_TEXT_INVALID",
+            )
+        fingerprint = task_text_fingerprint(text)
+        notes = self._list_lead_notes(lead_id=lead_id, access_token=access_token)
+        if notes is None:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                lead_id=lead_id,
+                error_code="AMOCRM_NOTE_LIST_TRANSIENT",
+                http_calls=tuple(self.http_calls),
+            )
+        matching = [
+            row
+            for row in notes
+            if task_text_fingerprint(_note_text(row)) == fingerprint
+        ]
+        if len(matching) > 1:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                lead_id=lead_id,
+                error_code="AMOCRM_NOTE_AMBIGUOUS",
+                http_calls=tuple(self.http_calls),
+            )
+        if len(matching) == 1:
+            note_id = str(matching[0].get("id"))
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.VERIFIED,
+                lead_id=lead_id,
+                note_id=note_id,
+                http_calls=tuple(self.http_calls),
+            )
+        return self.add_lead_note(
+            lead_id=lead_id, text=text, access_token=access_token
+        )
+
+    def find_lead_note(
+        self,
+        *,
+        lead_id: str,
+        text: str,
+        access_token: str,
+    ) -> AmoCrmCrmWriteReceipt:
+        """Read-only note fingerprint lookup. Never POSTs."""
+
+        if type(lead_id) is not str or not lead_id.isdigit():
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                error_code="AMOCRM_LEAD_ID_INVALID",
+            )
+        if type(text) is not str or not text or len(text) > 2000:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                error_code="AMOCRM_NOTE_TEXT_INVALID",
+            )
+        fingerprint = task_text_fingerprint(text)
+        notes = self._list_lead_notes(lead_id=lead_id, access_token=access_token)
+        if notes is None:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                lead_id=lead_id,
+                error_code="AMOCRM_NOTE_LIST_TRANSIENT",
+                http_calls=tuple(self.http_calls),
+            )
+        matching = [
+            row
+            for row in notes
+            if task_text_fingerprint(_note_text(row)) == fingerprint
+        ]
+        if len(matching) > 1:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                lead_id=lead_id,
+                error_code="AMOCRM_NOTE_AMBIGUOUS",
+                http_calls=tuple(self.http_calls),
+            )
+        if len(matching) == 1:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.VERIFIED,
+                lead_id=lead_id,
+                note_id=str(matching[0].get("id")),
+                http_calls=tuple(self.http_calls),
+            )
+        return AmoCrmCrmWriteReceipt(
+            outcome=AmoCrmCrmWriteOutcome.FAILED,
+            lead_id=lead_id,
+            error_code="AMOCRM_NOTE_NONE",
+            http_calls=tuple(self.http_calls),
         )
 
     def add_lead_note(
@@ -373,7 +495,11 @@ class AmoCrmCrmWritesHttpClient:
             return AmoCrmCrmWriteReceipt(
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
                 lead_id=lead_id,
-                error_code="AMOCRM_NOTE_CREATE_FAILED",
+                error_code=(
+                    "AMOCRM_NOTE_CREATE_TRANSIENT"
+                    if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+                    else "AMOCRM_NOTE_CREATE_FAILED"
+                ),
                 http_calls=tuple(self.http_calls),
             )
         note_id = _parse_embedded_id(response.body, "notes")
@@ -433,7 +559,7 @@ class AmoCrmCrmWritesHttpClient:
             return AmoCrmCrmWriteReceipt(
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
                 lead_id=lead_id,
-                error_code="AMOCRM_TASK_LIST_FAILED",
+                error_code="AMOCRM_TASK_LIST_TRANSIENT",
                 http_calls=tuple(self.http_calls),
             )
         matching = [
@@ -445,7 +571,7 @@ class AmoCrmCrmWritesHttpClient:
         ]
         if len(matching) > 1:
             return AmoCrmCrmWriteReceipt(
-                outcome=AmoCrmCrmWriteOutcome.RECONCILIATION_REQUIRED,
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
                 lead_id=lead_id,
                 error_code="AMOCRM_TASK_AMBIGUOUS",
                 http_calls=tuple(self.http_calls),
@@ -479,7 +605,11 @@ class AmoCrmCrmWritesHttpClient:
             return AmoCrmCrmWriteReceipt(
                 outcome=AmoCrmCrmWriteOutcome.FAILED,
                 lead_id=lead_id,
-                error_code="AMOCRM_TASK_CREATE_FAILED",
+                error_code=(
+                    "AMOCRM_TASK_CREATE_TRANSIENT"
+                    if outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+                    else "AMOCRM_TASK_CREATE_FAILED"
+                ),
                 http_calls=tuple(self.http_calls),
             )
         task_id = _parse_embedded_id(response.body, "tasks")
@@ -510,6 +640,62 @@ class AmoCrmCrmWritesHttpClient:
             outcome=AmoCrmCrmWriteOutcome.VERIFIED,
             lead_id=lead_id,
             task_id=task_id,
+            http_calls=tuple(self.http_calls),
+            )
+
+    def find_lead_task(
+        self,
+        *,
+        lead_id: str,
+        text: str,
+        access_token: str,
+    ) -> AmoCrmCrmWriteReceipt:
+        """Read-only task fingerprint lookup. Never POSTs."""
+
+        if type(lead_id) is not str or not lead_id.isdigit():
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                error_code="AMOCRM_LEAD_ID_INVALID",
+            )
+        if type(text) is not str or not text or len(text) > 500:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                error_code="AMOCRM_TASK_TEXT_INVALID",
+            )
+        fingerprint = task_text_fingerprint(text)
+        tasks = self._list_active_tasks(lead_id=lead_id, access_token=access_token)
+        if tasks is None:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                lead_id=lead_id,
+                error_code="AMOCRM_TASK_LIST_TRANSIENT",
+                http_calls=tuple(self.http_calls),
+            )
+        matching = [
+            row
+            for row in tasks
+            if task_text_fingerprint(str(row.get("text") or "")) == fingerprint
+            and row.get("task_type_id") == self._task_type_id
+            and row.get("responsible_user_id") == self._manager_id
+        ]
+        if len(matching) > 1:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.FAILED,
+                lead_id=lead_id,
+                error_code="AMOCRM_TASK_AMBIGUOUS",
+                http_calls=tuple(self.http_calls),
+            )
+        if len(matching) == 1:
+            return AmoCrmCrmWriteReceipt(
+                outcome=AmoCrmCrmWriteOutcome.VERIFIED,
+                lead_id=lead_id,
+                task_id=str(matching[0].get("id")),
+                http_calls=tuple(self.http_calls),
+            )
+        return AmoCrmCrmWriteReceipt(
+            outcome=AmoCrmCrmWriteOutcome.FAILED,
+            lead_id=lead_id,
+            error_code="AMOCRM_TASK_NONE",
             http_calls=tuple(self.http_calls),
         )
 
@@ -579,6 +765,27 @@ class AmoCrmCrmWritesHttpClient:
             return None
         return [row for row in rows if isinstance(row, dict)]
 
+    def _list_lead_notes(
+        self, *, lead_id: str, access_token: str
+    ) -> list[dict] | None:
+        path = f"/api/v4/leads/{lead_id}/notes?limit=250"
+        outcome, response = self._request(
+            method="GET",
+            path=path,
+            access_token=access_token,
+            body=b"",
+            call_label="GET_LEAD_NOTES",
+        )
+        if response is not None and response.status_code == 204:
+            return []
+        if outcome is not AmoCrmCrmRestOutcome.SUCCESS or response is None:
+            return None
+        payload = _json_dict(response.body)
+        rows = (payload.get("_embedded") or {}).get("notes") or []
+        if not isinstance(rows, list):
+            return None
+        return [row for row in rows if isinstance(row, dict)]
+
     def _request(
         self,
         *,
@@ -641,3 +848,13 @@ def _parse_embedded_id(body: bytes, key: str) -> str | None:
     if type(entity_id) is int and not isinstance(entity_id, bool) and entity_id > 0:
         return str(entity_id)
     return None
+
+
+def _note_text(row: dict) -> str:
+    params = row.get("params")
+    if isinstance(params, dict):
+        text = params.get("text")
+        if type(text) is str:
+            return text
+    text = row.get("text")
+    return text if type(text) is str else ""

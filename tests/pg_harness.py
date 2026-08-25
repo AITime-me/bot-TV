@@ -174,6 +174,24 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_teya_pendings = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.teya_request_pendings') "
+                    "IS NOT NULL"
+                )
+            )
+            has_teya_feed_cursors = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.teya_request_feed_cursors') "
+                    "IS NOT NULL"
+                )
+            )
+            has_circuit_breakers = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.integration_circuit_breakers') "
+                    "IS NOT NULL"
+                )
+            )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
@@ -211,6 +229,12 @@ async def truncate_foundation_tables(
                 tables.insert(0, "amocrm_entity_links")
             if has_amocrm_oauth:
                 tables.insert(0, "amocrm_crm_oauth_tokens")
+            if has_teya_pendings:
+                tables.insert(0, "teya_request_pendings")
+            if has_teya_feed_cursors:
+                tables.insert(0, "teya_request_feed_cursors")
+            if has_circuit_breakers:
+                tables.insert(0, "integration_circuit_breakers")
             if has_worker_heartbeats:
                 tables.insert(0, "worker_heartbeats")
             if has_ingress:

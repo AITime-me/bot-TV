@@ -21,6 +21,16 @@ from app.core.booking_request_remote import (
     AppointmentsLookupOutcome,
     BotBookingRequestDto,
 )
+from app.core.teya_request_retry import (
+    classify_remote_code,
+    load_teya_retry_policy,
+    TeyaRetryPolicy,
+)
+from app.core.amocrm_circuit_breaker import (
+    ProbeClaimOutcome,
+    load_amocrm_breaker_policy,
+    is_breaker_failure_code,
+)
 from app.core.teya_request_types import (
     ContactRouteOutcome,
     TeyaRequestOrchestratorOutcome,
@@ -29,12 +39,16 @@ from app.core.teya_request_types import (
 )
 from app.db.clock import db_statement_now
 from app.models.teya_request_pending import TeyaRequestPending
+from app.repositories import integration_circuit_breakers as breaker_repo
 from app.repositories import teya_request_pendings as pending_repo
 from app.services.teya_request_contact_route import ConversationLocator
+from app.core.amocrm_crm_writes_http import TASK_TEXT_DEFAULT
 from app.services.teya_request_crm import (
     TeyaCrmActionOutcome,
     TeyaRequestCrmService,
     build_game_task_text,
+    build_teya_crm_task_text,
+    build_teya_structured_note,
 )
 from app.services.teya_request_pending import TeyaRequestPendingService
 
@@ -47,10 +61,10 @@ _ALLOWED_LOG_CODES: frozenset[str] = frozenset(
         "TEYA_ORCH_RETRY",
         "TEYA_ORCH_CLAIM_DENIED",
         "TEYA_ORCH_FAIL_CLOSED",
+        "TEYA_ORCH_MANUAL_REVIEW",
+        "TEYA_ORCH_BREAKER_OPEN",
     }
 )
-
-_RETRY_SECONDS = 30
 
 
 class BookingRequestRemotePort(Protocol):
@@ -97,6 +111,7 @@ class TeyaRequestOrchestratorService:
         crm: TeyaRequestCrmService | None = None,
         contact_locator: ConversationLocator | None = None,
         clock: Callable[[], datetime] | None = None,
+        retry_policy: TeyaRetryPolicy | None = None,
     ) -> None:
         self._session = session
         self._pending = pending_service
@@ -104,6 +119,8 @@ class TeyaRequestOrchestratorService:
         self._crm = crm
         self._locator = contact_locator or ConversationLocator()
         self._clock = clock
+        self._retry_policy = retry_policy or load_teya_retry_policy()
+        self._breaker_policy = load_amocrm_breaker_policy()
 
     async def _now(self) -> datetime:
         if self._clock is not None:
@@ -191,6 +208,7 @@ class TeyaRequestOrchestratorService:
             TeyaRequestPendingState.DONE,
             TeyaRequestPendingState.FAIL_CLOSED,
             TeyaRequestPendingState.RECONCILIATION_REQUIRED,
+            TeyaRequestPendingState.MANUAL_REVIEW,
         }
         if terminal:
             _log("TEYA_ORCH_TERMINAL")
@@ -212,19 +230,47 @@ class TeyaRequestOrchestratorService:
         self, row: TeyaRequestPending, lease: uuid.UUID, code: str
     ) -> TeyaRequestOrchestratorResult:
         now = await self._now()
+        if row.attempt_count >= row.max_attempts:
+            return await self._manual_review(row, lease, "MAX_ATTEMPTS_EXCEEDED")
+        delay = self._retry_policy.delay_seconds(row.attempt_count)
         await pending_repo.release_lease(
             self._session,
             row=row,
             lease_token=lease,
             now=now,
-            next_retry_at=now + timedelta(seconds=_RETRY_SECONDS),
+            next_retry_at=now + timedelta(seconds=delay),
             result_code=code,
         )
+        if is_breaker_failure_code(code):
+            await breaker_repo.record_failure(
+                self._session,
+                now=now,
+                policy=self._breaker_policy,
+            )
         _log("TEYA_ORCH_RETRY")
         return TeyaRequestOrchestratorResult(
             outcome=TeyaRequestOrchestratorOutcome.RETRY_SCHEDULED,
             pending_id=_as_uuid(row.id),
             pending_state=TeyaRequestPendingState(row.state),
+            result_code=code,
+        )
+
+    async def _manual_review(
+        self, row: TeyaRequestPending, lease: uuid.UUID, code: str
+    ) -> TeyaRequestOrchestratorResult:
+        _log("TEYA_ORCH_MANUAL_REVIEW")
+        now = await self._now()
+        await pending_repo.mark_manual_review(
+            self._session,
+            row=row,
+            now=now,
+            reason=code,
+            lease_token=lease,
+        )
+        return TeyaRequestOrchestratorResult(
+            outcome=TeyaRequestOrchestratorOutcome.TERMINAL,
+            pending_id=_as_uuid(row.id),
+            pending_state=TeyaRequestPendingState.MANUAL_REVIEW,
             result_code=code,
         )
 
@@ -264,15 +310,51 @@ class TeyaRequestOrchestratorService:
             )
         if code == "RECONCILIATION_REQUIRED":
             return await self._reconciliation(row, lease, code)
-        if code in {
-            "RATE_LIMITED",
-            "IDEMPOTENCY_IN_PROGRESS",
-            "TRANSPORT_ERROR",
-            "TIMEOUT",
-            "INTERNAL_ERROR",
-        }:
+        kind = classify_remote_code(code)
+        if kind == "RETRY":
             return await self._retry(row, lease, code)
+        if kind == "MANUAL":
+            return await self._manual_review(row, lease, code)
         return await self._fail_closed(row, lease, code)
+
+    async def _guard_crm_breaker(
+        self, row: TeyaRequestPending, lease: uuid.UUID
+    ) -> TeyaRequestOrchestratorResult | None:
+        now = await self._now()
+        claim = await breaker_repo.try_claim_probe(
+            self._session, now=now, policy=self._breaker_policy
+        )
+        if claim.outcome is ProbeClaimOutcome.ALLOWED:
+            return None
+        _log("TEYA_ORCH_BREAKER_OPEN")
+        delay = max(
+            self._breaker_policy.cooldown_seconds,
+            self._breaker_policy.probe_lease_seconds,
+            self._retry_policy.base_seconds,
+        )
+        if row.attempt_count >= row.max_attempts:
+            return await self._manual_review(
+                row, lease, "BREAKER_OPEN_EXHAUSTED"
+            )
+        code = (
+            "AMOCRM_BREAKER_PROBE_BUSY"
+            if claim.outcome is ProbeClaimOutcome.DENIED_PROBE_BUSY
+            else "AMOCRM_BREAKER_OPEN"
+        )
+        await pending_repo.release_lease(
+            self._session,
+            row=row,
+            lease_token=lease,
+            now=now,
+            next_retry_at=now + timedelta(seconds=delay),
+            result_code=code,
+        )
+        return TeyaRequestOrchestratorResult(
+            outcome=TeyaRequestOrchestratorOutcome.RETRY_SCHEDULED,
+            pending_id=_as_uuid(row.id),
+            pending_state=TeyaRequestPendingState(row.state),
+            result_code=code,
+        )
 
     async def _step_discovered(
         self, row: TeyaRequestPending, lease: uuid.UUID
@@ -288,7 +370,10 @@ class TeyaRequestOrchestratorService:
     ) -> TeyaRequestOrchestratorResult:
         dto = self._remote.get(request_id=str(row.request_id))
         if self._crm is None:
-            return await self._fail_closed(row, lease, "CRM_UNBOUND")
+            return await self._manual_review(row, lease, "CRM_UNBOUND")
+        blocked = await self._guard_crm_breaker(row, lease)
+        if blocked is not None:
+            return blocked
         if not dto.phone_e164:
             return await self._fail_closed(row, lease, "PHONE_MISSING")
         try:
@@ -306,6 +391,10 @@ class TeyaRequestOrchestratorService:
         )
         if crm.outcome is TeyaCrmActionOutcome.RETRY:
             return await self._retry(row, lease, crm.error_code or "CRM_RETRY")
+        if crm.outcome is TeyaCrmActionOutcome.MANUAL_REVIEW:
+            return await self._manual_review(
+                row, lease, crm.error_code or "CRM_MANUAL_REVIEW"
+            )
         if crm.outcome is TeyaCrmActionOutcome.FAIL_CLOSED:
             return await self._fail_closed(
                 row, lease, crm.error_code or "CRM_FAIL_CLOSED"
@@ -314,6 +403,10 @@ class TeyaRequestOrchestratorService:
             return await self._reconciliation(
                 row, lease, crm.error_code or "CRM_RECONCILIATION"
             )
+        now = await self._now()
+        await breaker_repo.record_success(
+            self._session, now=now, policy=self._breaker_policy
+        )
         return await self._advance(
             row,
             lease,
@@ -327,23 +420,25 @@ class TeyaRequestOrchestratorService:
     ) -> TeyaRequestOrchestratorResult:
         dto = self._remote.get(request_id=str(row.request_id))
         deal_id = row.amocrm_deal_id
-        if not deal_id or self._crm is None:
+        if self._crm is None:
+            return await self._manual_review(row, lease, "CRM_UNBOUND")
+        if not deal_id:
             return await self._fail_closed(row, lease, "CRM_DEAL_MISSING")
-        note = _safe_note(dto)
-        task_text = "Обработать заявку из онлайн-записи"
-        if dto.game_context is not None:
-            # Game note/task finalized after appointments lookup in RECONCILED.
-            task_text = build_game_task_text(
-                gift=dto.game_context.gift,
-                procedure=dto.game_context.procedure,
-                appointment_id=None,
-            )
+        blocked = await self._guard_crm_breaker(row, lease)
+        if blocked is not None:
+            return blocked
+        note = build_teya_structured_note(dto)
+        task_text = build_teya_crm_task_text(dto, appointment_id=None)
         attached = await self._crm.attach_note_and_task(
             deal_id=deal_id, note_text=note, task_text=task_text
         )
         if attached.outcome is TeyaCrmActionOutcome.RETRY:
             return await self._retry(
                 row, lease, attached.error_code or "CRM_NOTE_RETRY"
+            )
+        if attached.outcome is TeyaCrmActionOutcome.MANUAL_REVIEW:
+            return await self._manual_review(
+                row, lease, attached.error_code or "CRM_NOTE_MANUAL"
             )
         if attached.outcome is TeyaCrmActionOutcome.FAIL_CLOSED:
             return await self._fail_closed(
@@ -353,6 +448,10 @@ class TeyaRequestOrchestratorService:
             return await self._reconciliation(
                 row, lease, attached.error_code or "CRM_NOTE_RECON"
             )
+        now = await self._now()
+        await breaker_repo.record_success(
+            self._session, now=now, policy=self._breaker_policy
+        )
         return await self._advance(
             row,
             lease,
@@ -374,7 +473,7 @@ class TeyaRequestOrchestratorService:
                     await self._crm.attach_note_and_task(
                         deal_id=row.amocrm_deal_id,
                         note_text="GAME_APPOINTMENTS_AMBIGUOUS",
-                        task_text="Обработать заявку из онлайн-записи",
+                        task_text=TASK_TEXT_DEFAULT,
                     )
                 return await self._reconciliation(
                     row, lease, "GAME_APPOINTMENTS_AMBIGUOUS"
@@ -388,7 +487,7 @@ class TeyaRequestOrchestratorService:
                     )
                     attached = await self._crm.attach_note_and_task(
                         deal_id=row.amocrm_deal_id,
-                        note_text=_safe_note(dto),
+                        note_text=build_teya_structured_note(dto),
                         task_text=task_text,
                     )
                     if attached.outcome is TeyaCrmActionOutcome.RECONCILIATION_REQUIRED:
@@ -411,7 +510,7 @@ class TeyaRequestOrchestratorService:
                 )
                 await self._crm.attach_note_and_task(
                     deal_id=row.amocrm_deal_id,
-                    note_text=_safe_note(dto),
+                    note_text=build_teya_structured_note(dto),
                     task_text=task_text,
                 )
         return await self._advance(
@@ -469,6 +568,8 @@ class TeyaRequestOrchestratorService:
         self, row: TeyaRequestPending, lease: uuid.UUID
     ) -> TeyaRequestOrchestratorResult:
         # Waiting for operator/slot; release lease without advancing.
+        if row.attempt_count >= row.max_attempts:
+            return await self._manual_review(row, lease, "MAX_ATTEMPTS_EXCEEDED")
         now = await self._now()
         await pending_repo.release_lease(
             self._session,
@@ -539,23 +640,3 @@ class TeyaRequestOrchestratorService:
             result_code="BOOKED",
             result_outcome=TeyaRequestPendingState.DONE.value,
         )
-
-
-def _safe_note(dto: BotBookingRequestDto) -> str:
-    """Structured note without raw phone."""
-
-    parts = [
-        f"type={dto.request_type}",
-        f"status={dto.status}",
-    ]
-    if dto.service_id:
-        parts.append("service=set")
-    if dto.master_id:
-        parts.append("master=set")
-    if dto.game_context is not None:
-        parts.append("game=set")
-        if dto.game_context.gift:
-            parts.append(f"gift={dto.game_context.gift[:80]}")
-        if dto.game_context.procedure:
-            parts.append(f"procedure={dto.game_context.procedure[:80]}")
-    return "; ".join(parts)
