@@ -134,7 +134,7 @@ async def test_existing_unique_contact_reuses_active_deal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_identity_fail_closed_no_creates() -> None:
+async def test_ambiguous_identity_manual_review_no_creates() -> None:
     transport = _FakeTransport([])
     writes = _writes(transport)
     crm = TeyaRequestCrmService(
@@ -153,7 +153,7 @@ async def test_ambiguous_identity_fail_closed_no_creates() -> None:
     result = await crm.ensure_contact_and_deal(
         phone_e164="+79001234567", client_name="Test"
     )
-    assert result.outcome is TeyaCrmActionOutcome.FAIL_CLOSED
+    assert result.outcome is TeyaCrmActionOutcome.MANUAL_REVIEW
     assert result.error_code == "IDENTITY_AMBIGUOUS"
     assert transport.calls == []
 
@@ -269,14 +269,16 @@ async def test_no_duplicate_active_deal() -> None:
     result = await crm.ensure_contact_and_deal(
         phone_e164="+79001234567", client_name="Test"
     )
-    assert result.outcome is TeyaCrmActionOutcome.FAIL_CLOSED
+    assert result.outcome is TeyaCrmActionOutcome.MANUAL_REVIEW
     assert result.error_code == "ACTIVE_DEAL_AMBIGUOUS"
 
 
 @pytest.mark.asyncio
 async def test_note_and_task_postcheck_and_dedupe() -> None:
+    note_text = "type=MANAGER_REQUEST"
     transport = _FakeTransport(
         [
+            _json_response(200, {"_embedded": {"notes": []}}),
             _json_response(200, {"_embedded": {"notes": [{"id": 9}]}}),
             _json_response(200, {"id": 9}),
             _json_response(200, {"_embedded": {"tasks": []}}),
@@ -311,17 +313,25 @@ async def test_note_and_task_postcheck_and_dedupe() -> None:
     )
     result = await crm.attach_note_and_task(
         deal_id="200",
-        note_text="type=MANAGER_REQUEST",
+        note_text=note_text,
     )
     assert result.outcome is TeyaCrmActionOutcome.READY
     assert result.note_id == "9"
     assert result.task_id == "77"
 
-    # Second call reuses fingerprint — list only, no POST_TASK.
+    # Second call reuses fingerprint — list only, no POST.
     transport2 = _FakeTransport(
         [
-            _json_response(200, {"_embedded": {"notes": [{"id": 10}]}}),
-            _json_response(200, {"id": 10}),
+            _json_response(
+                200,
+                {
+                    "_embedded": {
+                        "notes": [
+                            {"id": 10, "params": {"text": note_text}}
+                        ]
+                    }
+                },
+            ),
             _json_response(
                 200,
                 {
@@ -352,8 +362,10 @@ async def test_note_and_task_postcheck_and_dedupe() -> None:
     )
     reused = await crm2.attach_note_and_task(
         deal_id="200",
-        note_text="type=MANAGER_REQUEST",
+        note_text=note_text,
     )
     assert reused.outcome is TeyaCrmActionOutcome.READY
+    assert reused.note_id == "10"
     assert reused.task_id == "77"
+    assert "POST_NOTE" not in writes2.http_calls
     assert "POST_TASK" not in writes2.http_calls

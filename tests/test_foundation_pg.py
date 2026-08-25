@@ -417,6 +417,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "amocrm_mirror",
                 "self_booking_create",
                 "teya_request_orchestrator",
+                "teya_request_reconciliation",
             }
         ),
     ),

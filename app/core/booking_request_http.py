@@ -155,6 +155,11 @@ def _encode_body(body_object: object) -> bytes:
 
 
 def _map_error(status_code: int, body: bytes) -> BookingRequestAdapterReasonCode:
+    # Ordinary remote 5xx are retryable even without a typed envelope body.
+    if 500 <= status_code <= 599:
+        if status_code == 500:
+            return BookingRequestAdapterReasonCode.INTERNAL_ERROR
+        return BookingRequestAdapterReasonCode.SERVICE_UNAVAILABLE
     if status_code not in REMOTE_ERROR_CODE_BY_STATUS:
         return BookingRequestAdapterReasonCode.REMOTE_REJECTED
     if not body:

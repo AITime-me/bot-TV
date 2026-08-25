@@ -90,6 +90,9 @@ REMOTE_ERROR_CODE_BY_STATUS: Final[dict[int, frozenset[str]]] = {
     413: frozenset({"PAYLOAD_TOO_LARGE"}),
     429: frozenset({"RATE_LIMITED"}),
     500: frozenset({"INTERNAL_ERROR"}),
+    502: frozenset({"SERVICE_UNAVAILABLE"}),
+    503: frozenset({"SERVICE_UNAVAILABLE"}),
+    504: frozenset({"SERVICE_UNAVAILABLE"}),
 }
 
 
@@ -159,6 +162,7 @@ class BotBookingRequestDto:
     phone_e164: str | None = None
     game_context: BotBookingRequestGameContext | None = None
     appointment_id: str | None = None
+    created_at: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -171,7 +175,8 @@ class BotBookingRequestDto:
             "client_name=<redacted>, "
             "phone_e164=<redacted>, "
             f"game_context={self.game_context!r}, "
-            f"appointment_id={'set' if self.appointment_id else None})"
+            f"appointment_id={'set' if self.appointment_id else None}, "
+            f"created_at={'set' if self.created_at else None})"
         )
 
 
@@ -310,6 +315,11 @@ def parse_bot_booking_request_dto(payload: object) -> BotBookingRequestDto:
         phone_e164=phone if type(phone) is str else None,
         game_context=game,
         appointment_id=appointment_id,
+        created_at=(
+            payload.get("createdAt")
+            if type(payload.get("createdAt")) is str
+            else None
+        ),
     )
 
 

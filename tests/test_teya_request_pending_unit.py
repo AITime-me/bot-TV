@@ -52,6 +52,13 @@ def test_migration_defines_table_and_heartbeat_loop() -> None:
     assert "20260821_31_sbc_exec_loop" in text
     assert "selected_starts_at" in text
     assert "book_idempotency_key" in text
+    reliability = (
+        _REPO / "alembic/versions/20260825_33_teya_reliability.py"
+    ).read_text(encoding="utf-8")
+    assert "MANUAL_REVIEW" in reliability
+    assert "teya_request_feed_cursors" in reliability
+    assert "integration_circuit_breakers" in reliability
+    assert "teya_request_reconciliation" in reliability
 
 
 @pytest.mark.asyncio
