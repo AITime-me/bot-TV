@@ -76,6 +76,7 @@ from app.models.master_command_pending import MasterCommandPending
 from app.models.self_booking_create_pending import SelfBookingCreatePending
 from app.models.self_booking_active_offer import SelfBookingActiveOffer
 from app.models.self_booking_pii_admission import SelfBookingPiiAdmission
+from app.models.teya_request_pending import TeyaRequestPending
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
     DeliveryStatus,
@@ -164,6 +165,7 @@ __all__ = [
     "SelfBookingCreatePending",
     "SelfBookingActiveOffer",
     "SelfBookingPiiAdmission",
+    "TeyaRequestPending",
     "MirrorPayloadViolation",
     "OutboxMessage",
     "OUTBOUND_LOOP",
