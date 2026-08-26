@@ -271,6 +271,97 @@ class TeyaRequestCrmService:
                 )
         return mapped
 
+    async def discover_existing_business_deal(
+        self,
+        *,
+        phone_e164: str,
+    ) -> TeyaCrmActionResult:
+        """Identity + deal discovery only. Never creates contact/deal/note/task.
+
+        No OAuth token required. Used by A2.2 booking-method analytics.
+        """
+
+        lookup = await self._identity.lookup_by_phone(phone_e164=phone_e164)
+        if lookup.outcome is AmoCrmIdentityLookupOutcome.AMBIGUOUS:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
+                error_code="IDENTITY_AMBIGUOUS",
+            )
+        if lookup.outcome in {
+            AmoCrmIdentityLookupOutcome.TRANSIENT_ERROR,
+            AmoCrmIdentityLookupOutcome.DISABLED,
+        }:
+            if lookup.outcome is AmoCrmIdentityLookupOutcome.DISABLED:
+                return TeyaCrmActionResult(
+                    outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
+                    error_code=lookup.error_code or "AMOCRM_CRM_REST_DISABLED",
+                )
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.RETRY,
+                error_code=lookup.error_code or "IDENTITY_TRANSIENT",
+            )
+        if lookup.outcome is AmoCrmIdentityLookupOutcome.NOT_FOUND:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.NONE,
+                error_code="CONTACT_NONE",
+            )
+        if lookup.outcome is not AmoCrmIdentityLookupOutcome.FOUND:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.FAIL_CLOSED,
+                error_code=lookup.error_code or "IDENTITY_FAIL_CLOSED",
+            )
+        contact_id = lookup.contact_id
+        if not contact_id:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.NONE,
+                error_code="CONTACT_NONE",
+            )
+
+        discovery = await self._deals.discover_deal_candidates(
+            contact_id=contact_id,
+            known_technical_deal_ids=await self._known_technical_deal_ids(),
+        )
+        if discovery.outcome is AmoCrmDealDiscoveryOutcome.DISABLED:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
+                contact_id=contact_id,
+                error_code=discovery.error_code or "AMOCRM_CRM_REST_DISABLED",
+            )
+        if discovery.outcome is AmoCrmDealDiscoveryOutcome.TRANSIENT_ERROR:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.RETRY,
+                contact_id=contact_id,
+                error_code=discovery.error_code or "DEAL_TRANSIENT",
+            )
+        if discovery.outcome in {
+            AmoCrmDealDiscoveryOutcome.PERMANENT_ERROR,
+            AmoCrmDealDiscoveryOutcome.INVALID_INPUT,
+            AmoCrmDealDiscoveryOutcome.INCOMPLETE,
+        }:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.FAIL_CLOSED,
+                contact_id=contact_id,
+                error_code=discovery.error_code or "DEAL_FAIL_CLOSED",
+            )
+        if len(discovery.business_active_lead_ids) > 1:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
+                contact_id=contact_id,
+                error_code="ACTIVE_DEAL_AMBIGUOUS",
+            )
+        if len(discovery.business_active_lead_ids) == 0:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.NONE,
+                contact_id=contact_id,
+                error_code="DEAL_NONE",
+            )
+        deal_id = discovery.business_active_lead_ids[0]
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.READY,
+            contact_id=contact_id,
+            deal_id=deal_id,
+        )
+
     async def reconcile_readonly(
         self,
         *,

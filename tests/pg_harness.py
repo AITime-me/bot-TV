@@ -186,6 +186,13 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_booking_method_pendings = await session.scalar(
+                text(
+                    "SELECT to_regclass("
+                    "'public.booking_method_analytics_pendings') "
+                    "IS NOT NULL"
+                )
+            )
             has_circuit_breakers = await session.scalar(
                 text(
                     "SELECT to_regclass('public.integration_circuit_breakers') "
@@ -233,6 +240,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "teya_request_pendings")
             if has_teya_feed_cursors:
                 tables.insert(0, "teya_request_feed_cursors")
+            if has_booking_method_pendings:
+                tables.insert(0, "booking_method_analytics_pendings")
             if has_circuit_breakers:
                 tables.insert(0, "integration_circuit_breakers")
             if has_worker_heartbeats:
