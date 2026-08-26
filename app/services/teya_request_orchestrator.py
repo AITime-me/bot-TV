@@ -36,12 +36,17 @@ from app.core.teya_request_types import (
     TeyaRequestOrchestratorOutcome,
     TeyaRequestOrchestratorResult,
     TeyaRequestPendingState,
+    is_teya_post_book_analytics_phase,
 )
 from app.db.clock import db_statement_now
 from app.models.teya_request_pending import TeyaRequestPending
 from app.repositories import integration_circuit_breakers as breaker_repo
 from app.repositories import teya_request_pendings as pending_repo
 from app.services.teya_request_contact_route import ConversationLocator
+from app.core.amocrm_analytics_fields import (
+    AmoCrmAnalyticsBookingMethodEnum,
+    AmoCrmAnalyticsFieldId,
+)
 from app.core.amocrm_crm_writes_http import TASK_TEXT_DEFAULT
 from app.services.teya_request_crm import (
     TeyaCrmActionOutcome,
@@ -297,6 +302,10 @@ class TeyaRequestOrchestratorService:
             result_outcome=TeyaRequestPendingState.RECONCILIATION_REQUIRED.value,
         )
 
+    @staticmethod
+    def _is_post_book_analytics_phase(row: TeyaRequestPending) -> bool:
+        return is_teya_post_book_analytics_phase(row.state)
+
     async def _handle_remote_error(
         self, row: TeyaRequestPending, lease: uuid.UUID, code: str
     ) -> TeyaRequestOrchestratorResult:
@@ -310,6 +319,18 @@ class TeyaRequestOrchestratorService:
             )
         if code == "RECONCILIATION_REQUIRED":
             return await self._reconciliation(row, lease, code)
+        # After proven book (VERIFYING), never generic _retry / booking MANUAL_REVIEW.
+        if self._is_post_book_analytics_phase(row):
+            kind = classify_remote_code(code)
+            if kind == "RETRY":
+                return await self._retry_post_book_analytics(row, lease, code)
+            return await self._advance(
+                row,
+                lease,
+                TeyaRequestPendingState.DONE,
+                result_code="BOOKED_ANALYTICS_MANUAL",
+                result_outcome=TeyaRequestPendingState.DONE.value,
+            )
         kind = classify_remote_code(code)
         if kind == "RETRY":
             return await self._retry(row, lease, code)
@@ -621,7 +642,10 @@ class TeyaRequestOrchestratorService:
         except BookingRequestHttpError as exc:
             return await self._handle_remote_error(row, lease, exc.code)
         return await self._advance(
-            row, lease, TeyaRequestPendingState.VERIFYING
+            row,
+            lease,
+            TeyaRequestPendingState.VERIFYING,
+            result_code="BOOK_VERIFIED_ANALYTICS_PENDING",
         )
 
     async def _step_verifying(
@@ -633,10 +657,99 @@ class TeyaRequestOrchestratorService:
         # online-zapis closes only after successful verified book.
         if dto.status != "CLOSED":
             return await self._reconciliation(row, lease, "BOOK_POSTCHECK_STATUS")
+
+        # Booking is primary and already verified. Analytics is subordinate:
+        # transient analytics → stay VERIFYING (book never re-entered);
+        # exhaustion / permanent analytics → DONE + BOOKED_ANALYTICS_MANUAL;
+        # conflict/same/applied/skip → DONE without undoing booking.
+        if self._crm is None:
+            return await self._advance(
+                row,
+                lease,
+                TeyaRequestPendingState.DONE,
+                result_code="BOOKED_ANALYTICS_SKIPPED",
+                result_outcome=TeyaRequestPendingState.DONE.value,
+            )
+        if not row.amocrm_deal_id:
+            return await self._advance(
+                row,
+                lease,
+                TeyaRequestPendingState.DONE,
+                result_code="BOOKED_ANALYTICS_SKIPPED",
+                result_outcome=TeyaRequestPendingState.DONE.value,
+            )
+
+        analytics = await self._crm.apply_lead_analytics_enum_if_empty(
+            deal_id=row.amocrm_deal_id,
+            field_id=int(AmoCrmAnalyticsFieldId.BOOKING_CREATION_METHOD),
+            enum_id=int(AmoCrmAnalyticsBookingMethodEnum.TEYA),
+        )
+        if analytics.outcome is TeyaCrmActionOutcome.RETRY:
+            return await self._retry_post_book_analytics(
+                row,
+                lease,
+                analytics.error_code or "AMOCRM_ANALYTICS_PATCH_TRANSIENT",
+            )
+
+        decision = analytics.analytics_decision
+        if decision == "APPLIED":
+            result_code = "BOOKED_ANALYTICS_APPLIED"
+        elif decision == "ALREADY_SAME":
+            result_code = "BOOKED_ANALYTICS_SAME"
+        elif decision == "CONFLICT_NONEMPTY":
+            result_code = "BOOKED_ANALYTICS_CONFLICT"
+        elif (
+            analytics.outcome is TeyaCrmActionOutcome.MANUAL_REVIEW
+            or analytics.outcome is TeyaCrmActionOutcome.FAIL_CLOSED
+            or decision == "MANUAL_REVIEW"
+        ):
+            result_code = "BOOKED_ANALYTICS_MANUAL"
+        elif decision == "SKIPPED_NO_EVIDENCE":
+            result_code = "BOOKED_ANALYTICS_SKIPPED"
+        else:
+            result_code = "BOOKED_ANALYTICS_SKIPPED"
+
         return await self._advance(
             row,
             lease,
             TeyaRequestPendingState.DONE,
-            result_code="BOOKED",
+            result_code=result_code,
             result_outcome=TeyaRequestPendingState.DONE.value,
+        )
+
+    async def _retry_post_book_analytics(
+        self, row: TeyaRequestPending, lease: uuid.UUID, code: str
+    ) -> TeyaRequestOrchestratorResult:
+        """Transient analytics after proven book — never MANUAL_REVIEW booking."""
+
+        if row.attempt_count >= row.max_attempts:
+            return await self._advance(
+                row,
+                lease,
+                TeyaRequestPendingState.DONE,
+                result_code="BOOKED_ANALYTICS_MANUAL",
+                result_outcome=TeyaRequestPendingState.DONE.value,
+            )
+        now = await self._now()
+        delay = self._retry_policy.delay_seconds(row.attempt_count)
+        await pending_repo.release_lease(
+            self._session,
+            row=row,
+            lease_token=lease,
+            now=now,
+            next_retry_at=now + timedelta(seconds=delay),
+            result_code=code,
+        )
+        if is_breaker_failure_code(code):
+            await breaker_repo.record_failure(
+                self._session,
+                now=now,
+                policy=self._breaker_policy,
+            )
+        _log("TEYA_ORCH_RETRY")
+        return TeyaRequestOrchestratorResult(
+            outcome=TeyaRequestOrchestratorOutcome.RETRY_SCHEDULED,
+            pending_id=_as_uuid(row.id),
+            pending_state=TeyaRequestPendingState.VERIFYING,
+            result_code=code,
         )

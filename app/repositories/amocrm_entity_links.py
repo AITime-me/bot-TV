@@ -52,6 +52,33 @@ class DealCreateReservation:
         )
 
 
+async def list_active_technical_deal_external_ids(
+    session: AsyncSession,
+) -> tuple[str, ...]:
+    """ACTIVE TECHNICAL_DEAL external amoCRM lead ids (digits only)."""
+
+    rows = (
+        await session.scalars(
+            select(AmocrmEntityLink.external_id).where(
+                AmocrmEntityLink.entity_kind
+                == AmocrmEntityKind.TECHNICAL_DEAL.value,
+                AmocrmEntityLink.status == AmocrmEntityLinkStatus.ACTIVE.value,
+                AmocrmEntityLink.external_id.is_not(None),
+            )
+        )
+    ).all()
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in rows:
+        if type(raw) is not str or not raw.isdigit():
+            continue
+        if raw in seen:
+            continue
+        seen.add(raw)
+        out.append(raw)
+    return tuple(sorted(out, key=lambda value: int(value)))
+
+
 async def get_active(
     session: AsyncSession,
     *,

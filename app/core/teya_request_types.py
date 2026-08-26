@@ -24,6 +24,7 @@ __all__ = (
     "TeyaRequestOrchestratorResult",
     "TeyaRequestPendingState",
     "TransportCapability",
+    "is_teya_post_book_analytics_phase",
 )
 
 TEYA_REQUEST_ORCHESTRATOR_LOOP: Final[str] = "teya_request_orchestrator"
@@ -62,6 +63,19 @@ TERMINAL_TEYA_REQUEST_STATES: Final[frozenset[TeyaRequestPendingState]] = frozen
 ACTIVE_TEYA_REQUEST_STATES: Final[frozenset[TeyaRequestPendingState]] = frozenset(
     s for s in TeyaRequestPendingState if s not in TERMINAL_TEYA_REQUEST_STATES
 )
+
+
+def is_teya_post_book_analytics_phase(state: str | TeyaRequestPendingState) -> bool:
+    """True once booking success is durable: VERIFYING is post-book only.
+
+    VERIFYING is entered only after a successful book() advance or after
+    reconciliation proves CLOSED. Do not key off result_code — transient
+    transport errors overwrite it during analytics retries.
+    """
+
+    if isinstance(state, TeyaRequestPendingState):
+        return state is TeyaRequestPendingState.VERIFYING
+    return state == TeyaRequestPendingState.VERIFYING.value
 
 
 class ContactRouteOutcome(str, enum.Enum):

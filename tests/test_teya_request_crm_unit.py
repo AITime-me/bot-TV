@@ -94,7 +94,7 @@ class _Deals:
         self._result = result
 
     async def discover_deal_candidates(
-        self, *, contact_id: str
+        self, *, contact_id: str, known_technical_deal_ids: tuple[str, ...] = ()
     ) -> AmoCrmDealDiscoveryResult:
         return self._result
 
@@ -102,6 +102,9 @@ class _Deals:
 class _Tokens:
     async def access_token(self) -> str | None:
         return "token"
+
+    async def refresh_access_token(self) -> str | None:
+        return None
 
 
 @pytest.mark.asyncio
