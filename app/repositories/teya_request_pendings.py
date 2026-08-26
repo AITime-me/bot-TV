@@ -264,7 +264,35 @@ async def mark_manual_review(
 async def expire_exhausted_to_manual_review(
     session: AsyncSession, *, now: datetime
 ) -> int:
-    """Non-terminal rows with attempt_count >= max_attempts → MANUAL_REVIEW."""
+    """Non-terminal exhausted rows → MANUAL_REVIEW.
+
+    Exception: post-book analytics VERIFYING stays booking-success terminal
+    (DONE + BOOKED_ANALYTICS_MANUAL) — analytics must not fail the booking.
+
+    Detection uses durable VERIFYING state — same rule as
+    is_teya_post_book_analytics_phase() — not the latest result_code which
+    transient transport errors may overwrite.
+    """
+
+    post_book = (
+        update(TeyaRequestPending)
+        .where(
+            TeyaRequestPending.attempt_count >= TeyaRequestPending.max_attempts,
+            # is_teya_post_book_analytics_phase(state) ≡ state == VERIFYING
+            TeyaRequestPending.state == TeyaRequestPendingState.VERIFYING.value,
+        )
+        .values(
+            state=TeyaRequestPendingState.DONE.value,
+            result_code="BOOKED_ANALYTICS_MANUAL",
+            result_outcome=TeyaRequestPendingState.DONE.value,
+            manual_review_reason=None,
+            lease_token=None,
+            lease_expires_at=None,
+            next_retry_at=None,
+            updated_at=now,
+        )
+    )
+    post_book_result = await session.execute(post_book)
 
     stmt = (
         update(TeyaRequestPending)
@@ -287,4 +315,4 @@ async def expire_exhausted_to_manual_review(
     )
     result = await session.execute(stmt)
     await session.flush()
-    return int(result.rowcount or 0)
+    return int((post_book_result.rowcount or 0) + (result.rowcount or 0))

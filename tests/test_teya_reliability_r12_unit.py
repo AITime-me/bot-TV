@@ -106,13 +106,18 @@ class _Identity:
 class _Deals:
     result: AmoCrmDealDiscoveryResult
 
-    async def discover_deal_candidates(self, *, contact_id: str):
+    async def discover_deal_candidates(
+        self, *, contact_id: str, known_technical_deal_ids: tuple[str, ...] = ()
+    ):
         return self.result
 
 
 class _Tokens:
     async def access_token(self) -> str | None:
         return "token"
+
+    async def refresh_access_token(self) -> str | None:
+        return None
 
 
 def _crm(

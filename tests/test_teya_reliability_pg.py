@@ -394,7 +394,7 @@ async def test_pg_reconciler_repairs_closed_booking(
                 )
             ).one()
             assert row.state == TeyaRequestPendingState.DONE.value
-            assert row.result_code == "RECON_BOOKING_CLOSED"
+            assert row.result_code == "BOOKED_ANALYTICS_SKIPPED"
 
 
 @pytest.mark.asyncio

@@ -221,7 +221,7 @@ class _DealSeq:
     calls: int = 0
 
     async def discover_deal_candidates(
-        self, *, contact_id: str
+        self, *, contact_id: str, known_technical_deal_ids: tuple[str, ...] = ()
     ) -> AmoCrmDealDiscoveryResult:
         self.calls += 1
         return self.results[min(self.calls - 1, len(self.results) - 1)]
@@ -230,6 +230,9 @@ class _DealSeq:
 class _Tokens:
     async def access_token(self) -> str | None:
         return "token"
+
+    async def refresh_access_token(self) -> str | None:
+        return None
 
 
 def _writes(transport: _SeqTransport) -> AmoCrmCrmWritesHttpClient:

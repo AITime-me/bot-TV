@@ -11,7 +11,9 @@ from enum import StrEnum
 from typing import Protocol
 
 from app.core.teya_request_retry import is_retryable_crm_error
+from app.core.amocrm_analytics_fields import AmoCrmAnalyticsApplyDecision
 from app.core.amocrm_crm_writes_http import (
+    AmoCrmAnalyticsApplyReceipt,
     AmoCrmCrmWriteOutcome,
     AmoCrmCrmWriteReceipt,
     AmoCrmCrmWritesHttpClient,
@@ -37,12 +39,21 @@ class IdentityLookupPort(Protocol):
 
 class DealDiscoveryPort(Protocol):
     async def discover_deal_candidates(
-        self, *, contact_id: str
+        self,
+        *,
+        contact_id: str,
+        known_technical_deal_ids: tuple[str, ...] = (),
     ) -> AmoCrmDealDiscoveryResult: ...
+
+
+class TechnicalDealIdsPort(Protocol):
+    async def list_active_technical_deal_ids(self) -> tuple[str, ...]: ...
 
 
 class TokenPort(Protocol):
     async def access_token(self) -> str | None: ...
+
+    async def refresh_access_token(self) -> str | None: ...
 
 
 class TeyaCrmActionOutcome(StrEnum):
@@ -62,6 +73,7 @@ class TeyaCrmActionResult:
     task_id: str | None = None
     note_id: str | None = None
     error_code: str | None = None
+    analytics_decision: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -71,7 +83,8 @@ class TeyaCrmActionResult:
             f"deal_id={self.deal_id!r}, "
             f"task_id={self.task_id!r}, "
             f"note_id={self.note_id!r}, "
-            f"error_code={self.error_code!r})"
+            f"error_code={self.error_code!r}, "
+            f"analytics_decision={self.analytics_decision!r})"
         )
 
 
@@ -85,11 +98,18 @@ class TeyaRequestCrmService:
         deal_discovery: DealDiscoveryPort,
         writes: AmoCrmCrmWritesHttpClient,
         tokens: TokenPort,
+        technical_deal_ids: TechnicalDealIdsPort | None = None,
     ) -> None:
         self._identity = identity_lookup
         self._deals = deal_discovery
         self._writes = writes
         self._tokens = tokens
+        self._technical_deal_ids = technical_deal_ids
+
+    async def _known_technical_deal_ids(self) -> tuple[str, ...]:
+        if self._technical_deal_ids is None:
+            return ()
+        return await self._technical_deal_ids.list_active_technical_deal_ids()
 
     async def ensure_contact_and_deal(
         self,
@@ -170,7 +190,10 @@ class TeyaRequestCrmService:
                 error_code="CONTACT_MISSING",
             )
 
-        discovery = await self._deals.discover_deal_candidates(contact_id=contact_id)
+        discovery = await self._deals.discover_deal_candidates(
+            contact_id=contact_id,
+            known_technical_deal_ids=await self._known_technical_deal_ids(),
+        )
         if discovery.outcome is AmoCrmDealDiscoveryOutcome.DISABLED:
             return TeyaCrmActionResult(
                 outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
@@ -231,7 +254,8 @@ class TeyaRequestCrmService:
             return mapped
         if mapped.outcome is TeyaCrmActionOutcome.RETRY:
             rediscovery = await self._deals.discover_deal_candidates(
-                contact_id=contact_id
+                contact_id=contact_id,
+                known_technical_deal_ids=await self._known_technical_deal_ids(),
             )
             if len(rediscovery.business_active_lead_ids) == 1:
                 return TeyaCrmActionResult(
@@ -293,7 +317,8 @@ class TeyaRequestCrmService:
             )
 
         discovery = await self._deals.discover_deal_candidates(
-            contact_id=contact_id
+            contact_id=contact_id,
+            known_technical_deal_ids=await self._known_technical_deal_ids(),
         )
         if discovery.outcome is AmoCrmDealDiscoveryOutcome.DISABLED:
             return TeyaCrmActionResult(
@@ -435,6 +460,69 @@ class TeyaRequestCrmService:
             )
         return mapped
 
+    async def apply_lead_analytics_enum_if_empty(
+        self,
+        *,
+        deal_id: str | None,
+        field_id: int,
+        enum_id: int | None,
+    ) -> TeyaCrmActionResult:
+        """Safe write-if-empty on FINAL business deal only.
+
+        ``enum_id is None`` → SKIPPED_NO_EVIDENCE (no write).
+        ``deal_id`` missing/invalid → no write (ambiguous ownership).
+        Known technical deal IDs are rejected before HTTP.
+        Never writes Channel; conflicts never overwrite.
+        One bounded OAuth refresh on 401, then one retry.
+        """
+
+        if enum_id is None:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.READY,
+                deal_id=deal_id,
+                analytics_decision=AmoCrmAnalyticsApplyDecision.SKIPPED_NO_EVIDENCE.value,
+                error_code="ANALYTICS_SKIPPED_NO_EVIDENCE",
+            )
+        if type(deal_id) is not str or not deal_id.isdigit():
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.READY,
+                deal_id=deal_id,
+                analytics_decision=AmoCrmAnalyticsApplyDecision.SKIPPED_NO_EVIDENCE.value,
+                error_code="ANALYTICS_SKIPPED_NO_DEAL",
+            )
+        tech_ids = await self._known_technical_deal_ids()
+        if deal_id in tech_ids:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.FAIL_CLOSED,
+                deal_id=deal_id,
+                analytics_decision=AmoCrmAnalyticsApplyDecision.MANUAL_REVIEW.value,
+                error_code="ANALYTICS_TECHNICAL_DEAL_FORBIDDEN",
+            )
+        token = await self._tokens.access_token()
+        if not token:
+            return TeyaCrmActionResult(
+                outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
+                deal_id=deal_id,
+                analytics_decision=AmoCrmAnalyticsApplyDecision.MANUAL_REVIEW.value,
+                error_code="AMOCRM_CRM_OAUTH_NOT_FOUND",
+            )
+        receipt = self._writes.ensure_lead_analytics_enum_if_empty(
+            lead_id=deal_id,
+            field_id=field_id,
+            enum_id=enum_id,
+            access_token=token,
+        )
+        if receipt.error_code == "AMOCRM_ANALYTICS_UNAUTHORIZED":
+            refreshed = await self._tokens.refresh_access_token()
+            if refreshed:
+                receipt = self._writes.ensure_lead_analytics_enum_if_empty(
+                    lead_id=deal_id,
+                    field_id=field_id,
+                    enum_id=enum_id,
+                    access_token=refreshed,
+                )
+        return _map_analytics(receipt, deal_id=deal_id)
+
 
 def build_game_task_text(
     *,
@@ -550,4 +638,92 @@ def _map_write(
         contact_id=cid,
         deal_id=lid,
         error_code=receipt.error_code,
+    )
+
+
+def _map_analytics(
+    receipt: AmoCrmAnalyticsApplyReceipt,
+    *,
+    deal_id: str | None = None,
+) -> TeyaCrmActionResult:
+    lid = receipt.lead_id or deal_id
+    decision = (
+        None if receipt.decision is None else receipt.decision.value
+    )
+    if receipt.decision is AmoCrmAnalyticsApplyDecision.APPLIED:
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.READY,
+            deal_id=lid,
+            analytics_decision=decision,
+            error_code="ANALYTICS_APPLIED",
+        )
+    if receipt.decision is AmoCrmAnalyticsApplyDecision.ALREADY_SAME:
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.READY,
+            deal_id=lid,
+            analytics_decision=decision,
+            error_code="ANALYTICS_ALREADY_SAME",
+        )
+    if receipt.decision is AmoCrmAnalyticsApplyDecision.CONFLICT_NONEMPTY:
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.READY,
+            deal_id=lid,
+            analytics_decision=decision,
+            error_code="ANALYTICS_CONFLICT_NONEMPTY",
+        )
+    if receipt.decision is AmoCrmAnalyticsApplyDecision.SKIPPED_NO_EVIDENCE:
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.READY,
+            deal_id=lid,
+            analytics_decision=decision,
+            error_code="ANALYTICS_SKIPPED_NO_EVIDENCE",
+        )
+    if receipt.error_code in {
+        "AMOCRM_ANALYTICS_CHANNEL_WRITE_FORBIDDEN",
+        "AMOCRM_ANALYTICS_FIELD_NOT_WRITABLE",
+        "AMOCRM_ANALYTICS_FIELD_ID_INVALID",
+        "AMOCRM_ANALYTICS_ENUM_ID_INVALID",
+        "AMOCRM_ANALYTICS_ENUM_NOT_ALLOWED_FOR_FIELD",
+        "ANALYTICS_TECHNICAL_DEAL_FORBIDDEN",
+    }:
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.FAIL_CLOSED,
+            deal_id=lid,
+            analytics_decision=decision
+            or AmoCrmAnalyticsApplyDecision.MANUAL_REVIEW.value,
+            error_code=receipt.error_code,
+        )
+    if receipt.error_code in {
+        "AMOCRM_ANALYTICS_FIELD_AMBIGUOUS",
+        "AMOCRM_CRM_REST_DISABLED",
+        "AMOCRM_CRM_OAUTH_NOT_FOUND",
+        "AMOCRM_ANALYTICS_UNAUTHORIZED",
+        "AMOCRM_ANALYTICS_PATCH_PERMANENT",
+        "AMOCRM_ANALYTICS_READ_PERMANENT",
+        "AMOCRM_ANALYTICS_POSTCHECK_PERMANENT",
+    } or receipt.decision is AmoCrmAnalyticsApplyDecision.MANUAL_REVIEW:
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.MANUAL_REVIEW,
+            deal_id=lid,
+            analytics_decision=(
+                decision or AmoCrmAnalyticsApplyDecision.MANUAL_REVIEW.value
+            ),
+            error_code=receipt.error_code or "AMOCRM_ANALYTICS_MANUAL",
+        )
+    if (
+        receipt.outcome is AmoCrmCrmWriteOutcome.RECONCILIATION_REQUIRED
+        or receipt.decision is AmoCrmAnalyticsApplyDecision.TRANSIENT_RETRY
+        or is_retryable_crm_error(receipt.error_code)
+    ):
+        return TeyaCrmActionResult(
+            outcome=TeyaCrmActionOutcome.RETRY,
+            deal_id=lid,
+            analytics_decision=AmoCrmAnalyticsApplyDecision.TRANSIENT_RETRY.value,
+            error_code=receipt.error_code or "AMOCRM_ANALYTICS_PATCH_TRANSIENT",
+        )
+    return TeyaCrmActionResult(
+        outcome=TeyaCrmActionOutcome.FAIL_CLOSED,
+        deal_id=lid,
+        analytics_decision=decision,
+        error_code=receipt.error_code or "AMOCRM_ANALYTICS_FAILED",
     )

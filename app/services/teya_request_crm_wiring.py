@@ -16,12 +16,14 @@ from app.core.amocrm_crm_business_write_config import (
 from app.core.amocrm_crm_oauth_keys import EnvAmoCrmOauthKeyProvider
 from app.core.amocrm_crm_rest_http import (
     AmoCrmCrmRestHttpClient,
+    AmoCrmCrmRestOutcome,
     _CrmHttpStdlibTransport,
 )
 from app.core.amocrm_crm_writes_http import AmoCrmCrmWritesHttpClient
 from app.core.amocrm_identity_lookup import AmoCrmIdentityLookupResult
 from app.db.session import session_scope
 from app.repositories import amocrm_crm_oauth_tokens as oauth_repo
+from app.repositories import amocrm_entity_links as entity_links
 from app.services.amocrm_deal_discovery import AmoCrmDealDiscoveryService
 from app.services.amocrm_identity_lookup import AmoCrmIdentityLookupService
 from app.services.teya_request_crm import TeyaRequestCrmService
@@ -41,8 +43,27 @@ class _DealDiscoveryAdapter:
     def __init__(self, service: AmoCrmDealDiscoveryService) -> None:
         self._service = service
 
-    async def discover_deal_candidates(self, *, contact_id: str):
-        return await self._service.discover_deal_candidates(contact_id=contact_id)
+    async def discover_deal_candidates(
+        self,
+        *,
+        contact_id: str,
+        known_technical_deal_ids: tuple[str, ...] = (),
+    ):
+        return await self._service.discover_deal_candidates(
+            contact_id=contact_id,
+            known_technical_deal_ids=known_technical_deal_ids,
+        )
+
+
+class _TechnicalDealIdsAdapter:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def list_active_technical_deal_ids(self) -> tuple[str, ...]:
+        async with session_scope(self._session_factory) as session:
+            return await entity_links.list_active_technical_deal_external_ids(
+                session
+            )
 
 
 class _OauthTokenAdapter:
@@ -52,10 +73,12 @@ class _OauthTokenAdapter:
         session_factory: async_sessionmaker[AsyncSession],
         connection_scope: str,
         key_provider: EnvAmoCrmOauthKeyProvider,
+        oauth: AmoCrmCrmRestHttpClient,
     ) -> None:
         self._session_factory = session_factory
         self._connection_scope = connection_scope
         self._key_provider = key_provider
+        self._oauth = oauth
 
     async def access_token(self) -> str | None:
         async with session_scope(self._session_factory) as session:
@@ -67,6 +90,14 @@ class _OauthTokenAdapter:
                 return None
             tokens = oauth_repo.decrypt_row(row, key_provider=self._key_provider)
             return tokens.access_token
+
+    async def refresh_access_token(self) -> str | None:
+        """One bounded OAuth refresh via existing token-store fencing."""
+
+        refreshed = await self._oauth.refresh_tokens()
+        if refreshed.outcome is not AmoCrmCrmRestOutcome.SUCCESS:
+            return None
+        return await self.access_token()
 
 
 def build_teya_request_crm_service(
@@ -131,5 +162,7 @@ def build_teya_request_crm_service(
             session_factory=session_factory,
             connection_scope=config.connection_scope,
             key_provider=key_provider,
+            oauth=oauth,
         ),
+        technical_deal_ids=_TechnicalDealIdsAdapter(session_factory),
     )

@@ -155,8 +155,23 @@ class TeyaRequestReconciliationWorker:
                 TeyaRequestPendingState.MANUAL_REVIEW.value,
             }
         ):
+            # Booking success is proven. Never re-book / create deal / create appt.
+            # If final business deal + CRM exist, resume POST-BOOK analytics only.
+            if self._crm is not None and row.amocrm_deal_id:
+                row.state = TeyaRequestPendingState.VERIFYING.value
+                row.result_code = "RECON_BOOKING_CLOSED_ANALYTICS_PENDING"
+                row.result_outcome = None
+                row.manual_review_reason = None
+                row.lease_token = None
+                row.lease_expires_at = None
+                row.next_retry_at = now
+                row.updated_at = now
+                await session.flush()
+                _log("TEYA_RECON_REPAIRED")
+                return True
+            # No CRM/deal path for analytics — terminal booking success, skipped.
             row.state = TeyaRequestPendingState.DONE.value
-            row.result_code = "RECON_BOOKING_CLOSED"
+            row.result_code = "BOOKED_ANALYTICS_SKIPPED"
             row.result_outcome = TeyaRequestPendingState.DONE.value
             row.manual_review_reason = None
             row.lease_token = None
