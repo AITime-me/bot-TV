@@ -15,12 +15,14 @@ from app.core.booking_eligibility_factory import (
     build_booking_s2s_config,
     rebind_booking_flow_to_runtime_settings,
 )
+from app.core.booking_method_http import BookingMethodHttpClient
 from app.core.booking_request_http import BookingRequestHttpClient
 from app.core.ephemeral_pii_types import EphemeralPiiError
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     AMOCRM_MIRROR_LOOP,
+    BOOKING_METHOD_ANALYTICS_LOOP,
     HANDOFF_EXPIRY_LOOP,
     INGRESS_LOOP,
     OUTBOUND_LOOP,
@@ -48,6 +50,9 @@ from app.services.outbound_arbiter import OutboundArbiterDenied
 from app.services.reply_outbound import OutboundWorker, ReplyPlanWorker
 from app.services.self_booking_create_execution_worker import (
     SelfBookingCreateExecutionWorker,
+)
+from app.services.booking_method_analytics_worker import (
+    BookingMethodAnalyticsWorker,
 )
 from app.services.teya_request_crm_wiring import build_teya_request_crm_service
 from app.services.teya_request_orchestrator_worker import (
@@ -357,6 +362,16 @@ def build_default_loop_specs(
         remote=teya_remote,
         crm=teya_crm,
     )
+    booking_method_remote = (
+        BookingMethodHttpClient(booking_s2s_config, S2sHttpStdlibTransport())
+        if booking_s2s_config is not None
+        else None
+    )
+    booking_method_analytics = BookingMethodAnalyticsWorker(
+        session_factory,
+        remote=booking_method_remote,
+        crm=teya_crm,
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -439,6 +454,14 @@ def build_default_loop_specs(
     async def teya_request_reconciliation_tick() -> None:
         await teya_request_reconciliation.tick()
 
+    async def booking_method_analytics_tick() -> None:
+        await booking_method_analytics.ingest_feed()
+        for _ in range(min(settings.worker_batch_size, 5)):
+            pending_id = await booking_method_analytics.claim_one()
+            if pending_id is None:
+                return
+            await booking_method_analytics.process_one(pending_id)
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -479,6 +502,11 @@ def build_default_loop_specs(
             name=TEYA_REQUEST_RECONCILIATION_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=teya_request_reconciliation_tick,
+        ),
+        WorkerLoopSpec(
+            name=BOOKING_METHOD_ANALYTICS_LOOP,
+            poll_seconds=settings.worker_poll_seconds,
+            tick=booking_method_analytics_tick,
         ),
     )
 

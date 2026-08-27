@@ -35,6 +35,7 @@ from app.models import (
     SelfBookingActiveOffer,
     SelfBookingPiiAdmission,
     TeyaRequestPending,
+    BookingMethodAnalyticsPending,
     WorkerHeartbeat,
 )
 
@@ -270,7 +271,8 @@ _EXPECTED_CHECKS_12 = {
     "ck_worker_heartbeats_loop_name": (
         "loop_name IN ('ingress', 'handoff_expiry', 'reply_plan', "
         "'outbound', 'amocrm_mirror', 'self_booking_create', "
-        "'teya_request_orchestrator', 'teya_request_reconciliation')"
+        "'teya_request_orchestrator', 'teya_request_reconciliation', "
+        "'booking_method_analytics')"
     ),
     "ck_worker_heartbeats_consecutive_failures_nonnegative": (
         "consecutive_failures >= 0"
@@ -296,6 +298,10 @@ def test_alembic_metadata_imports() -> None:
     assert SelfBookingActiveOffer.__tablename__ == "self_booking_active_offers"
     assert SelfBookingPiiAdmission.__tablename__ == "self_booking_pii_admissions"
     assert TeyaRequestPending.__tablename__ == "teya_request_pendings"
+    assert (
+        BookingMethodAnalyticsPending.__tablename__
+        == "booking_method_analytics_pendings"
+    )
     assert CanonicalIdentity.__tablename__ == "canonical_identities"
     assert ExternalIdentityLink.__tablename__ == "external_identity_links"
     assert AmocrmChatBinding.__tablename__ == "amocrm_chat_bindings"
@@ -323,6 +329,7 @@ def test_alembic_metadata_imports() -> None:
         "self_booking_pii_admissions",
         "teya_request_pendings",
         "teya_request_feed_cursors",
+        "booking_method_analytics_pendings",
         "integration_circuit_breakers",
         "canonical_identities",
         "external_identity_links",
@@ -456,6 +463,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260825_33_teya_reliability"].down_revision
         == "20260825_32_teya_req_orch"
     )
+    assert "20260826_34_booking_method" in by_id
+    assert (
+        by_id["20260826_34_booking_method"].down_revision
+        == "20260825_33_teya_reliability"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -483,6 +495,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260821_31_sbc_exec_loop",
         "20260825_32_teya_req_orch",
         "20260825_33_teya_reliability",
+        "20260826_34_booking_method",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -532,7 +545,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260825_32_teya_req_orch") <= 32
     assert "20260825_33_teya_reliability" in revision_ids
     assert len("20260825_33_teya_reliability") <= 32
-    assert heads == ["20260825_33_teya_reliability"]
+    assert "20260826_34_booking_method" in revision_ids
+    assert len("20260826_34_booking_method") <= 32
+    assert heads == ["20260826_34_booking_method"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -610,6 +625,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_33 = (
         root / "alembic" / "versions" / "20260825_33_teya_reliability.py"
+    ).read_text(encoding="utf-8")
+    migration_34 = (
+        root / "alembic" / "versions" / "20260826_34_booking_method.py"
     ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
@@ -747,10 +765,11 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert name in migration_12
         assert model_checks[name] == sql
         if name == "ck_worker_heartbeats_loop_name":
-            # Founding loops in 12; expand-only CHECK rewrite in 31/32/33.
+            # Founding loops in 12; expand-only CHECK rewrite in 31/32/33/34.
             assert name in migration_31
             assert name in migration_32
             assert name in migration_33
+            assert name in migration_34
             for token in (
                 "'ingress'",
                 "'handoff_expiry'",
@@ -762,8 +781,9 @@ def test_model_migration_check_and_unique_parity() -> None:
             assert "'self_booking_create'" in migration_31
             assert "'teya_request_orchestrator'" in migration_32
             assert "'teya_request_reconciliation'" in migration_33
+            assert "'booking_method_analytics'" in migration_34
             for token in re.findall(r"'[a-z_]+'", sql):
-                assert token in migration_33, f"{name} missing {token} in 33"
+                assert token in migration_34, f"{name} missing {token} in 34"
             continue
         for token in re.findall(r"'[a-z_]+'", sql):
             assert token in migration_12, f"{name} missing {token}"

@@ -98,6 +98,9 @@ Thumbs.db
 !app/core/booking_create_http.py
 !app/core/booking_request_remote.py
 !app/core/booking_request_http.py
+!app/core/booking_method_types.py
+!app/core/booking_method_remote.py
+!app/core/booking_method_http.py
 !app/core/teya_request_types.py
 !app/core/teya_request_retry.py
 !app/core/amocrm_circuit_breaker.py
@@ -179,6 +182,7 @@ Thumbs.db
 !app/models/self_booking_create_pending.py
 !app/models/teya_request_pending.py
 !app/models/teya_request_feed_cursor.py
+!app/models/booking_method_analytics_pending.py
 !app/models/integration_circuit_breaker.py
 !app/models/self_booking_active_offer.py
 !app/models/self_booking_pii_admission.py
@@ -204,6 +208,7 @@ Thumbs.db
 !app/repositories/self_booking_create_pendings.py
 !app/repositories/teya_request_pendings.py
 !app/repositories/teya_request_feed_cursors.py
+!app/repositories/booking_method_analytics_pendings.py
 !app/repositories/integration_circuit_breakers.py
 !app/repositories/self_booking_active_offers.py
 !app/repositories/self_booking_pii_admissions.py
@@ -264,6 +269,7 @@ Thumbs.db
 !app/services/teya_request_orchestrator.py
 !app/services/teya_request_orchestrator_worker.py
 !app/services/teya_request_reconciliation_worker.py
+!app/services/booking_method_analytics_worker.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py
