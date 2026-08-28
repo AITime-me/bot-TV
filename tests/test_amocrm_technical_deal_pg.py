@@ -8,6 +8,7 @@ import json
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
@@ -82,24 +83,38 @@ class _FakeTransport:
         return self.responses.pop(0)
 
 
-def _install_oauth_claim_barrier(
+def _http_path(url: str) -> str:
+    return urlsplit(url).path
+
+
+def _install_oauth_refresh_entry_gate(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    parties: int = 2,
+    timeout_seconds: float = 5.0,
 ) -> None:
-    """Force both rejected-token callers to contest the durable refresh lease."""
+    """Hold both reactive-401 callers until they enter refresh, before any DB session."""
 
     import app.core.amocrm_crm_rest_http as rest_http
 
-    barrier = asyncio.Barrier(2)
-    real_claim = oauth_repo.claim_refresh_lease
+    ready = asyncio.Event()
+    arrived = 0
+    lock = asyncio.Lock()
+    real_refresh = rest_http.AmoCrmCrmRestHttpClient.refresh_tokens
 
-    async def gated_claim(session, **kwargs):  # type: ignore[no-untyped-def]
-        await barrier.wait()
-        return await real_claim(session, **kwargs)
+    async def gated_refresh(self, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal arrived
+        async with lock:
+            arrived += 1
+            if arrived >= parties:
+                ready.set()
+        await asyncio.wait_for(ready.wait(), timeout=timeout_seconds)
+        return await real_refresh(self, **kwargs)
 
     monkeypatch.setattr(
-        rest_http.oauth_repo,
-        "claim_refresh_lease",
-        gated_claim,
+        rest_http.AmoCrmCrmRestHttpClient,
+        "refresh_tokens",
+        gated_refresh,
     )
 
 
@@ -625,7 +640,7 @@ async def test_concurrent_reactive_401_oauth_refresh_is_fenced(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_oauth_claim_barrier(monkeypatch)
+    _install_oauth_refresh_entry_gate(monkeypatch)
     async with session_scope(session_factory) as session:
         conv = await _seed_conversation(session)
         conv_id = conv.id
@@ -665,11 +680,13 @@ async def test_concurrent_reactive_401_oauth_refresh_is_fenced(
         return result.outcome
 
     outcomes = await asyncio.gather(_run("oauth-a"), _run("oauth-b"))
-    refresh_calls = [c for c in transport.calls if c.url.endswith("/oauth2/access_token")]
+    refresh_calls = [
+        c for c in transport.calls if _http_path(c.url) == "/oauth2/access_token"
+    ]
     deal_calls = [
         c
         for c in transport.calls
-        if c.method == "GET" and c.url.endswith("/api/v4/leads/4242")
+        if c.method == "GET" and _http_path(c.url) == "/api/v4/leads/4242"
     ]
     assert len(refresh_calls) == 1
     assert [
@@ -689,7 +706,7 @@ async def test_concurrent_reactive_401_oauth_refresh_is_fenced(
         for outcome in outcomes
     )
     assert not any(
-        c.method == "POST" and c.url.endswith("/api/v4/leads")
+        c.method == "POST" and _http_path(c.url) == "/api/v4/leads"
         for c in transport.calls
     )
     async with session_scope(session_factory) as session:
