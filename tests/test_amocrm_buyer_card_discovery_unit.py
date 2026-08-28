@@ -59,7 +59,13 @@ class _StubOauth:
         self.outcome = outcome
         self.refresh_count = 0
 
-    async def refresh_tokens(self) -> AmoCrmCrmTokenRefreshResult:
+    async def refresh_tokens(
+        self,
+        *,
+        if_expires_at_lte=None,
+        if_still_access_token=None,
+    ) -> AmoCrmCrmTokenRefreshResult:
+        del if_expires_at_lte, if_still_access_token
         self.refresh_count += 1
         if self.outcome is AmoCrmCrmRestOutcome.SUCCESS:
             self.token_box["access"] = "access-after-refresh"
@@ -449,7 +455,10 @@ async def test_proactive_refresh_then_later_401_no_second_refresh() -> None:
 
     class _Proactive(AmoCrmBuyerCardDiscoveryService):
         async def _resolve_access_token(self, budget):  # type: ignore[override]
-            refreshed = await self._try_remote_refresh(budget)
+            refreshed = await self._try_remote_refresh(
+                budget,
+                rejected_access_token="access-old",
+            )
             assert refreshed is True
             return await self._load_access_token()
 

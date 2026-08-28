@@ -91,10 +91,16 @@ class _OauthTokenAdapter:
             tokens = oauth_repo.decrypt_row(row, key_provider=self._key_provider)
             return tokens.access_token
 
-    async def refresh_access_token(self) -> str | None:
+    async def refresh_access_token(
+        self,
+        *,
+        rejected_access_token: str,
+    ) -> str | None:
         """One bounded OAuth refresh via existing token-store fencing."""
 
-        refreshed = await self._oauth.refresh_tokens()
+        refreshed = await self._oauth.refresh_tokens(
+            if_still_access_token=rejected_access_token,
+        )
         if refreshed.outcome is not AmoCrmCrmRestOutcome.SUCCESS:
             return None
         return await self.access_token()

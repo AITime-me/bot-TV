@@ -102,15 +102,18 @@ class _Token:
     async def access_token(self) -> str | None:
         return "token-abc"
 
-    async def refresh_access_token(self) -> str | None:
+    async def refresh_access_token(self, *, rejected_access_token: str) -> str | None:
+        del rejected_access_token
         return None
 
 
 class _TokenRefreshOnce(_Token):
     def __init__(self) -> None:
         self.refreshed = 0
+        self.rejected: list[str] = []
 
-    async def refresh_access_token(self) -> str | None:
+    async def refresh_access_token(self, *, rejected_access_token: str) -> str | None:
+        self.rejected.append(rejected_access_token)
         self.refreshed += 1
         return "token-refreshed"
 
@@ -304,8 +307,60 @@ async def test_401_refresh_then_success() -> None:
         enum_id=enum_id,
     )
     assert tokens.refreshed == 1
+    assert tokens.rejected == ["token-abc"]
     assert result.outcome is TeyaCrmActionOutcome.READY
     assert result.analytics_decision == "APPLIED"
+
+
+@pytest.mark.asyncio
+async def test_analytics_stale_401_peer_refreshed_retries_with_current_token() -> None:
+    field = int(AmoCrmAnalyticsFieldId.BOOKING_CREATION_METHOD)
+    enum_id = int(AmoCrmAnalyticsBookingMethodEnum.TEYA)
+
+    class _PeerRefreshed:
+        def __init__(self) -> None:
+            self.rejected: list[str] = []
+
+        async def access_token(self) -> str | None:
+            return "token-A"
+
+        async def refresh_access_token(
+            self,
+            *,
+            rejected_access_token: str,
+        ) -> str | None:
+            self.rejected.append(rejected_access_token)
+            return "token-B"
+
+    tokens = _PeerRefreshed()
+    transport = _FakeTransport(
+        [
+            S2sHttpResponse(status_code=401, headers={}, body=b""),
+            _json_response(200, _lead_payload()),
+            _json_response(200, {"_embedded": {"leads": [{"id": 55}]}}),
+            _json_response(
+                200,
+                _lead_payload(field_id=field, enum_id=enum_id),
+            ),
+        ]
+    )
+    crm = TeyaRequestCrmService(
+        identity_lookup=None,  # type: ignore[arg-type]
+        deal_discovery=None,  # type: ignore[arg-type]
+        writes=_writes(transport),
+        tokens=tokens,
+        technical_deal_ids=_TechIds(),
+    )
+
+    result = await crm.apply_lead_analytics_enum_if_empty(
+        deal_id="55",
+        field_id=field,
+        enum_id=enum_id,
+    )
+
+    assert tokens.rejected == ["token-A"]
+    assert result.outcome is TeyaCrmActionOutcome.READY
+    assert [c.method for c in transport.calls] == ["GET", "GET", "PATCH", "GET"]
 
 
 def test_429_then_verify_empty_retries() -> None:

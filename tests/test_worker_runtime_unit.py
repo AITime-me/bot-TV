@@ -13,8 +13,12 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.models.worker_heartbeat import (
+    AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
     REQUIRED_WORKER_LOOPS,
     WorkerHeartbeat,
+)
+from app.services.amocrm_crm_oauth_lifecycle_worker import (
+    AmoCrmCrmOauthLifecycleError,
 )
 from app.services.worker_health import (
     WorkerHealthReport,
@@ -255,6 +259,48 @@ async def test_runtime_exits_for_supervisor_after_failure_limit() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_oauth_failure_uses_safe_diagnostic_heartbeat_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _FakeHeartbeatStore()
+    secret = "refresh-token-must-not-leak"
+
+    async def oauth_failure() -> None:
+        raise AmoCrmCrmOauthLifecycleError(f"UNSAFE_{secret}")
+
+    async def idle_tick() -> None:
+        return None
+
+    runtime = WorkerRuntime(
+        settings=_runtime_settings(worker_max_consecutive_failures=1),
+        worker_id="unit-worker",
+        heartbeat_store=store,  # type: ignore[arg-type]
+        loops=tuple(
+            WorkerLoopSpec(
+                name,
+                0.001,
+                oauth_failure
+                if name == AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP
+                else idle_tick,
+            )
+            for name in REQUIRED_WORKER_LOOPS
+        ),
+    )
+
+    with pytest.raises(
+        WorkerRuntimeFatal,
+        match=AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
+    ):
+        await runtime.run(asyncio.Event())
+
+    assert (
+        AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
+        "AMOCRM_CRM_OAUTH_REFRESH_FAILED",
+    ) in store.failed
+    assert secret not in caplog.text
+
+
 def test_default_runtime_registers_all_required_loops() -> None:
     settings = _runtime_settings()
     specs = build_default_loop_specs(
@@ -266,6 +312,11 @@ def test_default_runtime_registers_all_required_loops() -> None:
     assert next(
         spec for spec in specs if spec.name == "handoff_expiry"
     ).poll_seconds == settings.handoff_expiry_poll_seconds
+    assert next(
+        spec
+        for spec in specs
+        if spec.name == AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP
+    ).poll_seconds == settings.worker_poll_seconds
     assert len(_lease_worker_id("x" * 128, "outbound")) == 128
 
 

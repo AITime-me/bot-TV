@@ -420,6 +420,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "teya_request_reconciliation",
                 "booking_method_analytics",
                 "acquisition_source_analytics",
+                "amocrm_crm_oauth_lifecycle",
             }
         ),
     ),

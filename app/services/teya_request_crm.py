@@ -53,7 +53,11 @@ class TechnicalDealIdsPort(Protocol):
 class TokenPort(Protocol):
     async def access_token(self) -> str | None: ...
 
-    async def refresh_access_token(self) -> str | None: ...
+    async def refresh_access_token(
+        self,
+        *,
+        rejected_access_token: str,
+    ) -> str | None: ...
 
 
 class TeyaCrmActionOutcome(StrEnum):
@@ -604,7 +608,9 @@ class TeyaRequestCrmService:
             access_token=token,
         )
         if receipt.error_code == "AMOCRM_ANALYTICS_UNAUTHORIZED":
-            refreshed = await self._tokens.refresh_access_token()
+            refreshed = await self._tokens.refresh_access_token(
+                rejected_access_token=token,
+            )
             if refreshed:
                 receipt = self._writes.ensure_lead_analytics_enum_if_empty(
                     lead_id=deal_id,

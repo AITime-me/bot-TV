@@ -23,6 +23,7 @@ from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     ACQUISITION_SOURCE_ANALYTICS_LOOP,
+    AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
     AMOCRM_MIRROR_LOOP,
     BOOKING_METHOD_ANALYTICS_LOOP,
     HANDOFF_EXPIRY_LOOP,
@@ -41,6 +42,10 @@ from app.repositories.ingress import StaleIngressLeaseError
 from app.repositories.outbound import StaleOutboundLeaseError
 from app.repositories.reply_plans import StaleReplyPlanLeaseError
 from app.services.amocrm_crm_mirror_adapter import CrmRestMirrorAdapter
+from app.services.amocrm_crm_oauth_lifecycle_worker import (
+    AmoCrmCrmOauthLifecycleError,
+    AmoCrmCrmOauthLifecycleWorker,
+)
 from app.services.amocrm_mirror import AmoCrmMirrorRejected, AmoCrmMirrorWorker
 from app.services.amocrm_chat_projection import AmocrmChatProjectionWorker
 from app.services.booking_flow import BookingFlowService
@@ -243,7 +248,11 @@ class WorkerRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                error_code = type(exc).__name__[:64]
+                error_code = (
+                    exc.code
+                    if isinstance(exc, AmoCrmCrmOauthLifecycleError)
+                    else type(exc).__name__[:64]
+                )
                 logger.error(
                     "worker loop failed loop=%s error_code=%s",
                     spec.name,
@@ -387,6 +396,10 @@ def build_default_loop_specs(
         remote=acquisition_source_remote,
         crm=teya_crm,
     )
+    amocrm_oauth_lifecycle = AmoCrmCrmOauthLifecycleWorker(
+        session_factory,
+        worker_id=_lease_worker_id(worker_id, "oauth"),
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -485,6 +498,9 @@ def build_default_loop_specs(
                 return
             await acquisition_source_analytics.process_one(pending_id)
 
+    async def amocrm_oauth_lifecycle_tick() -> None:
+        await amocrm_oauth_lifecycle.tick()
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -535,6 +551,11 @@ def build_default_loop_specs(
             name=ACQUISITION_SOURCE_ANALYTICS_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=acquisition_source_analytics_tick,
+        ),
+        WorkerLoopSpec(
+            name=AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
+            poll_seconds=settings.worker_poll_seconds,
+            tick=amocrm_oauth_lifecycle_tick,
         ),
     )
 

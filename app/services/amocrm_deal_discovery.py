@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import timedelta
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -40,7 +39,6 @@ from app.core.amocrm_deal_discovery import (
     AmoCrmDealDiscoveryOutcome,
     AmoCrmDealDiscoveryResult,
 )
-from app.db.clock import resolve_moment
 from app.db.session import session_scope
 from app.repositories import amocrm_crm_oauth_tokens as oauth_repo
 
@@ -49,7 +47,6 @@ __all__ = (
     "MAX_LINKED_LEADS_PER_DISCOVERY",
 )
 
-_REFRESH_SKEW = timedelta(seconds=60)
 MAX_LINKED_LEADS_PER_DISCOVERY: Final[int] = 20
 
 _ResolveAccessToken = Callable[[], Awaitable[str | None]]
@@ -401,18 +398,28 @@ class AmoCrmDealDiscoveryService:
         result = fn(access_token=access_token, **kwargs)
         if not getattr(result, "unauthorized", False):
             return result
-        if not await self._try_remote_refresh(budget):
+        if not await self._try_remote_refresh(
+            budget,
+            rejected_access_token=access_token,
+        ):
             return result
         new_access = await self._load_access_token()
         if new_access is None:
             return result
         return fn(access_token=new_access, **kwargs)
 
-    async def _try_remote_refresh(self, budget: _OauthRefreshBudget) -> bool:
+    async def _try_remote_refresh(
+        self,
+        budget: _OauthRefreshBudget,
+        *,
+        rejected_access_token: str,
+    ) -> bool:
         if budget.spent or self._oauth is None:
             return False
         budget.spent = True
-        refreshed = await self._oauth.refresh_tokens()
+        refreshed = await self._oauth.refresh_tokens(
+            if_still_access_token=rejected_access_token,
+        )
         return refreshed.outcome is AmoCrmCrmRestOutcome.SUCCESS
 
     async def _resolve_access_token(
@@ -423,28 +430,7 @@ class AmoCrmDealDiscoveryService:
             return await self._resolve_access_token_override()
         if not self._config.enabled:
             return None
-        need_refresh = False
-        async with session_scope(self._session_factory) as session:
-            row = await oauth_repo.get_by_scope(
-                session,
-                connection_scope=self._config.connection_scope,
-            )
-            if row is None:
-                return None
-            tokens = oauth_repo.decrypt_row(row, key_provider=self._key_provider)
-            moment = await resolve_moment(session, None)
-            if (
-                row.access_expires_at is not None
-                and row.access_expires_at <= moment + _REFRESH_SKEW
-            ):
-                need_refresh = True
-            access = tokens.access_token
-        if need_refresh:
-            if await self._try_remote_refresh(budget):
-                reloaded = await self._load_access_token()
-                if reloaded is not None:
-                    return reloaded
-        return access
+        return await self._load_access_token()
 
     async def _load_access_token(self) -> str | None:
         if self._resolve_access_token_override is not None:

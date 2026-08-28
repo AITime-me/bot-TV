@@ -323,7 +323,6 @@ async def claim_refresh_lease(
         row.lease_until is not None
         and row.lease_until > moment
         and row.lease_owner is not None
-        and row.lease_owner != worker_id
     ):
         raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_STALE_LEASE")
 
@@ -493,9 +492,32 @@ async def recover_rotate_if_pre_refresh_unchanged(
         row.lease_until is not None
         and row.lease_until > moment
         and row.lease_owner is not None
-        and row.lease_owner != worker_id
     ):
-        raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_STALE_LEASE")
+        if row.lease_owner != worker_id:
+            raise AmoCrmCrmOauthError("AMOCRM_CRM_OAUTH_STALE_LEASE")
+        held = OauthRefreshLease(
+            token_row_id=row.id,
+            connection_scope=connection_scope,
+            lease_owner=worker_id,
+            lease_token=row.lease_token,
+            lease_version=row.lease_version,
+            lease_until=row.lease_until,
+        )
+        lease = await renew_refresh_lease(
+            session,
+            lease=held,
+            lease_seconds=lease_seconds,
+            now=moment,
+        )
+        return await rotate_tokens_with_lease(
+            session,
+            lease=lease,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            key_provider=key_provider,
+            access_expires_at=access_expires_at,
+            now=moment,
+        )
 
     lease = await claim_refresh_lease(
         session,

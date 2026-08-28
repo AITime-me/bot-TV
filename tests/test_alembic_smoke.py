@@ -273,7 +273,8 @@ _EXPECTED_CHECKS_12 = {
         "loop_name IN ('ingress', 'handoff_expiry', 'reply_plan', "
         "'outbound', 'amocrm_mirror', 'self_booking_create', "
         "'teya_request_orchestrator', 'teya_request_reconciliation', "
-        "'booking_method_analytics', 'acquisition_source_analytics')"
+        "'booking_method_analytics', 'acquisition_source_analytics', "
+        "'amocrm_crm_oauth_lifecycle')"
     ),
     "ck_worker_heartbeats_consecutive_failures_nonnegative": (
         "consecutive_failures >= 0"
@@ -479,6 +480,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260828_35_acquisition_source"].down_revision
         == "20260826_34_booking_method"
     )
+    assert "20260828_36_amocrm_oauth_loop" in by_id
+    assert (
+        by_id["20260828_36_amocrm_oauth_loop"].down_revision
+        == "20260828_35_acquisition_source"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -508,6 +514,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260825_33_teya_reliability",
         "20260826_34_booking_method",
         "20260828_35_acquisition_source",
+        "20260828_36_amocrm_oauth_loop",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -561,7 +568,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260826_34_booking_method") <= 32
     assert "20260828_35_acquisition_source" in revision_ids
     assert len("20260828_35_acquisition_source") <= 32
-    assert heads == ["20260828_35_acquisition_source"]
+    assert "20260828_36_amocrm_oauth_loop" in revision_ids
+    assert len("20260828_36_amocrm_oauth_loop") <= 32
+    assert heads == ["20260828_36_amocrm_oauth_loop"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -645,6 +654,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_35 = (
         root / "alembic" / "versions" / "20260828_35_acquisition_source.py"
+    ).read_text(encoding="utf-8")
+    migration_36 = (
+        root / "alembic" / "versions" / "20260828_36_amocrm_oauth_loop.py"
     ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
@@ -782,12 +794,13 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert name in migration_12
         assert model_checks[name] == sql
         if name == "ck_worker_heartbeats_loop_name":
-            # Founding loops in 12; expand-only CHECK rewrite in 31/32/33/34.
+            # Founding loops in 12; expand-only CHECK rewrites in 31..36.
             assert name in migration_31
             assert name in migration_32
             assert name in migration_33
             assert name in migration_34
             assert name in migration_35
+            assert name in migration_36
             for token in (
                 "'ingress'",
                 "'handoff_expiry'",
@@ -801,8 +814,9 @@ def test_model_migration_check_and_unique_parity() -> None:
             assert "'teya_request_reconciliation'" in migration_33
             assert "'booking_method_analytics'" in migration_34
             assert "'acquisition_source_analytics'" in migration_35
+            assert "'amocrm_crm_oauth_lifecycle'" in migration_36
             for token in re.findall(r"'[a-z_]+'", sql):
-                assert token in migration_35, f"{name} missing {token} in 35"
+                assert token in migration_36, f"{name} missing {token} in 36"
             continue
         for token in re.findall(r"'[a-z_]+'", sql):
             assert token in migration_12, f"{name} missing {token}"

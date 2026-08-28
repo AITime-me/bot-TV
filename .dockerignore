@@ -65,6 +65,7 @@ Thumbs.db
 !alembic/versions/20260825_33_teya_reliability.py
 !alembic/versions/20260826_34_booking_method.py
 !alembic/versions/20260828_35_acquisition_source.py
+!alembic/versions/20260828_36_amocrm_oauth_loop.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -278,6 +279,7 @@ Thumbs.db
 !app/services/teya_request_reconciliation_worker.py
 !app/services/booking_method_analytics_worker.py
 !app/services/acquisition_source_analytics_worker.py
+!app/services/amocrm_crm_oauth_lifecycle_worker.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py
