@@ -702,6 +702,96 @@ async def test_refresh_request_includes_exact_redirect_uri(
     ]
 
 
+@pytest.mark.asyncio
+async def test_http_200_missing_expires_in_persists_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import AsyncMock
+
+    from app.repositories import amocrm_crm_oauth_tokens as oauth_repo
+
+    transport = _FakeTransport()
+    transport.responses.append(
+        S2sHttpResponse(
+            status_code=200,
+            headers={},
+            body=(
+                b'{"access_token":"access-after","refresh_token":"refresh-after"}'
+            ),
+        )
+    )
+    lease = oauth_repo.OauthRefreshLease(
+        token_row_id=uuid4(),
+        connection_scope="default",
+        lease_owner="w1",
+        lease_token=uuid4(),
+        lease_version=2,
+        lease_until=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    persisted: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def _scope(_factory):  # type: ignore[no-untyped-def]
+        yield AsyncMock()
+
+    async def _rotate(  # type: ignore[no-untyped-def]
+        _session,
+        *,
+        lease,
+        access_token,
+        refresh_token,
+        key_provider,
+        access_expires_at=None,
+        now=None,
+    ):
+        persisted["access_token"] = access_token
+        persisted["refresh_token"] = refresh_token
+        persisted["access_expires_at"] = access_expires_at
+        return object()
+
+    monkeypatch.setattr("app.core.amocrm_crm_rest_http.session_scope", _scope)
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.claim_refresh_lease",
+        AsyncMock(return_value=lease),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.get_by_scope",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.decrypt_row",
+        lambda *_a, **_k: oauth_repo.DecryptedOauthTokens(
+            access_token="access-before",
+            refresh_token="refresh-before",
+            access_expires_at=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.renew_refresh_lease",
+        AsyncMock(return_value=lease),
+    )
+    monkeypatch.setattr(
+        "app.core.amocrm_crm_rest_http.oauth_repo.rotate_tokens_with_lease",
+        _rotate,
+    )
+
+    client = AmoCrmCrmRestHttpClient(
+        AmoCrmCrmRestConfig.from_env(_valid_crm_env()),
+        session_factory=object(),  # type: ignore[arg-type]
+        transport=transport,
+        worker_id="w1",
+    )
+    result = await client.refresh_tokens()
+    assert result.outcome is AmoCrmCrmRestOutcome.SUCCESS
+    assert persisted["access_token"] == "access-after"
+    assert persisted["refresh_token"] == "refresh-after"
+    expires_at = persisted["access_expires_at"]
+    assert isinstance(expires_at, datetime)
+    assert expires_at > datetime.now(timezone.utc) + timedelta(hours=20)
+
+
 def test_oauth_dual_write_residual_documented() -> None:
     src = (_REPO / "app" / "core" / "amocrm_crm_rest_http.py").read_text(
         encoding="utf-8"

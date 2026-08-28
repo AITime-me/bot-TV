@@ -294,7 +294,8 @@ class _Tokens:
     async def access_token(self) -> str | None:
         raise AssertionError("discover path must not require token")
 
-    async def refresh_access_token(self) -> str | None:
+    async def refresh_access_token(self, *, rejected_access_token: str) -> str | None:
+        del rejected_access_token
         raise AssertionError("discover path must not refresh token")
 
 

@@ -231,7 +231,8 @@ class _Tokens:
     async def access_token(self) -> str | None:
         return "token"
 
-    async def refresh_access_token(self) -> str | None:
+    async def refresh_access_token(self, *, rejected_access_token: str) -> str | None:
+        del rejected_access_token
         return None
 
 

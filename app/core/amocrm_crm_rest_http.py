@@ -211,12 +211,20 @@ class AmoCrmCrmRestHttpClient:
             return AmoCrmCrmRestOutcome.TRANSIENT_ERROR, None
         return _classify_status(response.status_code), response
 
-    async def refresh_tokens(self) -> AmoCrmCrmTokenRefreshResult:
+    async def refresh_tokens(
+        self,
+        *,
+        if_expires_at_lte: datetime | None = None,
+        if_still_access_token: str | None = None,
+    ) -> AmoCrmCrmTokenRefreshResult:
         """Claim → renew lease → one OAuth HTTP → fenced durable rotate.
 
         After HTTP 200 with a valid pair, never retries the remote refresh POST.
         Local persist uses bounded retries and guarded recovery when the original
         lease is stale but the DB still holds the exact pre-refresh pair.
+        ``if_expires_at_lte`` adds an in-fence freshness check for proactive
+        callers. ``if_still_access_token`` lets reactive 401 callers skip refresh
+        when another fenced caller already rotated the durable access token.
         """
 
         if not self._config.enabled:
@@ -249,7 +257,37 @@ class AmoCrmCrmRestHttpClient:
                         outcome=AmoCrmCrmRestOutcome.PERMANENT_ERROR,
                         error_code="AMOCRM_CRM_OAUTH_NOT_FOUND",
                     )
+                if if_expires_at_lte is not None:
+                    cutoff = _require_aware_utc(
+                        if_expires_at_lte,
+                        code="AMOCRM_CRM_OAUTH_REFRESH_CUTOFF_INVALID",
+                    )
+                    expires_at = row.access_expires_at
+                    if expires_at is not None:
+                        expires_at = _require_aware_utc(
+                            expires_at,
+                            code="AMOCRM_CRM_OAUTH_EXPIRY_INVALID",
+                        )
+                        if expires_at > cutoff:
+                            await oauth_repo.release_refresh_lease(
+                                session,
+                                lease=lease,
+                            )
+                            lease = None
+                            return AmoCrmCrmTokenRefreshResult(
+                                outcome=AmoCrmCrmRestOutcome.SUCCESS
+                            )
                 tokens = oauth_repo.decrypt_row(row, key_provider=self._key_provider)
+                if if_still_access_token is not None:
+                    if tokens.access_token != if_still_access_token:
+                        await oauth_repo.release_refresh_lease(
+                            session,
+                            lease=lease,
+                        )
+                        lease = None
+                        return AmoCrmCrmTokenRefreshResult(
+                            outcome=AmoCrmCrmRestOutcome.SUCCESS
+                        )
                 # Renew/validate immediately before remote refresh HTTP.
                 lease = await oauth_repo.renew_refresh_lease(session, lease=lease)
                 pre_refresh = oauth_repo.OauthPreRefreshSnapshot(
@@ -309,8 +347,8 @@ class AmoCrmCrmRestHttpClient:
                 error_code=f"AMOCRM_CRM_HTTP_{response.status_code}",
             )
 
-        parsed = _parse_oauth_token_response(response.body)
-        if parsed is None:
+        pair = _parse_oauth_token_pair(response.body)
+        if pair is None:
             async with session_scope(self._session_factory) as session:
                 await oauth_repo.release_refresh_lease(session, lease=lease)
             return AmoCrmCrmTokenRefreshResult(
@@ -318,16 +356,11 @@ class AmoCrmCrmRestHttpClient:
                 error_code="AMOCRM_CRM_OAUTH_RESPONSE_INVALID",
             )
 
-        access_expires_at = None
-        expires_in = parsed["expires_in"]
-        if type(expires_in) is int:
-            access_expires_at = datetime.now(timezone.utc) + timedelta(
-                seconds=expires_in
-            )
-
-        access_token = parsed["access_token"]
-        refresh_token = parsed["refresh_token"]
-        assert type(access_token) is str and type(refresh_token) is str
+        access_token, refresh_token = pair
+        expires_in = _resolve_expires_in(response.body)
+        access_expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=expires_in
+        )
 
         # Remote refresh succeeded once. Persist locally; never re-POST refresh.
         return await self._persist_rotated_tokens_after_200(
@@ -429,7 +462,11 @@ class AmoCrmCrmRestHttpClient:
         )
 
 
-def _parse_oauth_token_response(body: bytes) -> dict[str, object] | None:
+# Official amoCRM access tokens live 24 hours; used when HTTP 200 omits expires_in.
+_DEFAULT_OAUTH_ACCESS_LIFETIME_SECONDS = 86400
+
+
+def _parse_oauth_token_pair(body: bytes) -> tuple[str, str] | None:
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
@@ -442,13 +479,27 @@ def _parse_oauth_token_response(body: bytes) -> dict[str, object] | None:
         return None
     if type(refresh) is not str or not refresh:
         return None
+    return access, refresh
+
+
+def _resolve_expires_in(body: bytes) -> int:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return _DEFAULT_OAUTH_ACCESS_LIFETIME_SECONDS
+    if not isinstance(payload, dict):
+        return _DEFAULT_OAUTH_ACCESS_LIFETIME_SECONDS
     expires_in = payload.get("expires_in")
-    if expires_in is not None and (
-        type(expires_in) is not int or isinstance(expires_in, bool) or expires_in < 0
+    if (
+        type(expires_in) is int
+        and not isinstance(expires_in, bool)
+        and expires_in > 0
     ):
-        return None
-    return {
-        "access_token": access,
-        "refresh_token": refresh,
-        "expires_in": expires_in,
-    }
+        return expires_in
+    return _DEFAULT_OAUTH_ACCESS_LIFETIME_SECONDS
+
+
+def _require_aware_utc(value: datetime, *, code: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise AmoCrmCrmRestHttpError(code)
+    return value.astimezone(timezone.utc)

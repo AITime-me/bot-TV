@@ -63,6 +63,30 @@ class _FakeTransport:
         return self.responses.pop(0)
 
 
+def _install_claim_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    parties: int = 2,
+) -> asyncio.Barrier:
+    """Force concurrent refresh callers to enter claim together."""
+
+    import app.core.amocrm_crm_rest_http as rest_http
+
+    barrier = asyncio.Barrier(parties)
+    real_claim = oauth_repo.claim_refresh_lease
+
+    async def gated_claim(session, **kwargs):  # type: ignore[no-untyped-def]
+        await barrier.wait()
+        return await real_claim(session, **kwargs)
+
+    monkeypatch.setattr(
+        rest_http.oauth_repo,
+        "claim_refresh_lease",
+        gated_claim,
+    )
+    return barrier
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def cleanup(
     session_factory: async_sessionmaker[AsyncSession],
@@ -152,6 +176,14 @@ async def test_concurrent_refresh_fencing_rejects_stale_lease(
             await oauth_repo.claim_refresh_lease(
                 session,
                 worker_id="worker-b",
+                connection_scope=_SCOPE,
+            )
+
+    async with session_scope(session_factory) as session:
+        with pytest.raises(AmoCrmCrmOauthError, match="STALE_LEASE"):
+            await oauth_repo.claim_refresh_lease(
+                session,
+                worker_id="worker-a",
                 connection_scope=_SCOPE,
             )
 
@@ -546,3 +578,254 @@ async def test_concurrent_entity_link_insert_one_wins(
         ).all()
         assert len(active_rows) == 1
         assert active_rows[0].conversation_id == conv_id
+
+
+@pytest.mark.asyncio
+async def test_same_owner_concurrent_refresh_one_remote_post(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_claim_barrier(monkeypatch, parties=2)
+    provider = _provider()
+    async with session_scope(session_factory) as session:
+        await oauth_repo.upsert_token_pair(
+            session,
+            access_token="access-before",
+            refresh_token="refresh-before",
+            key_provider=provider,
+            connection_scope=_SCOPE,
+            access_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+
+    transport = _FakeTransport()
+    transport.responses.append(
+        S2sHttpResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "access_token": "access-after",
+                    "refresh_token": "refresh-after",
+                    "expires_in": 3600,
+                }
+            ).encode("utf-8"),
+        )
+    )
+    config = AmoCrmCrmRestConfig(
+        enabled=True,
+        client_id="client-id",
+        client_secret="client-secret",
+        api_base_url="https://example.amocrm.ru",
+        redirect_uri="https://example.com/oauth",
+        connection_scope=_SCOPE,
+    )
+    client = AmoCrmCrmRestHttpClient(
+        config,
+        session_factory=session_factory,
+        key_provider=provider,
+        transport=transport,
+        worker_id="same-owner-worker",
+    )
+
+    results = await asyncio.gather(
+        client.refresh_tokens(),
+        client.refresh_tokens(),
+    )
+
+    refresh_posts = [
+        c for c in transport.calls if c.url.endswith("/oauth2/access_token")
+    ]
+    assert len(refresh_posts) == 1
+    outcomes = {r.outcome for r in results}
+    assert outcomes == {
+        AmoCrmCrmRestOutcome.SUCCESS,
+        AmoCrmCrmRestOutcome.TRANSIENT_ERROR,
+    }
+    assert sum(
+        1
+        for r in results
+        if r.outcome is AmoCrmCrmRestOutcome.TRANSIENT_ERROR
+        and r.error_code == "AMOCRM_CRM_OAUTH_STALE_LEASE"
+    ) == 1
+    async with session_scope(session_factory) as session:
+        row = await oauth_repo.get_by_scope(session, connection_scope=_SCOPE)
+        assert row is not None
+        tokens = oauth_repo.decrypt_row(row, key_provider=provider)
+        assert tokens.access_token == "access-after"
+        assert tokens.refresh_token == "refresh-after"
+
+
+@pytest.mark.asyncio
+async def test_stale_401_after_peer_refresh_skips_second_post(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    provider = _provider()
+    async with session_scope(session_factory) as session:
+        await oauth_repo.upsert_token_pair(
+            session,
+            access_token="access-stale",
+            refresh_token="refresh-live",
+            key_provider=provider,
+            connection_scope=_SCOPE,
+            access_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+
+    transport = _FakeTransport()
+    transport.responses.append(
+        S2sHttpResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "access_token": "access-new",
+                    "refresh_token": "refresh-new",
+                    "expires_in": 3600,
+                }
+            ).encode("utf-8"),
+        )
+    )
+    config = AmoCrmCrmRestConfig(
+        enabled=True,
+        client_id="client-id",
+        client_secret="client-secret",
+        api_base_url="https://example.amocrm.ru",
+        redirect_uri="https://example.com/oauth",
+        connection_scope=_SCOPE,
+    )
+    peer = AmoCrmCrmRestHttpClient(
+        config,
+        session_factory=session_factory,
+        key_provider=provider,
+        transport=transport,
+        worker_id="peer-refresh",
+    )
+    stale = AmoCrmCrmRestHttpClient(
+        config,
+        session_factory=session_factory,
+        key_provider=provider,
+        transport=transport,
+        worker_id="stale-401",
+    )
+    peer_rotated = asyncio.Event()
+
+    async def _peer_refresh() -> None:
+        first = await peer.refresh_tokens()
+        assert first.outcome is AmoCrmCrmRestOutcome.SUCCESS
+        peer_rotated.set()
+
+    async def _stale_refresh() -> None:
+        await peer_rotated.wait()
+        second = await stale.refresh_tokens(if_still_access_token="access-stale")
+        assert second.outcome is AmoCrmCrmRestOutcome.SUCCESS
+
+    await asyncio.gather(_peer_refresh(), _stale_refresh())
+
+    refresh_posts = [
+        c for c in transport.calls if c.url.endswith("/oauth2/access_token")
+    ]
+    assert len(refresh_posts) == 1
+    async with session_scope(session_factory) as session:
+        row = await oauth_repo.get_by_scope(session, connection_scope=_SCOPE)
+        assert row is not None
+        tokens = oauth_repo.decrypt_row(row, key_provider=provider)
+        assert tokens.access_token == "access-new"
+
+
+@pytest.mark.asyncio
+async def test_if_expires_at_lte_skips_fresh_token_inside_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    provider = _provider()
+    fresh_until = datetime.now(timezone.utc) + timedelta(hours=2)
+    async with session_scope(session_factory) as session:
+        await oauth_repo.upsert_token_pair(
+            session,
+            access_token="access-fresh",
+            refresh_token="refresh-live",
+            key_provider=provider,
+            connection_scope=_SCOPE,
+            access_expires_at=fresh_until,
+        )
+
+    transport = _FakeTransport()
+    config = AmoCrmCrmRestConfig(
+        enabled=True,
+        client_id="client-id",
+        client_secret="client-secret",
+        api_base_url="https://example.amocrm.ru",
+        redirect_uri="https://example.com/oauth",
+        connection_scope=_SCOPE,
+    )
+    client = AmoCrmCrmRestHttpClient(
+        config,
+        session_factory=session_factory,
+        key_provider=provider,
+        transport=transport,
+        worker_id="proactive-cutoff",
+    )
+
+    result = await client.refresh_tokens(
+        if_expires_at_lte=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+
+    assert result.outcome is AmoCrmCrmRestOutcome.SUCCESS
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_http_200_missing_expires_in_persists_pair_with_default_lifetime(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    provider = _provider()
+    before = datetime.now(timezone.utc)
+    async with session_scope(session_factory) as session:
+        await oauth_repo.upsert_token_pair(
+            session,
+            access_token="access-before",
+            refresh_token="refresh-before",
+            key_provider=provider,
+            connection_scope=_SCOPE,
+            access_expires_at=before - timedelta(minutes=1),
+        )
+
+    transport = _FakeTransport()
+    transport.responses.append(
+        S2sHttpResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "access_token": "access-after",
+                    "refresh_token": "refresh-after",
+                }
+            ).encode("utf-8"),
+        )
+    )
+    config = AmoCrmCrmRestConfig(
+        enabled=True,
+        client_id="client-id",
+        client_secret="client-secret",
+        api_base_url="https://example.amocrm.ru",
+        redirect_uri="https://example.com/oauth",
+        connection_scope=_SCOPE,
+    )
+    client = AmoCrmCrmRestHttpClient(
+        config,
+        session_factory=session_factory,
+        key_provider=provider,
+        transport=transport,
+        worker_id="missing-expires-in",
+    )
+
+    result = await client.refresh_tokens()
+    assert result.outcome is AmoCrmCrmRestOutcome.SUCCESS
+    assert len(transport.calls) == 1
+
+    async with session_scope(session_factory) as session:
+        row = await oauth_repo.get_by_scope(session, connection_scope=_SCOPE)
+        assert row is not None
+        tokens = oauth_repo.decrypt_row(row, key_provider=provider)
+        assert tokens.access_token == "access-after"
+        assert tokens.refresh_token == "refresh-after"
+        assert tokens.access_expires_at is not None
+        assert tokens.access_expires_at > before + timedelta(hours=20)

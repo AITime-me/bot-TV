@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
 from enum import Enum
 from typing import Callable, TypeVar
 
@@ -32,7 +31,6 @@ from app.core.amocrm_crm_rest_http import (
     AmoCrmCrmRestTransport,
     _CrmHttpStdlibTransport,
 )
-from app.db.clock import resolve_moment
 from app.db.session import session_scope
 from app.models.amocrm_entity_link import AmocrmEntityKind, AmocrmEntityLinkStatus
 from app.repositories import amocrm_crm_oauth_tokens as oauth_repo
@@ -50,7 +48,6 @@ __all__ = (
     "load_deal_create_config_fail_closed",
 )
 
-_REFRESH_SKEW = timedelta(seconds=60)
 _T = TypeVar("_T")
 
 
@@ -438,7 +435,9 @@ class TechnicalDealProjectionService:
             return result
         if self._oauth is None:
             return result
-        refreshed = await self._oauth.refresh_tokens()
+        refreshed = await self._oauth.refresh_tokens(
+            if_still_access_token=access_token,
+        )
         if refreshed.outcome is not AmoCrmCrmRestOutcome.SUCCESS:
             return result
         new_access = await self._load_access_token()
@@ -447,30 +446,7 @@ class TechnicalDealProjectionService:
         return fn(access_token=new_access, **kwargs)
 
     async def _resolve_access_token(self) -> str | None:
-        assert self._config.rest is not None
-        need_refresh = False
-        async with session_scope(self._session_factory) as session:
-            row = await oauth_repo.get_by_scope(
-                session,
-                connection_scope=self._config.rest.connection_scope,
-            )
-            if row is None:
-                return None
-            tokens = oauth_repo.decrypt_row(row, key_provider=self._key_provider)
-            moment = await resolve_moment(session, None)
-            if (
-                row.access_expires_at is not None
-                and row.access_expires_at <= moment + _REFRESH_SKEW
-            ):
-                need_refresh = True
-            access = tokens.access_token
-        if need_refresh and self._oauth is not None:
-            refreshed = await self._oauth.refresh_tokens()
-            if refreshed.outcome is AmoCrmCrmRestOutcome.SUCCESS:
-                reloaded = await self._load_access_token()
-                if reloaded is not None:
-                    return reloaded
-        return access
+        return await self._load_access_token()
 
     async def _load_access_token(self) -> str | None:
         assert self._config.rest is not None

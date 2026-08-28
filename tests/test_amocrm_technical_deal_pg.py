@@ -8,6 +8,7 @@ import json
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
@@ -80,6 +81,41 @@ class _FakeTransport:
         if not self.responses:
             raise AssertionError(f"no response for {req.method} {req.url}")
         return self.responses.pop(0)
+
+
+def _http_path(url: str) -> str:
+    return urlsplit(url).path
+
+
+def _install_oauth_refresh_entry_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    parties: int = 2,
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Hold both reactive-401 callers until they enter refresh, before any DB session."""
+
+    import app.core.amocrm_crm_rest_http as rest_http
+
+    ready = asyncio.Event()
+    arrived = 0
+    lock = asyncio.Lock()
+    real_refresh = rest_http.AmoCrmCrmRestHttpClient.refresh_tokens
+
+    async def gated_refresh(self, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal arrived
+        async with lock:
+            arrived += 1
+            if arrived >= parties:
+                ready.set()
+        await asyncio.wait_for(ready.wait(), timeout=timeout_seconds)
+        return await real_refresh(self, **kwargs)
+
+    monkeypatch.setattr(
+        rest_http.AmoCrmCrmRestHttpClient,
+        "refresh_tokens",
+        gated_refresh,
+    )
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -600,27 +636,37 @@ async def test_existing_contact_attaches_to_deal_without_contact_create(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_expired_oauth_refresh_is_fenced(
+async def test_concurrent_reactive_401_oauth_refresh_is_fenced(
     session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from datetime import datetime, timedelta, timezone
-
+    _install_oauth_refresh_entry_gate(monkeypatch)
     async with session_scope(session_factory) as session:
         conv = await _seed_conversation(session)
         conv_id = conv.id
+        await entity_links.insert_active_if_absent(
+            session,
+            conversation_id=conv_id,
+            entity_kind=AmocrmEntityKind.TECHNICAL_DEAL,
+            external_id="4242",
+        )
         await oauth_repo.upsert_token_pair(
             session,
-            access_token="access-expired",
+            access_token="access-stale",
             refresh_token="refresh-live",
             key_provider=_provider(),
             connection_scope=_SCOPE,
-            access_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
         )
 
     transport = _FakeTransport()
+    transport.responses.extend(
+        [
+            S2sHttpResponse(status_code=401, headers={}, body=b"{}"),
+            S2sHttpResponse(status_code=401, headers={}, body=b"{}"),
+        ]
+    )
     transport.responses.append(_oauth_refresh_ok())
-    transport.responses.append(_lead_created(9001))
-    transport.responses.extend([_lead_get(9001), _lead_get(9001), _lead_get(9001)])
+    transport.responses.extend([_lead_get(4242), _lead_get(4242)])
 
     async def _run(worker: str) -> TechnicalDealOutcome:
         service = TechnicalDealProjectionService(
@@ -634,12 +680,40 @@ async def test_concurrent_expired_oauth_refresh_is_fenced(
         return result.outcome
 
     outcomes = await asyncio.gather(_run("oauth-a"), _run("oauth-b"))
-    refresh_calls = [c for c in transport.calls if c.url.endswith("/oauth2/access_token")]
-    create_calls = [
+    refresh_calls = [
+        c for c in transport.calls if _http_path(c.url) == "/oauth2/access_token"
+    ]
+    deal_calls = [
         c
         for c in transport.calls
-        if c.method == "POST" and c.url.endswith("/api/v4/leads")
+        if c.method == "GET" and _http_path(c.url) == "/api/v4/leads/4242"
     ]
     assert len(refresh_calls) == 1
-    assert len(create_calls) == 1
+    assert [
+        c.headers["Authorization"] for c in deal_calls[:2]
+    ] == ["Bearer access-stale", "Bearer access-stale"]
+    assert any(
+        c.headers["Authorization"] == "Bearer access-refreshed"
+        for c in deal_calls[2:]
+    )
     assert TechnicalDealOutcome.ENSURED in outcomes
+    assert all(
+        outcome
+        in {
+            TechnicalDealOutcome.ENSURED,
+            TechnicalDealOutcome.TRANSIENT_ERROR,
+        }
+        for outcome in outcomes
+    )
+    assert not any(
+        c.method == "POST" and _http_path(c.url) == "/api/v4/leads"
+        for c in transport.calls
+    )
+    async with session_scope(session_factory) as session:
+        active = await entity_links.get_active(
+            session,
+            conversation_id=conv_id,
+            entity_kind=AmocrmEntityKind.TECHNICAL_DEAL,
+        )
+        assert active is not None
+        assert active.external_id == "4242"

@@ -100,6 +100,7 @@ from app.models.reply_plan import (
     reply_plan_transition_allowed,
 )
 from app.models.worker_heartbeat import (
+    AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
     AMOCRM_MIRROR_LOOP,
     HANDOFF_EXPIRY_LOOP,
     INGRESS_LOOP,
@@ -112,6 +113,7 @@ from app.models.worker_heartbeat import (
 __all__ = [
     "ALLOWED_MIRROR_PAYLOAD_KEYS",
     "AMOCRM_MIRROR_TRANSITIONS",
+    "AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP",
     "AMOCRM_MIRROR_LOOP",
     "BOT_RESPONSE_DELAY_MS",
     "FORBIDDEN_MIRROR_PAYLOAD_KEYS",

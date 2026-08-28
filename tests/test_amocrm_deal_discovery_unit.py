@@ -54,7 +54,13 @@ class _StubOauth:
         self.outcome = outcome
         self.refresh_count = 0
 
-    async def refresh_tokens(self) -> AmoCrmCrmTokenRefreshResult:
+    async def refresh_tokens(
+        self,
+        *,
+        if_expires_at_lte=None,
+        if_still_access_token=None,
+    ) -> AmoCrmCrmTokenRefreshResult:
+        del if_expires_at_lte, if_still_access_token
         self.refresh_count += 1
         if self.outcome is AmoCrmCrmRestOutcome.SUCCESS:
             self.token_box["access"] = "access-after-refresh"
