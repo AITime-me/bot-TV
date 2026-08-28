@@ -419,6 +419,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "teya_request_orchestrator",
                 "teya_request_reconciliation",
                 "booking_method_analytics",
+                "acquisition_source_analytics",
             }
         ),
     ),

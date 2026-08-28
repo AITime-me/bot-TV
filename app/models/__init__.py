@@ -79,6 +79,9 @@ from app.models.self_booking_pii_admission import SelfBookingPiiAdmission
 from app.models.teya_request_pending import TeyaRequestPending
 from app.models.teya_request_feed_cursor import TeyaRequestFeedCursor
 from app.models.booking_method_analytics_pending import BookingMethodAnalyticsPending
+from app.models.acquisition_source_analytics_pending import (
+    AcquisitionSourceAnalyticsPending,
+)
 from app.models.integration_circuit_breaker import IntegrationCircuitBreaker
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
@@ -170,6 +173,7 @@ __all__ = [
     "SelfBookingPiiAdmission",
     "TeyaRequestPending",
     "BookingMethodAnalyticsPending",
+    "AcquisitionSourceAnalyticsPending",
     "MirrorPayloadViolation",
     "OutboxMessage",
     "OUTBOUND_LOOP",

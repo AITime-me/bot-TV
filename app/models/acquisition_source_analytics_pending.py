@@ -1,0 +1,122 @@
+"""Durable A2.3b2 acquisition-source analytics pendings.
+
+Stores evidence_id + owner binding + source_key. No plaintext phone.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.acquisition_source_types import PURPOSE
+from app.core.pii_gateway import orm_local_column, repr_orm_fingerprint
+from app.db.base import Base
+
+_STATE_SQL = (
+    "'DISCOVERED', 'RESOLVING', 'APPLYING', 'DONE', 'MANUAL_REVIEW', 'SKIPPED'"
+)
+_OWNER_KIND_SQL = "'APPOINTMENT', 'BOOKING_REQUEST'"
+_SOURCE_KEY_SQL = "'VK_ADS', 'VK_CONTENT', 'YANDEX', 'TWO_GIS'"
+
+
+class AcquisitionSourceAnalyticsPending(Base):
+    __tablename__ = "acquisition_source_analytics_pendings"
+    __table_args__ = (
+        CheckConstraint(
+            f"state IN ({_STATE_SQL})",
+            name="ck_acquisition_source_analytics_pendings_state",
+        ),
+        CheckConstraint(
+            f"owner_kind IN ({_OWNER_KIND_SQL})",
+            name="ck_acquisition_source_analytics_pendings_owner_kind",
+        ),
+        CheckConstraint(
+            f"source_key IN ({_SOURCE_KEY_SQL})",
+            name="ck_acquisition_source_analytics_pendings_source_key",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_acquisition_source_analytics_pendings_attempt_count",
+        ),
+        CheckConstraint(
+            "max_attempts >= 1",
+            name="ck_acquisition_source_analytics_pendings_max_attempts",
+        ),
+        UniqueConstraint(
+            "evidence_id",
+            "purpose",
+            name="uq_acquisition_source_analytics_pendings_evidence_purpose",
+        ),
+        Index(
+            "ix_acquisition_source_analytics_pendings_claim",
+            "state",
+            "next_retry_at",
+            "lease_expires_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, nullable=False
+    )
+    evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(
+        String(48), nullable=False, default=PURPOSE
+    )
+    owner_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    source_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(48), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer(), nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer(), nullable=False)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    amocrm_contact_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    amocrm_deal_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    result_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manual_review_reason: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            "AcquisitionSourceAnalyticsPending("
+            f"id={repr_orm_fingerprint(orm_local_column(self, 'id'), purpose='pending_id')}, "
+            "evidence_id=<redacted>, "
+            f"purpose={orm_local_column(self, 'purpose')!r}, "
+            f"owner_kind={orm_local_column(self, 'owner_kind')!r}, "
+            f"source_key={orm_local_column(self, 'source_key')!r}, "
+            f"state={orm_local_column(self, 'state')!r}, "
+            f"attempt_count={orm_local_column(self, 'attempt_count')!r}, "
+            f"result_code={orm_local_column(self, 'result_code')!r}, "
+            "amocrm_contact_id=<redacted>, "
+            "amocrm_deal_id=<redacted>)"
+        )

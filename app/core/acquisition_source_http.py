@@ -1,0 +1,313 @@
+"""Acquisition-source S2S HTTP adapter (A2.3b2).
+
+Reuses BookingEligibilityHttpConfig, Bearer token, timeout, max-response, and
+stdlib S2sHttpTransport. No retries. No redirects. Fail-closed on malformed JSON.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from enum import StrEnum
+from typing import Final, Literal, Mapping, NoReturn
+
+from app.core.acquisition_source_remote import (
+    ACQUISITION_SOURCE_CONTEXT_PATH,
+    ACQUISITION_SOURCE_FEED_PATH,
+    ACQUISITION_SOURCE_REMOTE_ERROR_CODES,
+    REMOTE_ERROR_CODE_BY_STATUS,
+    AcquisitionSourceContextDto,
+    AcquisitionSourceFeedCursor,
+    AcquisitionSourceFeedPage,
+    AcquisitionSourceOwnerKind,
+    build_context_request_body,
+    build_feed_request_body,
+    parse_acquisition_source_context_payload,
+    parse_acquisition_source_feed_payload,
+)
+from app.core.booking_eligibility_http import BookingEligibilityHttpConfig
+from app.core.s2s_http_transport import (
+    S2sHttpRequest,
+    S2sHttpResponse,
+    S2sHttpTransport,
+    S2sHttpTransportError,
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = (
+    "AcquisitionSourceAdapterReasonCode",
+    "AcquisitionSourceHttpClient",
+    "AcquisitionSourceHttpError",
+)
+
+_MAX_REQUEST_BYTES: Final[int] = 4096
+
+_ErrorRoute = Literal["feed", "context"]
+
+_ALLOWED_ADAPTER_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "CONFIG_INVALID",
+        "REQUEST_INVALID",
+        "TRANSPORT_ERROR",
+        "TIMEOUT",
+        "RESPONSE_TOO_LARGE",
+        "RESPONSE_INVALID",
+        "REMOTE_REJECTED",
+        "FEED_UNAVAILABLE",
+        "CONTEXT_UNAVAILABLE",
+        "AUTH_UNAVAILABLE",
+        "RATE_LIMITED",
+        *ACQUISITION_SOURCE_REMOTE_ERROR_CODES,
+    }
+)
+
+
+class AcquisitionSourceAdapterReasonCode(StrEnum):
+    CONFIG_INVALID = "CONFIG_INVALID"
+    REQUEST_INVALID = "REQUEST_INVALID"
+    TRANSPORT_ERROR = "TRANSPORT_ERROR"
+    TIMEOUT = "TIMEOUT"
+    RESPONSE_TOO_LARGE = "RESPONSE_TOO_LARGE"
+    RESPONSE_INVALID = "RESPONSE_INVALID"
+    REMOTE_REJECTED = "REMOTE_REJECTED"
+    FEED_UNAVAILABLE = "FEED_UNAVAILABLE"
+    CONTEXT_UNAVAILABLE = "CONTEXT_UNAVAILABLE"
+    AUTH_UNAVAILABLE = "AUTH_UNAVAILABLE"
+    RATE_LIMITED = "RATE_LIMITED"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE"
+    UNAUTHORIZED = "UNAUTHORIZED"
+    NOT_FOUND = "NOT_FOUND"
+    UNAVAILABLE = "UNAVAILABLE"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class AcquisitionSourceHttpError(RuntimeError):
+    def __init__(self, code: object) -> None:
+        if type(code) is not str or code not in _ALLOWED_ADAPTER_ERROR_CODES:
+            super().__init__("CONFIG_INVALID")
+            return
+        super().__init__(code)
+
+    @property
+    def code(self) -> str:
+        return str(self.args[0]) if self.args else "CONFIG_INVALID"
+
+    def __repr__(self) -> str:
+        return f"AcquisitionSourceHttpError({self.code!r})"
+
+    def __str__(self) -> str:
+        return self.code
+
+
+def _log_fail(code: str) -> None:
+    if code not in _ALLOWED_ADAPTER_ERROR_CODES:
+        return
+    try:
+        logger.info("acquisition_source_http_fail_closed code=%s", code)
+    except Exception:
+        return
+
+
+def _fail(code: AcquisitionSourceAdapterReasonCode) -> NoReturn:
+    _log_fail(code.value)
+    raise AcquisitionSourceHttpError(code.value) from None
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    target = name.lower()
+    for key, value in headers.items():
+        if type(key) is str and key.lower() == target:
+            return value if type(value) is str else None
+    return None
+
+
+def _content_type_is_json(content_type: str | None) -> bool:
+    if type(content_type) is not str or not content_type:
+        return False
+    media = content_type.split(";", 1)[0].strip().lower()
+    return media == "application/json"
+
+
+def _encode_body(body_object: object) -> bytes:
+    if type(body_object) is not dict:
+        _fail(AcquisitionSourceAdapterReasonCode.CONFIG_INVALID)
+    try:
+        body = json.dumps(
+            body_object, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        _fail(AcquisitionSourceAdapterReasonCode.CONFIG_INVALID)
+    if len(body) > _MAX_REQUEST_BYTES:
+        _fail(AcquisitionSourceAdapterReasonCode.REQUEST_INVALID)
+    return body
+
+
+def _envelope_code(body: bytes) -> str | None:
+    if not body:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if type(payload) is not dict:
+        return None
+    code = payload.get("code")
+    if type(code) is not str:
+        return None
+    return code
+
+
+def _map_error(
+    status_code: int, body: bytes, *, route: _ErrorRoute
+) -> AcquisitionSourceAdapterReasonCode:
+    if status_code == 429:
+        code = _envelope_code(body)
+        if code == "RATE_LIMITED" or code is None:
+            return AcquisitionSourceAdapterReasonCode.RATE_LIMITED
+        allowed = REMOTE_ERROR_CODE_BY_STATUS.get(429)
+        if allowed is not None and code in allowed:
+            return AcquisitionSourceAdapterReasonCode.RATE_LIMITED
+        return AcquisitionSourceAdapterReasonCode.RATE_LIMITED
+
+    if status_code in {401, 403}:
+        return AcquisitionSourceAdapterReasonCode.AUTH_UNAVAILABLE
+
+    if 500 <= status_code <= 599:
+        return AcquisitionSourceAdapterReasonCode.INTERNAL_ERROR
+
+    if status_code == 404:
+        code = _envelope_code(body)
+        if route == "feed":
+            return AcquisitionSourceAdapterReasonCode.FEED_UNAVAILABLE
+        if code == "NOT_FOUND":
+            allowed = REMOTE_ERROR_CODE_BY_STATUS.get(404)
+            if allowed is not None and code in allowed:
+                return AcquisitionSourceAdapterReasonCode.NOT_FOUND
+        if code == "UNAVAILABLE":
+            return AcquisitionSourceAdapterReasonCode.CONTEXT_UNAVAILABLE
+        return AcquisitionSourceAdapterReasonCode.CONTEXT_UNAVAILABLE
+
+    if status_code not in REMOTE_ERROR_CODE_BY_STATUS:
+        return AcquisitionSourceAdapterReasonCode.REMOTE_REJECTED
+
+    code = _envelope_code(body)
+    if code is None:
+        return AcquisitionSourceAdapterReasonCode.REMOTE_REJECTED
+    allowed = REMOTE_ERROR_CODE_BY_STATUS.get(status_code)
+    if allowed is None or code not in allowed:
+        return AcquisitionSourceAdapterReasonCode.REMOTE_REJECTED
+    if code == "UNAVAILABLE":
+        if route == "feed":
+            return AcquisitionSourceAdapterReasonCode.FEED_UNAVAILABLE
+        return AcquisitionSourceAdapterReasonCode.CONTEXT_UNAVAILABLE
+    if code == "UNAUTHORIZED":
+        return AcquisitionSourceAdapterReasonCode.AUTH_UNAVAILABLE
+    if code == "RATE_LIMITED":
+        return AcquisitionSourceAdapterReasonCode.RATE_LIMITED
+    return AcquisitionSourceAdapterReasonCode(code)
+
+
+class AcquisitionSourceHttpClient:
+    """S2S acquisition-source client. Exactly one HTTP call per method."""
+
+    def __init__(
+        self,
+        config: BookingEligibilityHttpConfig,
+        transport: S2sHttpTransport,
+    ) -> None:
+        if type(config) is not BookingEligibilityHttpConfig:
+            raise AcquisitionSourceHttpError("CONFIG_INVALID") from None
+        if transport is None:
+            raise AcquisitionSourceHttpError("CONFIG_INVALID") from None
+        self._config = config
+        self._transport = transport
+
+    def feed(
+        self,
+        *,
+        limit: int = 20,
+        cursor: AcquisitionSourceFeedCursor | None = None,
+    ) -> AcquisitionSourceFeedPage:
+        try:
+            body_obj = build_feed_request_body(limit=limit, cursor=cursor)
+        except ValueError:
+            _fail(AcquisitionSourceAdapterReasonCode.REQUEST_INVALID)
+        payload = self._post_json(
+            ACQUISITION_SOURCE_FEED_PATH, body_obj, error_route="feed"
+        )
+        try:
+            return parse_acquisition_source_feed_payload(payload)
+        except ValueError:
+            _fail(AcquisitionSourceAdapterReasonCode.RESPONSE_INVALID)
+
+    def context(
+        self,
+        *,
+        evidence_id: object,
+        owner_kind: object,
+        owner_id: object,
+    ) -> AcquisitionSourceContextDto:
+        try:
+            body_obj = build_context_request_body(
+                evidence_id=evidence_id,
+                owner_kind=owner_kind,
+                owner_id=owner_id,
+            )
+        except ValueError:
+            _fail(AcquisitionSourceAdapterReasonCode.REQUEST_INVALID)
+        payload = self._post_json(
+            ACQUISITION_SOURCE_CONTEXT_PATH, body_obj, error_route="context"
+        )
+        try:
+            return parse_acquisition_source_context_payload(payload)
+        except ValueError:
+            _fail(AcquisitionSourceAdapterReasonCode.RESPONSE_INVALID)
+
+    def _post_json(
+        self,
+        path: str,
+        body_object: dict[str, object],
+        *,
+        error_route: _ErrorRoute,
+    ) -> object:
+        body = _encode_body(body_object)
+        req = S2sHttpRequest(
+            method="POST",
+            url=f"{self._config.base_url}{path}",
+            headers={
+                "Authorization": f"Bearer {self._config.bearer_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            body=body,
+            timeout_seconds=self._config.timeout_seconds,
+            allow_redirects=False,
+            max_response_bytes=self._config.max_response_bytes,
+        )
+        try:
+            response = self._transport.request(req)
+        except S2sHttpTransportError as exc:
+            code = str(exc)
+            if code == "TIMEOUT":
+                _fail(AcquisitionSourceAdapterReasonCode.TIMEOUT)
+            if code == "RESPONSE_TOO_LARGE":
+                _fail(AcquisitionSourceAdapterReasonCode.RESPONSE_TOO_LARGE)
+            _fail(AcquisitionSourceAdapterReasonCode.TRANSPORT_ERROR)
+        return self._parse_success_or_raise(response, error_route=error_route)
+
+    def _parse_success_or_raise(
+        self, response: S2sHttpResponse, *, error_route: _ErrorRoute
+    ) -> object:
+        if not (200 <= response.status_code < 300):
+            _fail(_map_error(response.status_code, response.body, route=error_route))
+        if not _content_type_is_json(_header_value(response.headers, "content-type")):
+            if response.body:
+                _fail(AcquisitionSourceAdapterReasonCode.RESPONSE_INVALID)
+        if not response.body:
+            _fail(AcquisitionSourceAdapterReasonCode.RESPONSE_INVALID)
+        try:
+            return json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            _fail(AcquisitionSourceAdapterReasonCode.RESPONSE_INVALID)
