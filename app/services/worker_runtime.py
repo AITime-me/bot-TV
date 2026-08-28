@@ -16,11 +16,13 @@ from app.core.booking_eligibility_factory import (
     rebind_booking_flow_to_runtime_settings,
 )
 from app.core.booking_method_http import BookingMethodHttpClient
+from app.core.acquisition_source_http import AcquisitionSourceHttpClient
 from app.core.booking_request_http import BookingRequestHttpClient
 from app.core.ephemeral_pii_types import EphemeralPiiError
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
+    ACQUISITION_SOURCE_ANALYTICS_LOOP,
     AMOCRM_MIRROR_LOOP,
     BOOKING_METHOD_ANALYTICS_LOOP,
     HANDOFF_EXPIRY_LOOP,
@@ -53,6 +55,9 @@ from app.services.self_booking_create_execution_worker import (
 )
 from app.services.booking_method_analytics_worker import (
     BookingMethodAnalyticsWorker,
+)
+from app.services.acquisition_source_analytics_worker import (
+    AcquisitionSourceAnalyticsWorker,
 )
 from app.services.teya_request_crm_wiring import build_teya_request_crm_service
 from app.services.teya_request_orchestrator_worker import (
@@ -372,6 +377,16 @@ def build_default_loop_specs(
         remote=booking_method_remote,
         crm=teya_crm,
     )
+    acquisition_source_remote = (
+        AcquisitionSourceHttpClient(booking_s2s_config, S2sHttpStdlibTransport())
+        if booking_s2s_config is not None
+        else None
+    )
+    acquisition_source_analytics = AcquisitionSourceAnalyticsWorker(
+        session_factory,
+        remote=acquisition_source_remote,
+        crm=teya_crm,
+    )
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -462,6 +477,14 @@ def build_default_loop_specs(
                 return
             await booking_method_analytics.process_one(pending_id)
 
+    async def acquisition_source_analytics_tick() -> None:
+        await acquisition_source_analytics.ingest_feed()
+        for _ in range(min(settings.worker_batch_size, 5)):
+            pending_id = await acquisition_source_analytics.claim_one()
+            if pending_id is None:
+                return
+            await acquisition_source_analytics.process_one(pending_id)
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -507,6 +530,11 @@ def build_default_loop_specs(
             name=BOOKING_METHOD_ANALYTICS_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=booking_method_analytics_tick,
+        ),
+        WorkerLoopSpec(
+            name=ACQUISITION_SOURCE_ANALYTICS_LOOP,
+            poll_seconds=settings.worker_poll_seconds,
+            tick=acquisition_source_analytics_tick,
         ),
     )
 
