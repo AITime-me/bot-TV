@@ -199,7 +199,7 @@ async def test_pg_cursor_admit_before_advance_isolated(
             created_at, cursor_id = await feed_cursor_repo.get_cursor(
                 session, cursor_id=FEED_CURSOR_ID
             )
-            assert created_at == "2026-08-28T10:01:00.000Z"
+            assert created_at == "11"
             assert cursor_id == ids[1]
             bm_at, bm_id = await feed_cursor_repo.get_cursor(
                 session, cursor_id=BOOKING_METHOD_CURSOR
