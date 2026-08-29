@@ -448,8 +448,14 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset(),
     ),
     "ck_control_plane_snapshots_checksum_len": ("checksum", frozenset()),
-    "ck_control_plane_snapshots_checksum_hex": ("checksum", frozenset()),
-    "ck_control_plane_snapshots_payload_object": ("payload", frozenset()),
+    "ck_control_plane_snapshots_checksum_hex": (
+        "checksum",
+        frozenset({"^[0-9a-f]{64}$"}),
+    ),
+    "ck_control_plane_snapshots_payload_object": (
+        "payload",
+        frozenset({"object"}),
+    ),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
