@@ -29,6 +29,7 @@ class DialogMessage:
     conversation_event_seq: int
     author: str
     text: str
+    occurred_at: object | None = None
 
     def __repr__(self) -> str:
         return (
@@ -86,12 +87,13 @@ class DialogContextService:
             await self._session.execute(
                 text(
                     """
-                    SELECT conversation_event_seq, author, body_text
+                    SELECT conversation_event_seq, author, body_text, occurred_at
                     FROM (
                         SELECT
                             conversation_event_seq,
                             'client'::text AS author,
-                            payload_json ->> 'text' AS body_text
+                            payload_json ->> 'text' AS body_text,
+                            received_at AS occurred_at
                         FROM inbox_messages
                         WHERE conversation_id = CAST(:conversation_id AS uuid)
                           AND conversation_event_seq <= :event_seq_hwm
@@ -99,7 +101,8 @@ class DialogContextService:
                         SELECT
                             conversation_event_seq,
                             'manager'::text AS author,
-                            body_text
+                            body_text,
+                            COALESCE(provider_occurred_at, received_at) AS occurred_at
                         FROM manager_messages
                         WHERE conversation_id = CAST(:conversation_id AS uuid)
                           AND status = 'APPLIED'
@@ -122,6 +125,7 @@ class DialogContextService:
                 conversation_event_seq=int(row["conversation_event_seq"]),
                 author=str(row["author"]),
                 text=str(row["body_text"]),
+                occurred_at=row["occurred_at"],
             )
             for row in rows
         ]
