@@ -200,6 +200,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_control_plane_snapshots = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.control_plane_snapshots') "
+                    "IS NOT NULL"
+                )
+            )
             has_circuit_breakers = await session.scalar(
                 text(
                     "SELECT to_regclass('public.integration_circuit_breakers') "
@@ -251,6 +257,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "booking_method_analytics_pendings")
             if has_acquisition_source_pendings:
                 tables.insert(0, "acquisition_source_analytics_pendings")
+            if has_control_plane_snapshots:
+                tables.insert(0, "control_plane_snapshots")
             if has_circuit_breakers:
                 tables.insert(0, "integration_circuit_breakers")
             if has_worker_heartbeats:

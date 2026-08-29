@@ -309,7 +309,9 @@ def test_settings_repr_redacts_password_but_keeps_safe_parts() -> None:
         assert "bot_tv_foundation_test" in rendered
     safe_default = repr(Settings.from_env({}))
     assert "database_url=None" in safe_default
-    assert safe_default.endswith("booking_eligibility_max_response_bytes=65536)")
+    assert "booking_eligibility_max_response_bytes=65536" in safe_default
+    assert "control_plane_max_stale_seconds=300" in safe_default
+    assert "control_plane_refresh_seconds=30" in safe_default
     assert "attachment_maintenance_enabled=False" in safe_default
     assert "booking_eligibility_base_url=None" in safe_default
     assert "booking_eligibility_bearer_token=None" in safe_default

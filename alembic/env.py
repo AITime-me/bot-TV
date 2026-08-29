@@ -16,6 +16,7 @@ from app.models import (  # noqa: F401 — register metadata
     AmocrmCrmOauthToken,
     AmocrmEntityLink,
     AmocrmMessageProjection,
+    ControlPlaneSnapshot,
     Conversation,
     ConversationOpsEvent,
     InboxMessage,

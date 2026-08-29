@@ -159,6 +159,8 @@ class Settings:
     booking_eligibility_bearer_token: str | None = None
     booking_eligibility_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     booking_eligibility_max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+    control_plane_max_stale_seconds: int = 300
+    control_plane_refresh_seconds: int = 30
 
     def __repr__(self) -> str:
         if self.database_url is None:
@@ -206,7 +208,11 @@ class Settings:
             "booking_eligibility_timeout_seconds="
             f"{self.booking_eligibility_timeout_seconds!r}, "
             "booking_eligibility_max_response_bytes="
-            f"{self.booking_eligibility_max_response_bytes!r})"
+            f"{self.booking_eligibility_max_response_bytes!r}, "
+            "control_plane_max_stale_seconds="
+            f"{self.control_plane_max_stale_seconds!r}, "
+            "control_plane_refresh_seconds="
+            f"{self.control_plane_refresh_seconds!r})"
         )
 
     def __post_init__(self) -> None:
@@ -295,6 +301,20 @@ class Settings:
         if not 1 <= self.attachment_purge_batch_limit <= 1000:
             raise ValueError(
                 "attachment_purge_batch_limit must be between 1 and 1000"
+            )
+        if type(self.control_plane_max_stale_seconds) is not int:
+            raise ValueError(
+                "control_plane_max_stale_seconds must be an integer"
+            )
+        if not 30 <= self.control_plane_max_stale_seconds <= 3600:
+            raise ValueError(
+                "control_plane_max_stale_seconds must be between 30 and 3600"
+            )
+        if type(self.control_plane_refresh_seconds) is not int:
+            raise ValueError("control_plane_refresh_seconds must be an integer")
+        if not 5 <= self.control_plane_refresh_seconds <= 300:
+            raise ValueError(
+                "control_plane_refresh_seconds must be between 5 and 300"
             )
         self._validate_booking_eligibility_fields()
 
@@ -504,6 +524,18 @@ class Settings:
                 source.get("ATTACHMENT_PURGE_BATCH_LIMIT", "100"),
                 minimum=1,
                 maximum=1000,
+            ),
+            control_plane_max_stale_seconds=_parse_int_range(
+                "CONTROL_PLANE_MAX_STALE_SECONDS",
+                source.get("CONTROL_PLANE_MAX_STALE_SECONDS", "300"),
+                minimum=30,
+                maximum=3600,
+            ),
+            control_plane_refresh_seconds=_parse_int_range(
+                "CONTROL_PLANE_REFRESH_SECONDS",
+                source.get("CONTROL_PLANE_REFRESH_SECONDS", "30"),
+                minimum=5,
+                maximum=300,
             ),
             **cls._eligibility_kwargs_from_env(source),
         )
