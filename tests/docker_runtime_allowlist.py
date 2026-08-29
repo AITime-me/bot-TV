@@ -89,6 +89,12 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/control_plane_remote.py",
     "!app/core/control_plane_types.py",
     "!app/core/control_plane_http.py",
+    "!app/core/live_facts_remote.py",
+    "!app/core/live_facts_types.py",
+    "!app/core/live_facts_http.py",
+    "!app/core/runtime_context_types.py",
+    "!app/core/runtime_context_knowledge.py",
+    "!app/core/runtime_context_assemble.py",
     "!app/core/teya_request_types.py",
     "!app/core/teya_request_retry.py",
     "!app/core/amocrm_circuit_breaker.py",
@@ -265,6 +271,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/acquisition_source_analytics_worker.py",
     "!app/services/control_plane_snapshot_service.py",
     "!app/services/control_plane_snapshot_worker.py",
+    "!app/services/runtime_context_builder.py",
     "!app/services/amocrm_crm_oauth_lifecycle_worker.py",
     "!app/services/vk_master_adapter.py",
     "!app/services/outbound_arbiter.py",
@@ -416,6 +423,17 @@ AMO01B2_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/repositories/amocrm_entity_links.py",
     "app/services/amocrm_technical_deal.py",
     "app/services/amocrm_crm_mirror_adapter.py",
+)
+
+# AI-DIALOGUE-01 safe runtime context foundation (no generation wiring).
+AI_DIALOGUE_01_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "app/core/live_facts_remote.py",
+    "app/core/live_facts_types.py",
+    "app/core/live_facts_http.py",
+    "app/core/runtime_context_types.py",
+    "app/core/runtime_context_knowledge.py",
+    "app/core/runtime_context_assemble.py",
+    "app/services/runtime_context_builder.py",
 )
 
 
