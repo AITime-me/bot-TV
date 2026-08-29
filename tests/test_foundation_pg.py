@@ -54,6 +54,7 @@ _FOUNDATION_TABLES = (
     "amocrm_message_projections",
     "amocrm_crm_oauth_tokens",
     "amocrm_entity_links",
+    "control_plane_snapshots",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -421,6 +422,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "booking_method_analytics",
                 "acquisition_source_analytics",
                 "amocrm_crm_oauth_lifecycle",
+                "control_plane_snapshot",
             }
         ),
     ),
@@ -432,6 +434,22 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "consecutive_failures",
         frozenset(),
     ),
+    "ck_control_plane_snapshots_kind": (
+        "kind",
+        frozenset({"SETTINGS", "KNOWLEDGE"}),
+    ),
+    "ck_control_plane_snapshots_schema_version": (
+        "schema_version",
+        frozenset(),
+    ),
+    "ck_control_plane_snapshots_version": ("version", frozenset()),
+    "ck_control_plane_snapshots_publication_id_len": (
+        "publication_id",
+        frozenset(),
+    ),
+    "ck_control_plane_snapshots_checksum_len": ("checksum", frozenset()),
+    "ck_control_plane_snapshots_checksum_hex": ("checksum", frozenset()),
+    "ck_control_plane_snapshots_payload_object": ("payload", frozenset()),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
@@ -510,6 +528,7 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
         "conversation_event_seq",
     ),
     "ix_worker_heartbeats_last_succeeded_at": ("last_succeeded_at",),
+    "ix_control_plane_snapshots_verified_at": ("verified_at",),
     "ix_conversation_ops_events_conversation_created": (
         "conversation_id",
         "created_at",

@@ -19,6 +19,7 @@ from app.models import (
     AmocrmMessageProjection,
     AttachmentSpoolObject,
     CanonicalIdentity,
+    ControlPlaneSnapshot,
     Conversation,
     ConversationOpsEvent,
     EphemeralPiiValue,
@@ -274,7 +275,7 @@ _EXPECTED_CHECKS_12 = {
         "'outbound', 'amocrm_mirror', 'self_booking_create', "
         "'teya_request_orchestrator', 'teya_request_reconciliation', "
         "'booking_method_analytics', 'acquisition_source_analytics', "
-        "'amocrm_crm_oauth_lifecycle')"
+        "'amocrm_crm_oauth_lifecycle', 'control_plane_snapshot')"
     ),
     "ck_worker_heartbeats_consecutive_failures_nonnegative": (
         "consecutive_failures >= 0"
@@ -315,6 +316,7 @@ def test_alembic_metadata_imports() -> None:
     assert AmocrmCrmOauthToken.__tablename__ == "amocrm_crm_oauth_tokens"
     assert AmocrmEntityLink.__tablename__ == "amocrm_entity_links"
     assert IdentityReviewCase.__tablename__ == "identity_review_cases"
+    assert ControlPlaneSnapshot.__tablename__ == "control_plane_snapshots"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -345,6 +347,7 @@ def test_alembic_metadata_imports() -> None:
         "amocrm_crm_oauth_tokens",
         "amocrm_entity_links",
         "identity_review_cases",
+        "control_plane_snapshots",
     }
 
 
@@ -485,6 +488,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260828_36_amocrm_oauth_loop"].down_revision
         == "20260828_35_acquisition_source"
     )
+    assert "20260829_37_control_plane" in by_id
+    assert (
+        by_id["20260829_37_control_plane"].down_revision
+        == "20260828_36_amocrm_oauth_loop"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -515,6 +523,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260826_34_booking_method",
         "20260828_35_acquisition_source",
         "20260828_36_amocrm_oauth_loop",
+        "20260829_37_control_plane",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -570,7 +579,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260828_35_acquisition_source") <= 32
     assert "20260828_36_amocrm_oauth_loop" in revision_ids
     assert len("20260828_36_amocrm_oauth_loop") <= 32
-    assert heads == ["20260828_36_amocrm_oauth_loop"]
+    assert "20260829_37_control_plane" in revision_ids
+    assert len("20260829_37_control_plane") <= 32
+    assert heads == ["20260829_37_control_plane"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -657,6 +668,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_36 = (
         root / "alembic" / "versions" / "20260828_36_amocrm_oauth_loop.py"
+    ).read_text(encoding="utf-8")
+    migration_37 = (
+        root / "alembic" / "versions" / "20260829_37_control_plane.py"
     ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
@@ -794,13 +808,14 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert name in migration_12
         assert model_checks[name] == sql
         if name == "ck_worker_heartbeats_loop_name":
-            # Founding loops in 12; expand-only CHECK rewrites in 31..36.
+            # Founding loops in 12; expand-only CHECK rewrites in 31..37.
             assert name in migration_31
             assert name in migration_32
             assert name in migration_33
             assert name in migration_34
             assert name in migration_35
             assert name in migration_36
+            assert name in migration_37
             for token in (
                 "'ingress'",
                 "'handoff_expiry'",
@@ -815,8 +830,9 @@ def test_model_migration_check_and_unique_parity() -> None:
             assert "'booking_method_analytics'" in migration_34
             assert "'acquisition_source_analytics'" in migration_35
             assert "'amocrm_crm_oauth_lifecycle'" in migration_36
+            assert "'control_plane_snapshot'" in migration_37
             for token in re.findall(r"'[a-z_]+'", sql):
-                assert token in migration_36, f"{name} missing {token} in 36"
+                assert token in migration_37, f"{name} missing {token} in 37"
             continue
         for token in re.findall(r"'[a-z_]+'", sql):
             assert token in migration_12, f"{name} missing {token}"
@@ -869,6 +885,8 @@ def test_model_migration_check_and_unique_parity() -> None:
     for name in _EXPECTED_UNIQUES_23:
         assert name in migration_23
     assert "amocrm_crm_oauth_tokens" in migration_23
+    assert "control_plane_snapshots" in migration_37
+    assert "'control_plane_snapshot'" in migration_37
     for forbidden in ("AMOCRM_CHAT", "channel_secret", "body_text"):
         assert forbidden not in migration_23
 

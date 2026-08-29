@@ -82,6 +82,7 @@ from app.models.booking_method_analytics_pending import BookingMethodAnalyticsPe
 from app.models.acquisition_source_analytics_pending import (
     AcquisitionSourceAnalyticsPending,
 )
+from app.models.control_plane_snapshot import ControlPlaneSnapshot
 from app.models.integration_circuit_breaker import IntegrationCircuitBreaker
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
@@ -102,6 +103,7 @@ from app.models.reply_plan import (
 from app.models.worker_heartbeat import (
     AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
     AMOCRM_MIRROR_LOOP,
+    CONTROL_PLANE_SNAPSHOT_LOOP,
     HANDOFF_EXPIRY_LOOP,
     INGRESS_LOOP,
     OUTBOUND_LOOP,
@@ -176,6 +178,8 @@ __all__ = [
     "TeyaRequestPending",
     "BookingMethodAnalyticsPending",
     "AcquisitionSourceAnalyticsPending",
+    "ControlPlaneSnapshot",
+    "CONTROL_PLANE_SNAPSHOT_LOOP",
     "MirrorPayloadViolation",
     "OutboxMessage",
     "OUTBOUND_LOOP",

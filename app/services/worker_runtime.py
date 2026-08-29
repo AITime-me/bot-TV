@@ -26,6 +26,7 @@ from app.models.worker_heartbeat import (
     AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
     AMOCRM_MIRROR_LOOP,
     BOOKING_METHOD_ANALYTICS_LOOP,
+    CONTROL_PLANE_SNAPSHOT_LOOP,
     HANDOFF_EXPIRY_LOOP,
     INGRESS_LOOP,
     OUTBOUND_LOOP,
@@ -64,6 +65,9 @@ from app.services.booking_method_analytics_worker import (
 from app.services.acquisition_source_analytics_worker import (
     AcquisitionSourceAnalyticsWorker,
 )
+from app.core.control_plane_http import ControlPlaneHttpClient
+from app.services.control_plane_snapshot_service import ControlPlaneSnapshotService
+from app.services.control_plane_snapshot_worker import ControlPlaneSnapshotWorker
 from app.services.teya_request_crm_wiring import build_teya_request_crm_service
 from app.services.teya_request_orchestrator_worker import (
     TeyaRequestOrchestratorWorker,
@@ -400,6 +404,17 @@ def build_default_loop_specs(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "oauth"),
     )
+    control_plane_remote = (
+        ControlPlaneHttpClient(booking_s2s_config, S2sHttpStdlibTransport())
+        if booking_s2s_config is not None
+        else None
+    )
+    control_plane_service = ControlPlaneSnapshotService(
+        session_factory,
+        remote=control_plane_remote,
+        max_stale_seconds=settings.control_plane_max_stale_seconds,
+    )
+    control_plane_snapshot = ControlPlaneSnapshotWorker(control_plane_service)
 
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
@@ -501,6 +516,9 @@ def build_default_loop_specs(
     async def amocrm_oauth_lifecycle_tick() -> None:
         await amocrm_oauth_lifecycle.tick()
 
+    async def control_plane_snapshot_tick() -> None:
+        await control_plane_snapshot.tick()
+
     return (
         WorkerLoopSpec(
             name=INGRESS_LOOP,
@@ -556,6 +574,11 @@ def build_default_loop_specs(
             name=AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP,
             poll_seconds=settings.worker_poll_seconds,
             tick=amocrm_oauth_lifecycle_tick,
+        ),
+        WorkerLoopSpec(
+            name=CONTROL_PLANE_SNAPSHOT_LOOP,
+            poll_seconds=settings.control_plane_refresh_seconds,
+            tick=control_plane_snapshot_tick,
         ),
     )
 
