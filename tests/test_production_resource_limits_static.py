@@ -83,6 +83,7 @@ def test_production_overlay_documents_canonical_stack_last() -> None:
     assert "Staging must not use this overlay" in text
     assert "/srv/automation-data/bot-tv/prod/repo/docker-compose.yml" in text
     assert "/srv/automation-data/bot-tv/prod/config/compose.prod.yaml" in text
+    assert "/srv/automation-data/bot-tv/prod/repo/compose.prod.s2s.yaml" in text
     assert "/srv/automation-data/bot-tv/prod/config/.env" in text
     assert "this overlay (resource limits only)" in text
     assert "-p tv_bot_prod" in text
@@ -92,7 +93,10 @@ def test_production_overlay_documents_canonical_stack_last() -> None:
     prod_override_idx = text.index(
         "/srv/automation-data/bot-tv/prod/config/compose.prod.yaml"
     )
+    s2s_idx = text.index(
+        "/srv/automation-data/bot-tv/prod/repo/compose.prod.s2s.yaml"
+    )
     overlay_idx = text.index(
         "/srv/automation-data/bot-tv/prod/repo/docker-compose.production.yml"
     )
-    assert repo_idx < prod_override_idx < overlay_idx
+    assert repo_idx < prod_override_idx < s2s_idx < overlay_idx

@@ -3,15 +3,20 @@
 # Canonical production stack on the host (this file LAST):
 #   1. /srv/automation-data/bot-tv/prod/repo/docker-compose.yml
 #   2. /srv/automation-data/bot-tv/prod/config/compose.prod.yaml
-#   3. this overlay (resource limits only)
+#   3. /srv/automation-data/bot-tv/prod/repo/compose.prod.s2s.yaml
+#   4. this overlay (resource limits only)
 #
 # Example (keep full production context: overrides + env-file + project):
 #   docker compose -p tv_bot_prod \
 #     --env-file /srv/automation-data/bot-tv/prod/config/.env \
 #     -f /srv/automation-data/bot-tv/prod/repo/docker-compose.yml \
 #     -f /srv/automation-data/bot-tv/prod/config/compose.prod.yaml \
+#     -f /srv/automation-data/bot-tv/prod/repo/compose.prod.s2s.yaml \
 #     -f /srv/automation-data/bot-tv/prod/repo/docker-compose.production.yml \
 #     ...
+#
+# S2S wiring (BOOKING_ELIGIBILITY_* + online-zapis-tv production network) lives
+# in compose.prod.s2s.yaml — not here. See docs/ops/cp-04-prod-s2s-wiring.md.
 #
 # This file must only declare mem_limit / cpus / pids_limit.
 # Do not redefine networks, env, volumes, commands, images, or ports.

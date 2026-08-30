@@ -1,0 +1,11 @@
+# Minimal stand-in for host-local compose.prod.yaml (CI / compose config only).
+# Not used on the real host — production keeps postgres bind/secrets there.
+# No secrets. No online-zapis-tv network (that belongs in compose.prod.s2s.yaml).
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+      POSTGRES_DB: bot
