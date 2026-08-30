@@ -270,10 +270,13 @@ def _collect_master_claims(
 ) -> tuple[str, ...]:
     """Resolve master name claims without first-name false negatives/positives.
 
-    1) Exact known Live Facts names (longest first).
-    2) Explicit ``мастер <name>`` claims not fully covered by a known span
-       (so ``мастер Ирина Пашкова`` does not also claim ``Ирина``).
-    First-name-only is not a PASS when Live Facts only has the full name.
+    1) Exact known Live Facts names (longest first) — preferred claim entities.
+    2) Explicit ``мастер <name>`` claims only when they are not a known name
+       (or a known-name prefix / known-name + trailing prose).
+
+    So ``мастер Анна Иванова выполняет`` claims only ``Анна Иванова``, not
+    ``Анна Иванова выполняет``. First-name-only is not a PASS when Live Facts
+    only has the full name.
     """
 
     known_spans = _find_known_master_spans(answer, masters)
@@ -286,12 +289,12 @@ def _collect_master_claims(
             continue
         span_start = match.start(1)
         span_end = match.end(1)
-        # Covered by (or equal to) an already recognized full known name.
-        if any(s <= span_start and span_end <= e for s, e, _ in known_spans):
+        # Exact known name (or known name + trailing prose after ``мастер``)
+        # already claimed as the Live Facts entity — do not invent a longer name.
+        if any(s == span_start and e <= span_end for s, e, _ in known_spans):
             continue
-        # Prefix of a known span starting at the same position
-        # (``Анна`` inside ``Анна Иванова`` already occupied by known match).
-        if any(s == span_start and span_end < e for s, e, _ in known_spans):
+        # Explicit capture fully inside a known span (defensive).
+        if any(s <= span_start and span_end <= e for s, e, _ in known_spans):
             continue
         folded = raw.casefold()
         if folded in claimed_folded:

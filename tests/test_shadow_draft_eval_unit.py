@@ -672,25 +672,27 @@ def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
         live_facts_master_authority=True,
         service_name_contains="чистка",
     )
-    ok_checks, ok_v = score_shadow_draft_eval(
-        scenario=scenario,
-        reply=_reply("Процедуру выполняет мастер Анна Иванова."),
-        provider_called=True,
-        live_facts=facts,
-    )
-    assert {c.name: c.passed for c in ok_checks}[
-        "master_matches_target_service_assignment"
-    ] is True
-    assert ok_v is ShadowDraftEvalVerdict.PASS
-    # Full name must not also emit invalid first-name claim «Анна».
-    master_detail = next(
-        c.detail for c in ok_checks if c.name == "master_matches_target_service_assignment"
-    )
-    assert master_detail is None
+    for text in (
+        "Процедуру выполняет мастер Анна Иванова.",
+        "Мастер Анна Иванова выполняет процедуру.",
+        "Процедуру выполняет мастер Анна Иванова сегодня.",
+    ):
+        ok_checks, ok_v = score_shadow_draft_eval(
+            scenario=scenario,
+            reply=_reply(text),
+            provider_called=True,
+            live_facts=facts,
+        )
+        master = next(
+            c for c in ok_checks if c.name == "master_matches_target_service_assignment"
+        )
+        assert master.passed is True, text
+        assert master.detail is None, text
+        assert ok_v is ShadowDraftEvalVerdict.PASS, text
 
     wrong_real, wrong_v = score_shadow_draft_eval(
         scenario=scenario,
-        reply=_reply("Процедуру выполняет мастер Борис Петров."),
+        reply=_reply("Мастер Борис Петров выполняет процедуру."),
         provider_called=True,
         live_facts=facts,
     )
@@ -701,7 +703,7 @@ def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
 
     invented, inv_v = score_shadow_draft_eval(
         scenario=scenario,
-        reply=_reply("Процедуру выполняет мастер Мария Пупкина."),
+        reply=_reply("Мастер Мария Пупкина выполняет процедуру."),
         provider_called=True,
         live_facts=facts,
     )
@@ -723,7 +725,7 @@ def test_master_first_name_only_not_pass_when_live_facts_has_full_name() -> None
     )
     checks, verdict = score_shadow_draft_eval(
         scenario=scenario,
-        reply=_reply("Процедуру выполняет мастер Анна."),
+        reply=_reply("Мастер Анна выполняет процедуру."),
         provider_called=True,
         live_facts=facts,
     )
