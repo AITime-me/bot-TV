@@ -88,7 +88,8 @@ class _AcquiredLayers:
 class RuntimeContextBuilder:
     """Build structured runtime context for a conversation.
 
-    generationAllowed is always false in this stage.
+    generationAllowed authorizes internal shadow drafts only when the context
+    is READY and local safety permits — never client delivery / outbound.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
@@ -159,9 +160,6 @@ class RuntimeContextBuilder:
         if handoff_active:
             reasons.append(RuntimeContextReason.HANDOFF_ACTIVE)
 
-        # This foundation stage never authorizes generation.
-        reasons.append(RuntimeContextReason.GENERATION_DISABLED_STAGE)
-
         bot_mode = (
             self.local_settings.bot_mode
             if isinstance(self.local_settings.bot_mode, BotMode)
@@ -210,6 +208,17 @@ class RuntimeContextBuilder:
             else RuntimeContextReadiness.NOT_READY
         )
 
+        # Shadow generation eligibility (AI-DIALOGUE-02): READY context +
+        # local safety. Client delivery remains separately denied forever by
+        # outbound_policy / arbiter — not by this flag alone.
+        generation_allowed = (
+            readiness is RuntimeContextReadiness.READY
+            and context.safety.generation_allowed
+        )
+        if not generation_allowed and RuntimeContextReason.GENERATION_DISABLED_STAGE not in reasons:
+            if readiness is RuntimeContextReadiness.READY and not context.safety.generation_allowed:
+                reasons.append(RuntimeContextReason.GENERATION_DISABLED_STAGE)
+
         # Deduplicate while preserving order.
         seen: set[RuntimeContextReason] = set()
         ordered: list[RuntimeContextReason] = []
@@ -221,7 +230,7 @@ class RuntimeContextBuilder:
         result = RuntimeContextBuildResult(
             readiness=readiness,
             reasons=tuple(ordered),
-            generation_allowed=False,
+            generation_allowed=generation_allowed,
             context=context,
         )
         _log_diag(f"build readiness={readiness.value}")
