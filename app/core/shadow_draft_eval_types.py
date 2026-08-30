@@ -52,9 +52,12 @@ class ShadowDraftEvalScenario:
     require_nonempty_reply: bool = True
     # If answer states a numeric price, it must match Live Facts for hint service.
     live_facts_price_authority: bool = False
+    live_facts_duration_authority: bool = False
+    live_facts_master_authority: bool = False
+    live_facts_booking_authority: bool = False
     # Client claims this wrong price; answer must not treat it as authoritative.
     stale_price_claim: str | None = None
-    # Substring used to bind a Live Facts service for price/duration checks.
+    # Substring used to bind exactly one Live Facts service for scoped checks.
     service_name_contains: str | None = None
     # Answer must not invent free slots / exact times when prefer_handoff.
     forbid_exact_slot_claim: bool = False

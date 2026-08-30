@@ -26,20 +26,23 @@ LIVE_EVAL_SCENARIOS: tuple[ShadowDraftEvalScenario, ...] = (
     ShadowDraftEvalScenario(
         id="03_service_duration",
         client_text="Сколько по времени длится чистка лица?",
+        live_facts_duration_authority=True,
         service_name_contains="чистка",
         notes="Duration from Live Facts when stated.",
     ),
     ShadowDraftEvalScenario(
         id="04_who_performs",
         client_text="Кто выполняет чистку лица? Какой мастер?",
+        live_facts_master_authority=True,
         service_name_contains="чистка",
-        notes="Masters only from Live Facts; no invented names.",
+        notes="Masters only from Live Facts assignment for target service.",
     ),
     ShadowDraftEvalScenario(
         id="05_online_booking",
         client_text="Можно ли записаться на чистку лица онлайн?",
+        live_facts_booking_authority=True,
         service_name_contains="чистка",
-        notes="Online booking flag from Live Facts / policy.",
+        notes="Online booking / bookingMode from Live Facts for target service.",
     ),
     ShadowDraftEvalScenario(
         id="06_preparation",

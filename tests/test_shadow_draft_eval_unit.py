@@ -24,7 +24,11 @@ from app.core.control_plane_types import (
 )
 from app.core.live_facts_types import parse_live_facts_response_v1
 from app.core.shadow_draft_eval_scenarios import LIVE_EVAL_SCENARIOS
-from app.core.shadow_draft_eval_scoring import score_shadow_draft_eval
+from app.core.shadow_draft_eval_scoring import (
+    TargetServiceBindStatus,
+    resolve_target_service,
+    score_shadow_draft_eval,
+)
 from app.core.shadow_draft_eval_types import (
     ShadowDraftEvalScenario,
     ShadowDraftEvalVerdict,
@@ -471,3 +475,283 @@ def test_docker_allowlist_includes_eval_01() -> None:
 def test_namespace_constant_stable() -> None:
     assert SHADOW_DRAFT_EVAL_NAMESPACE == UUID("a1e70101-4e01-4000-8000-0000a1e70101")
     assert synthetic_conversation_id("x") == synthetic_conversation_id("x")
+
+
+def _reply(text: str) -> ShadowDraftReply:
+    return ShadowDraftReply(
+        text=text,
+        disposition=ShadowDraftDisposition.REPLY,
+        handoff_required=False,
+        reason_code=ShadowDraftReasonCode.OK,
+        provenance=_empty_provenance(),
+        generation_metadata={"provider": "yandex", "shadow": True},
+    )
+
+
+def _facts_two_services_two_masters() -> dict[str, Any]:
+    """Target «Чистка лица» 2000/45min/MANAGER_ONLY; other service 1500 + other master."""
+
+    return {
+        "ok": True,
+        "schemaVersion": 1,
+        "generatedAt": "2026-08-29T12:00:00.000Z",
+        "studio": {
+            "name": "Студия",
+            "phone": "8 912 000-00-00",
+            "email": "a@b.c",
+            "address": "Адрес",
+            "workingHoursText": "10–20",
+            "isOnlineBookingEnabled": True,
+        },
+        "services": [
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "name": "Чистка лица",
+                "category": None,
+                "priceFrom": "2000",
+                "priceTo": "2000",
+                "currency": "RUB",
+                "durationMinutes": 45,
+                "bookingMode": "MANAGER_ONLY",
+                "isActive": True,
+                "isOnlineBookingEnabled": False,
+            },
+            {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": "Бета уход",
+                "category": "Категория",
+                "priceFrom": "1500",
+                "priceTo": "1500",
+                "currency": "RUB",
+                "durationMinutes": 60,
+                "bookingMode": "ONLINE",
+                "isActive": True,
+                "isOnlineBookingEnabled": True,
+            },
+        ],
+        "masters": [
+            {
+                "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "name": "Анна",
+                "isActive": True,
+                "isOnlineBookingEnabled": True,
+                "serviceIds": ["11111111-1111-4111-8111-111111111111"],
+            },
+            {
+                "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "name": "Борис",
+                "isActive": True,
+                "isOnlineBookingEnabled": True,
+                "serviceIds": ["22222222-2222-4222-8222-222222222222"],
+            },
+        ],
+    }
+
+
+def test_price_other_service_is_false_green_fail() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="price_other_service",
+        client_text="Сколько стоит чистка?",
+        live_facts_price_authority=True,
+        service_name_contains="чистка",
+    )
+    checks, verdict = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Чистка лица стоит 1500 рублей."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["target_service_resolved"].passed is True
+    assert by_name["price_matches_target_service_when_stated"].passed is False
+    assert verdict is ShadowDraftEvalVerdict.FAIL
+
+
+def test_price_target_service_pass() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="price_target_ok",
+        client_text="Сколько стоит чистка?",
+        live_facts_price_authority=True,
+        service_name_contains="чистка",
+    )
+    checks, verdict = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("По актуальным данным чистка лица стоит 2000 рублей."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    by_name = {c.name: c.passed for c in checks}
+    assert by_name["price_matches_target_service_when_stated"] is True
+    assert verdict is ShadowDraftEvalVerdict.PASS
+
+
+def test_target_service_zero_matches_fail() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="no_service",
+        client_text="Цена?",
+        live_facts_price_authority=True,
+        service_name_contains="несуществующаяуслугаxyz",
+    )
+    checks, verdict = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Стоит 2000."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["target_service_resolved"].passed is False
+    assert by_name["target_service_resolved"].detail == "target_service_not_found"
+    assert verdict is ShadowDraftEvalVerdict.FAIL
+
+
+def test_target_service_ambiguous_fail_no_silent_first() -> None:
+    payload = _facts_two_services_two_masters()
+    payload["services"][1]["name"] = "Чистка глубокая"
+    facts = parse_live_facts_response_v1(payload)
+    bind = resolve_target_service(facts, name_contains="чистка")
+    assert bind.status is TargetServiceBindStatus.AMBIGUOUS
+    assert bind.service is None
+    assert bind.match_count == 2
+
+    scenario = ShadowDraftEvalScenario(
+        id="ambiguous",
+        client_text="Цена чистки?",
+        live_facts_price_authority=True,
+        service_name_contains="чистка",
+    )
+    checks, verdict = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Стоит 2000."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    detail = next(c.detail for c in checks if c.name == "target_service_resolved")
+    assert detail == "ambiguous_service_matches=2"
+    assert verdict is ShadowDraftEvalVerdict.FAIL
+
+
+def test_duration_wrong_fail_correct_pass() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="duration",
+        client_text="Длительность?",
+        live_facts_duration_authority=True,
+        service_name_contains="чистка",
+    )
+    bad, bad_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Чистка лица длится 60 минут."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in bad}[
+        "duration_matches_target_service_when_stated"
+    ] is False
+    assert bad_v is ShadowDraftEvalVerdict.FAIL
+
+    good, good_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Чистка лица длится 45 минут."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in good}[
+        "duration_matches_target_service_when_stated"
+    ] is True
+    assert good_v is ShadowDraftEvalVerdict.PASS
+
+
+def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="masters",
+        client_text="Кто делает чистку?",
+        live_facts_master_authority=True,
+        service_name_contains="чистка",
+    )
+    ok_checks, ok_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Чистку лица выполняет мастер Анна."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in ok_checks}[
+        "master_matches_target_service_assignment"
+    ] is True
+    assert ok_v is ShadowDraftEvalVerdict.PASS
+
+    wrong_real, wrong_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Чистку лица выполняет мастер Борис."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in wrong_real}[
+        "master_matches_target_service_assignment"
+    ] is False
+    assert wrong_v is ShadowDraftEvalVerdict.FAIL
+
+    invented, inv_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Чистку лица выполняет мастер МарияПупкина."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in invented}[
+        "master_matches_target_service_assignment"
+    ] is False
+    assert inv_v is ShadowDraftEvalVerdict.FAIL
+
+
+def test_booking_manager_only_online_claim_fail_and_correct_pass() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="booking",
+        client_text="Можно онлайн?",
+        live_facts_booking_authority=True,
+        service_name_contains="чистка",
+    )
+    bad, bad_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Да, можно записаться онлайн самостоятельно."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in bad}[
+        "booking_matches_target_service_live_facts"
+    ] is False
+    assert bad_v is ShadowDraftEvalVerdict.FAIL
+
+    good, good_v = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Онлайн-запись недоступна — запись только через менеджера."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in good}[
+        "booking_matches_target_service_live_facts"
+    ] is True
+    assert good_v is ShadowDraftEvalVerdict.PASS
+
+
+def test_booking_online_true_correct_pass() -> None:
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="booking_online",
+        client_text="Бета онлайн?",
+        live_facts_booking_authority=True,
+        service_name_contains="бета",
+    )
+    checks, verdict = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Да, можно записаться онлайн на Бета уход."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    assert {c.name: c.passed for c in checks}[
+        "booking_matches_target_service_live_facts"
+    ] is True
+    assert verdict is ShadowDraftEvalVerdict.PASS
