@@ -40,8 +40,18 @@ BOOKING_ELIGIBILITY_BASE_URL=http://tvoe-vremya-production-app:3000
 BOOKING_ELIGIBILITY_BEARER_TOKEN=<same shared secret>
 ```
 
-Optional: `BOOKING_ELIGIBILITY_TIMEOUT_SECONDS`, `BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES`
-(defaults 5.0 / 65536).
+Optional: `BOOKING_ELIGIBILITY_TIMEOUT_SECONDS` (default 5.0),
+`BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES` (tracked default **262144** —
+fits ~85 KiB ACTIVE knowledge; S2S transport hard cap 1_000_000).
+
+`CONTROL_PLANE_POLL_SECONDS` (default 30, alias `CONTROL_PLANE_REFRESH_SECONDS`)
+is the `control_plane_snapshot` loop cadence. It is independent of
+`WORKER_POLL_SECONDS`. One refresh = 2 GETs (settings + knowledge).
+
+Future production `DATABASE_URL` host must be the unique compose alias
+`bot-tv-postgres` (see `compose.prod.s2s.yaml`), not hostname `postgres`
+(collides with online-zapis-tv on the shared worker network) and not the
+ephemeral container name `tv_bot_prod-postgres-1`.
 
 ## Canonical compose stack
 

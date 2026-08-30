@@ -161,7 +161,8 @@ Heartbeat содержит только техническое состояни�
 
 Настройки worker:
 
-- `WORKER_POLL_SECONDS=1` — poll основных очередей, 1–60 секунд;
+- `WORKER_POLL_SECONDS=1` — poll основных очередей (не control-plane), 1–60 секунд;
+- `CONTROL_PLANE_POLL_SECONDS=30` — cadence `control_plane_snapshot` (alias `CONTROL_PLANE_REFRESH_SECONDS`);
 - `WORKER_BATCH_SIZE=100` — максимум строк за tick, 1–1000;
 - `WORKER_TICK_TIMEOUT_SECONDS=20` — timeout tick, 5–300 секунд;
 - `WORKER_HEARTBEAT_INTERVAL_SECONDS=10` — период heartbeat, 1–60 секунд;

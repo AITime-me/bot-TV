@@ -577,6 +577,8 @@ def build_default_loop_specs(
         ),
         WorkerLoopSpec(
             name=CONTROL_PLANE_SNAPSHOT_LOOP,
+            # CONTROL_PLANE_POLL_SECONDS / CONTROL_PLANE_REFRESH_SECONDS, not
+            # the generic WORKER_POLL_SECONDS used by queue loops.
             poll_seconds=settings.control_plane_refresh_seconds,
             tick=control_plane_snapshot_tick,
         ),
