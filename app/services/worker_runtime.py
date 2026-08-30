@@ -20,6 +20,10 @@ from app.core.acquisition_source_http import AcquisitionSourceHttpClient
 from app.core.booking_request_http import BookingRequestHttpClient
 from app.core.ephemeral_pii_types import EphemeralPiiError
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
+from app.core.s2s_rate_limit import (
+    RATE_LIMITED_CODE,
+    is_expected_s2s_rate_limited,
+)
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     ACQUISITION_SOURCE_ANALYTICS_LOOP,
@@ -252,29 +256,43 @@ class WorkerRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                error_code = (
-                    exc.code
-                    if isinstance(exc, AmoCrmCrmOauthLifecycleError)
-                    else type(exc).__name__[:64]
-                )
-                logger.error(
-                    "worker loop failed loop=%s error_code=%s",
-                    spec.name,
-                    error_code,
-                )
-                consecutive_failures = await self._heartbeat_store.tick_failed(
-                    loop_name=spec.name,
-                    generation_id=self._generation_id,
-                    error_code=error_code,
-                )
-                last_heartbeat = self._monotonic()
-                if (
-                    consecutive_failures
-                    >= self._settings.worker_max_consecutive_failures
-                ):
-                    raise WorkerRuntimeFatal(
-                        f"WORKER_LOOP_FAILURE_LIMIT:{spec.name}"
-                    ) from None
+                if is_expected_s2s_rate_limited(exc):
+                    logger.info(
+                        "worker loop rate limited loop=%s error_code=%s",
+                        spec.name,
+                        RATE_LIMITED_CODE,
+                    )
+                    consecutive_failures = 0
+                    if heartbeat_due:
+                        await self._heartbeat_store.tick_succeeded(
+                            loop_name=spec.name,
+                            generation_id=self._generation_id,
+                        )
+                        last_heartbeat = self._monotonic()
+                else:
+                    error_code = (
+                        exc.code
+                        if isinstance(exc, AmoCrmCrmOauthLifecycleError)
+                        else type(exc).__name__[:64]
+                    )
+                    logger.error(
+                        "worker loop failed loop=%s error_code=%s",
+                        spec.name,
+                        error_code,
+                    )
+                    consecutive_failures = await self._heartbeat_store.tick_failed(
+                        loop_name=spec.name,
+                        generation_id=self._generation_id,
+                        error_code=error_code,
+                    )
+                    last_heartbeat = self._monotonic()
+                    if (
+                        consecutive_failures
+                        >= self._settings.worker_max_consecutive_failures
+                    ):
+                        raise WorkerRuntimeFatal(
+                            f"WORKER_LOOP_FAILURE_LIMIT:{spec.name}"
+                        ) from None
             else:
                 if heartbeat_due or consecutive_failures > 0:
                     await self._heartbeat_store.tick_succeeded(
@@ -552,22 +570,22 @@ def build_default_loop_specs(
         ),
         WorkerLoopSpec(
             name=TEYA_REQUEST_ORCHESTRATOR_LOOP,
-            poll_seconds=settings.worker_poll_seconds,
+            poll_seconds=settings.teya_request_poll_seconds,
             tick=teya_request_orchestrator_tick,
         ),
         WorkerLoopSpec(
             name=TEYA_REQUEST_RECONCILIATION_LOOP,
-            poll_seconds=settings.worker_poll_seconds,
+            poll_seconds=settings.teya_request_reconciliation_poll_seconds,
             tick=teya_request_reconciliation_tick,
         ),
         WorkerLoopSpec(
             name=BOOKING_METHOD_ANALYTICS_LOOP,
-            poll_seconds=settings.worker_poll_seconds,
+            poll_seconds=settings.booking_method_analytics_poll_seconds,
             tick=booking_method_analytics_tick,
         ),
         WorkerLoopSpec(
             name=ACQUISITION_SOURCE_ANALYTICS_LOOP,
-            poll_seconds=settings.worker_poll_seconds,
+            poll_seconds=settings.acquisition_source_analytics_poll_seconds,
             tick=acquisition_source_analytics_tick,
         ),
         WorkerLoopSpec(

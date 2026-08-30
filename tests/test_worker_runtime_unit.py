@@ -320,6 +320,9 @@ def test_default_runtime_registers_all_required_loops() -> None:
     assert next(
         spec for spec in specs if spec.name == "control_plane_snapshot"
     ).poll_seconds == settings.control_plane_refresh_seconds
+    assert next(
+        spec for spec in specs if spec.name == "teya_request_orchestrator"
+    ).poll_seconds == settings.teya_request_poll_seconds
     assert (
         next(
             spec for spec in specs if spec.name == "control_plane_snapshot"

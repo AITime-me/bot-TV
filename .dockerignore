@@ -119,6 +119,8 @@ Thumbs.db
 !app/core/runtime_context_assemble.py
 !app/core/teya_request_types.py
 !app/core/teya_request_retry.py
+!app/core/s2s_rate_limit.py
+!app/core/amocrm_analytics_fields.py
 !app/core/amocrm_circuit_breaker.py
 !app/core/amocrm_crm_writes_http.py
 !app/core/amocrm_crm_business_write_config.py

@@ -12,6 +12,7 @@ from app.core.booking_eligibility_http import (
     BookingEligibilityHttpConfig,
     BookingEligibilityHttpError,
 )
+from app.core.s2s_rate_limit import idle_s2s_budget_ok
 
 # Mode values stay local to bot-TV. Dual-enum mapping to the online-zapis-tv
 # control plane is OWNER-approved in app/core/mode_contract.py (CONTRACT-MODE-01).
@@ -193,6 +194,10 @@ class Settings:
     booking_eligibility_max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     control_plane_max_stale_seconds: int = 300
     control_plane_refresh_seconds: int = 30
+    teya_request_poll_seconds: int = 5
+    teya_request_reconciliation_poll_seconds: int = 30
+    booking_method_analytics_poll_seconds: int = 30
+    acquisition_source_analytics_poll_seconds: int = 30
 
     def __repr__(self) -> str:
         if self.database_url is None:
@@ -244,7 +249,15 @@ class Settings:
             "control_plane_max_stale_seconds="
             f"{self.control_plane_max_stale_seconds!r}, "
             "control_plane_refresh_seconds="
-            f"{self.control_plane_refresh_seconds!r})"
+            f"{self.control_plane_refresh_seconds!r}, "
+            "teya_request_poll_seconds="
+            f"{self.teya_request_poll_seconds!r}, "
+            "teya_request_reconciliation_poll_seconds="
+            f"{self.teya_request_reconciliation_poll_seconds!r}, "
+            "booking_method_analytics_poll_seconds="
+            f"{self.booking_method_analytics_poll_seconds!r}, "
+            "acquisition_source_analytics_poll_seconds="
+            f"{self.acquisition_source_analytics_poll_seconds!r})"
         )
 
     def __post_init__(self) -> None:
@@ -348,6 +361,25 @@ class Settings:
             raise ValueError(
                 "control_plane_refresh_seconds must be between 5 and 300"
             )
+        for name, value in (
+            ("teya_request_poll_seconds", self.teya_request_poll_seconds),
+            (
+                "teya_request_reconciliation_poll_seconds",
+                self.teya_request_reconciliation_poll_seconds,
+            ),
+            (
+                "booking_method_analytics_poll_seconds",
+                self.booking_method_analytics_poll_seconds,
+            ),
+            (
+                "acquisition_source_analytics_poll_seconds",
+                self.acquisition_source_analytics_poll_seconds,
+            ),
+        ):
+            if type(value) is not int:
+                raise ValueError(f"{name} must be an integer")
+            if not 5 <= value <= 300:
+                raise ValueError(f"{name} must be between 5 and 300")
         self._validate_booking_eligibility_fields()
 
     def _validate_booking_eligibility_fields(self) -> None:
@@ -449,6 +481,11 @@ class Settings:
             raise ValueError(
                 "WORKER_HEARTBEAT_STALE_SECONDS is too small for configured "
                 "poll/heartbeat/tick timeout values"
+            )
+        if not idle_s2s_budget_ok(self):
+            raise ValueError(
+                "idle S2S polling cadence exceeds the shared botInternal "
+                "rate-limit budget"
             )
 
     def validate_attachment_maintenance_runtime(self) -> None:
@@ -565,6 +602,33 @@ class Settings:
             ),
             control_plane_refresh_seconds=_parse_control_plane_poll_seconds(
                 source
+            ),
+            teya_request_poll_seconds=_parse_int_range(
+                "TEYA_REQUEST_POLL_SECONDS",
+                source.get("TEYA_REQUEST_POLL_SECONDS", "5"),
+                minimum=5,
+                maximum=300,
+            ),
+            teya_request_reconciliation_poll_seconds=_parse_int_range(
+                "TEYA_REQUEST_RECONCILIATION_POLL_SECONDS",
+                source.get("TEYA_REQUEST_RECONCILIATION_POLL_SECONDS", "30"),
+                minimum=5,
+                maximum=300,
+            ),
+            booking_method_analytics_poll_seconds=_parse_int_range(
+                "BOOKING_METHOD_ANALYTICS_POLL_SECONDS",
+                source.get("BOOKING_METHOD_ANALYTICS_POLL_SECONDS", "30"),
+                minimum=5,
+                maximum=300,
+            ),
+            acquisition_source_analytics_poll_seconds=_parse_int_range(
+                "ACQUISITION_SOURCE_ANALYTICS_POLL_SECONDS",
+                source.get(
+                    "ACQUISITION_SOURCE_ANALYTICS_POLL_SECONDS",
+                    "30",
+                ),
+                minimum=5,
+                maximum=300,
             ),
             **cls._eligibility_kwargs_from_env(source),
         )

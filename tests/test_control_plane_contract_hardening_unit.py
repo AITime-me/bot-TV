@@ -218,7 +218,7 @@ def test_control_plane_poll_independent_of_worker_poll() -> None:
         settings.worker_poll_seconds
     )
     assert by_name[INGRESS_LOOP].poll_seconds == 1
-    assert by_name[TEYA_REQUEST_ORCHESTRATOR_LOOP].poll_seconds == 1
+    assert by_name[TEYA_REQUEST_ORCHESTRATOR_LOOP].poll_seconds == 5
 
 
 def test_control_plane_s2s_cadence_has_rate_limit_headroom() -> None:

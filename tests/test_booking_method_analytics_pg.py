@@ -586,6 +586,24 @@ async def test_pg_feed_404_safe(
             assert cursor is None
 
 
+@pytest.mark.asyncio
+async def test_pg_feed_429_safe(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    remote = _FeedRemote([], feed_error="RATE_LIMITED")
+    worker = _worker(session_factory, remote, crm=None)
+    n = await worker.ingest_feed()
+    assert n == 0
+    async with session_factory() as session:
+        async with session.begin():
+            rows = (
+                await session.scalars(select(BookingMethodAnalyticsPending))
+            ).all()
+            assert rows == []
+            cursor = await session.get(TeyaRequestFeedCursor, FEED_CURSOR_ID)
+            assert cursor is None
+
+
 async def _seed_pending(
     session_factory: async_sessionmaker[AsyncSession],
     aid: uuid.UUID,

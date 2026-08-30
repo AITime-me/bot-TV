@@ -312,6 +312,8 @@ def test_settings_repr_redacts_password_but_keeps_safe_parts() -> None:
     assert "booking_eligibility_max_response_bytes=262144" in safe_default
     assert "control_plane_max_stale_seconds=300" in safe_default
     assert "control_plane_refresh_seconds=30" in safe_default
+    assert "teya_request_poll_seconds=5" in safe_default
+    assert "booking_method_analytics_poll_seconds=30" in safe_default
     assert "attachment_maintenance_enabled=False" in safe_default
     assert "booking_eligibility_base_url=None" in safe_default
     assert "booking_eligibility_bearer_token=None" in safe_default

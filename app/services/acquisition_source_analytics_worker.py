@@ -149,8 +149,9 @@ class AcquisitionSourceAnalyticsWorker:
             try:
                 page = self._remote.feed(limit=self._feed_limit, cursor=cursor)
             except AcquisitionSourceHttpError as exc:
-                if exc.code == "FEED_UNAVAILABLE":
-                    _log("ACQUISITION_SOURCE_FEED_UNAVAILABLE")
+                if exc.code in {"FEED_UNAVAILABLE", "RATE_LIMITED"}:
+                    if exc.code == "FEED_UNAVAILABLE":
+                        _log("ACQUISITION_SOURCE_FEED_UNAVAILABLE")
                     return 0
                 raise
             last_item = None

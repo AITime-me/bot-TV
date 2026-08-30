@@ -147,8 +147,9 @@ class BookingMethodAnalyticsWorker:
             try:
                 page = self._remote.feed(limit=self._feed_limit, cursor=cursor)
             except BookingMethodHttpError as exc:
-                if exc.code == "FEED_UNAVAILABLE":
-                    _log("BOOKING_METHOD_FEED_UNAVAILABLE")
+                if exc.code in {"FEED_UNAVAILABLE", "RATE_LIMITED"}:
+                    if exc.code == "FEED_UNAVAILABLE":
+                        _log("BOOKING_METHOD_FEED_UNAVAILABLE")
                     return 0
                 raise
             last_item = None
