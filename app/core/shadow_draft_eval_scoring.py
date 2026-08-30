@@ -76,9 +76,21 @@ _DURATION_TOKEN_RE = re.compile(
     r"(?<!\d)(\d{1,3})\s*(?:мин(?:ут[аы]?)?|minute|minutes)\b",
     re.IGNORECASE,
 )
-_MASTER_CLAIM_RE = re.compile(
-    r"мастер[аом]?\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,40})",
+# Explicit ``мастер <Name…>`` — up to three name tokens (Имя / Имя Фамилия).
+_MASTER_EXPLICIT_RE = re.compile(
+    r"мастер[аом]?\s+"
+    r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]*"
+    r"(?:\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]*){0,2})",
     re.IGNORECASE,
+)
+_GENERIC_MASTER_TOKENS = frozenset(
+    {
+        "студии",
+        "менеджер",
+        "косметолог",
+        "специалист",
+        "администратор",
+    }
 )
 
 _ONLINE_SELF_BOOK_YES: tuple[str, ...] = (
@@ -218,6 +230,75 @@ def _masters_for_service(
         for master in facts.masters
         if service.id in master.service_ids
     )
+
+
+def _is_letter_char(ch: str) -> bool:
+    return ch.isalpha()
+
+
+def _find_known_master_spans(
+    answer: str,
+    masters: Sequence[LiveFactsMasterV1],
+) -> list[tuple[int, int, str]]:
+    """Longest-first exact Live Facts name spans (no hardcoded names)."""
+
+    answer_cf = answer.casefold()
+    names = sorted({m.name for m in masters if m.name.strip()}, key=len, reverse=True)
+    occupied = [False] * len(answer_cf)
+    spans: list[tuple[int, int, str]] = []
+    for name in names:
+        needle = name.casefold()
+        start = 0
+        while True:
+            idx = answer_cf.find(needle, start)
+            if idx < 0:
+                break
+            end = idx + len(needle)
+            left_ok = idx == 0 or not _is_letter_char(answer_cf[idx - 1])
+            right_ok = end >= len(answer_cf) or not _is_letter_char(answer_cf[end])
+            if left_ok and right_ok and not any(occupied[idx:end]):
+                for i in range(idx, end):
+                    occupied[i] = True
+                spans.append((idx, end, name))
+            start = idx + 1
+    return spans
+
+
+def _collect_master_claims(
+    answer: str,
+    masters: Sequence[LiveFactsMasterV1],
+) -> tuple[str, ...]:
+    """Resolve master name claims without first-name false negatives/positives.
+
+    1) Exact known Live Facts names (longest first).
+    2) Explicit ``мастер <name>`` claims not fully covered by a known span
+       (so ``мастер Ирина Пашкова`` does not also claim ``Ирина``).
+    First-name-only is not a PASS when Live Facts only has the full name.
+    """
+
+    known_spans = _find_known_master_spans(answer, masters)
+    claimed: list[str] = [name for _, _, name in known_spans]
+    claimed_folded = {name.casefold() for name in claimed}
+
+    for match in _MASTER_EXPLICIT_RE.finditer(answer):
+        raw = match.group(1).strip()
+        if not raw or raw.casefold() in _GENERIC_MASTER_TOKENS:
+            continue
+        span_start = match.start(1)
+        span_end = match.end(1)
+        # Covered by (or equal to) an already recognized full known name.
+        if any(s <= span_start and span_end <= e for s, e, _ in known_spans):
+            continue
+        # Prefix of a known span starting at the same position
+        # (``Анна`` inside ``Анна Иванова`` already occupied by known match).
+        if any(s == span_start and span_end < e for s, e, _ in known_spans):
+            continue
+        folded = raw.casefold()
+        if folded in claimed_folded:
+            continue
+        claimed.append(raw)
+        claimed_folded.add(folded)
+    return tuple(claimed)
 
 
 def _scenario_needs_target_service(scenario: ShadowDraftEvalScenario) -> bool:
@@ -490,25 +571,7 @@ def score_shadow_draft_eval(
     ):
         assigned = _masters_for_service(live_facts, target)
         assigned_names = {m.name.casefold(): m.name for m in assigned}
-        studio_names = {m.name.casefold(): m.name for m in live_facts.masters}
-        claimed: list[str] = []
-        for match in _MASTER_CLAIM_RE.finditer(answer):
-            name = match.group(1).strip()
-            # Skip generic words.
-            if name.casefold() in {
-                "студии",
-                "менеджер",
-                "косметолог",
-                "специалист",
-                "администратор",
-            }:
-                continue
-            claimed.append(name)
-        # Also: any full studio master name appearing as a word in the answer.
-        for folded, original in studio_names.items():
-            if folded and folded in answer.casefold():
-                if original not in claimed:
-                    claimed.append(original)
+        claimed = _collect_master_claims(answer, live_facts.masters)
 
         if not claimed:
             checks.append(
@@ -521,8 +584,7 @@ def score_shadow_draft_eval(
         else:
             bad: list[str] = []
             for name in claimed:
-                folded = name.casefold()
-                if folded in assigned_names:
+                if name.casefold() in assigned_names:
                     continue
                 bad.append(name)
             ok = len(bad) == 0

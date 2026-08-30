@@ -532,14 +532,14 @@ def _facts_two_services_two_masters() -> dict[str, Any]:
         "masters": [
             {
                 "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                "name": "Анна",
+                "name": "Анна Иванова",
                 "isActive": True,
                 "isOnlineBookingEnabled": True,
                 "serviceIds": ["11111111-1111-4111-8111-111111111111"],
             },
             {
                 "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-                "name": "Борис",
+                "name": "Борис Петров",
                 "isActive": True,
                 "isOnlineBookingEnabled": True,
                 "serviceIds": ["22222222-2222-4222-8222-222222222222"],
@@ -674,7 +674,7 @@ def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
     )
     ok_checks, ok_v = score_shadow_draft_eval(
         scenario=scenario,
-        reply=_reply("Чистку лица выполняет мастер Анна."),
+        reply=_reply("Процедуру выполняет мастер Анна Иванова."),
         provider_called=True,
         live_facts=facts,
     )
@@ -682,10 +682,15 @@ def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
         "master_matches_target_service_assignment"
     ] is True
     assert ok_v is ShadowDraftEvalVerdict.PASS
+    # Full name must not also emit invalid first-name claim «Анна».
+    master_detail = next(
+        c.detail for c in ok_checks if c.name == "master_matches_target_service_assignment"
+    )
+    assert master_detail is None
 
     wrong_real, wrong_v = score_shadow_draft_eval(
         scenario=scenario,
-        reply=_reply("Чистку лица выполняет мастер Борис."),
+        reply=_reply("Процедуру выполняет мастер Борис Петров."),
         provider_called=True,
         live_facts=facts,
     )
@@ -696,7 +701,7 @@ def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
 
     invented, inv_v = score_shadow_draft_eval(
         scenario=scenario,
-        reply=_reply("Чистку лица выполняет мастер МарияПупкина."),
+        reply=_reply("Процедуру выполняет мастер Мария Пупкина."),
         provider_called=True,
         live_facts=facts,
     )
@@ -704,6 +709,29 @@ def test_master_assigned_pass_wrong_real_and_invented_fail() -> None:
         "master_matches_target_service_assignment"
     ] is False
     assert inv_v is ShadowDraftEvalVerdict.FAIL
+
+
+def test_master_first_name_only_not_pass_when_live_facts_has_full_name() -> None:
+    """First token alone is not a canonical master when LF only has full name."""
+
+    facts = parse_live_facts_response_v1(_facts_two_services_two_masters())
+    scenario = ShadowDraftEvalScenario(
+        id="masters_first_only",
+        client_text="Кто делает чистку?",
+        live_facts_master_authority=True,
+        service_name_contains="чистка",
+    )
+    checks, verdict = score_shadow_draft_eval(
+        scenario=scenario,
+        reply=_reply("Процедуру выполняет мастер Анна."),
+        provider_called=True,
+        live_facts=facts,
+    )
+    master = next(c for c in checks if c.name == "master_matches_target_service_assignment")
+    assert master.passed is False
+    assert master.detail is not None and "Анна" in master.detail
+    assert "Анна Иванова" not in (master.detail or "")
+    assert verdict is ShadowDraftEvalVerdict.FAIL
 
 
 def test_booking_manager_only_online_claim_fail_and_correct_pass() -> None:
