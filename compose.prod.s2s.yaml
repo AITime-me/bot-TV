@@ -1,0 +1,39 @@
+# Production S2S overlay for online-zapis-tv control-plane + live-facts reads.
+#
+# Mirrors the staging host pattern (worker-only BOOKING_ELIGIBILITY_* + external
+# online-zapis-tv network). Tracked in Git so production wiring is reviewable.
+#
+# Canonical production stack on the host:
+#   1. /srv/automation-data/bot-tv/prod/repo/docker-compose.yml
+#   2. /srv/automation-data/bot-tv/prod/config/compose.prod.yaml   (host-local)
+#   3. /srv/automation-data/bot-tv/prod/repo/compose.prod.s2s.yaml (this file)
+#   4. /srv/automation-data/bot-tv/prod/repo/docker-compose.production.yml
+#
+# Example:
+#   docker compose -p tv_bot_prod \
+#     --env-file /srv/automation-data/bot-tv/prod/config/.env \
+#     -f /srv/automation-data/bot-tv/prod/repo/docker-compose.yml \
+#     -f /srv/automation-data/bot-tv/prod/config/compose.prod.yaml \
+#     -f /srv/automation-data/bot-tv/prod/repo/compose.prod.s2s.yaml \
+#     -f /srv/automation-data/bot-tv/prod/repo/docker-compose.production.yml \
+#     ...
+#
+# Secrets stay in production .env only — never hardcode tokens here.
+# Worker is the sole consumer of control-plane snapshot refresh + live-facts
+# acquisition used by runtime context (api does not need this network/env).
+# Postgres must stay on the default network only.
+
+services:
+  worker:
+    networks:
+      - default
+      - tvoe-vremya-production_production_internal
+    environment:
+      BOOKING_ELIGIBILITY_BASE_URL: ${BOOKING_ELIGIBILITY_BASE_URL:?BOOKING_ELIGIBILITY_BASE_URL is required}
+      BOOKING_ELIGIBILITY_BEARER_TOKEN: ${BOOKING_ELIGIBILITY_BEARER_TOKEN:?BOOKING_ELIGIBILITY_BEARER_TOKEN is required}
+      BOOKING_ELIGIBILITY_TIMEOUT_SECONDS: ${BOOKING_ELIGIBILITY_TIMEOUT_SECONDS:-5.0}
+      BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES: ${BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES:-65536}
+
+networks:
+  tvoe-vremya-production_production_internal:
+    external: true
