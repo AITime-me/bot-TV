@@ -604,12 +604,27 @@ def test_published_settings_cannot_disable_emergency_lock() -> None:
     assert ctx.safety.generation_allowed is False
 
 
-def test_generation_allowed_always_false() -> None:
+def test_generation_allowed_false_under_emergency_lock() -> None:
+    ctx = _assembled_context(emergency_lock=True)
+    assert ctx.safety.emergency_lock is True
+    assert ctx.safety.generation_allowed is False
+
+
+def test_generation_allowed_true_when_local_safety_permits() -> None:
     ctx = _assembled_context(
         bot_mode=BotMode.AUTO_READ,
         emergency_lock=False,
         handoff_state="BOT_ACTIVE",
     )
+    assert ctx.safety.generation_allowed is True
+
+
+def test_generation_allowed_false_on_handoff() -> None:
+    ctx = _assembled_context(
+        emergency_lock=False,
+        handoff_state="HUMAN_ACTIVE",
+    )
+    assert ctx.safety.handoff_active is True
     assert ctx.safety.generation_allowed is False
 
 

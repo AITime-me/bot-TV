@@ -1,7 +1,7 @@
-"""Structured Teya runtime context model (AI-DIALOGUE-01).
+"""Structured Teya runtime context model (AI-DIALOGUE-01 / AI-DIALOGUE-02).
 
-Layers stay separate. No final prompt string. generationAllowed is always
-false in this foundation stage.
+Layers stay separate. No final prompt string. generationAllowed authorizes
+internal shadow draft generation only — never client delivery / outbound.
 """
 
 from __future__ import annotations

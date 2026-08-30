@@ -234,7 +234,8 @@ async def test_runtime_context_reads_real_history_ordered_and_isolated(
     result_a = await builder.build_for_conversation(conv_a)
     result_b = await builder.build_for_conversation(conv_b)
 
-    assert result_a.generation_allowed is False
+    assert result_a.generation_allowed is True
+    assert result_a.readiness.value == "READY"
     assert result_a.context is not None
     assert result_a.context.conversation is not None
     texts_a = [t.text for t in result_a.context.conversation.turns]

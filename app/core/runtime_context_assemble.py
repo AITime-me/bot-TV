@@ -117,6 +117,14 @@ def build_safety_layer(
         handoff_active = True
     if ownership == "MANAGER":
         handoff_active = True
+    # generation_allowed = internal shadow draft only (AI-DIALOGUE-02).
+    # Never means outbound / client delivery. Emergency, handoff, and manager
+    # takeover always deny generation.
+    generation_allowed = (
+        not emergency_lock
+        and not handoff_active
+        and not manager_takeover_at_present
+    )
     return RuntimeSafetyLayer(
         trust=TrustBoundary.TRUSTED_SYSTEM,
         bot_mode=bot_mode,
@@ -126,7 +134,7 @@ def build_safety_layer(
         conversation_status=conversation_status,
         manager_takeover_active=manager_takeover_at_present,
         handoff_active=handoff_active,
-        generation_allowed=False,
+        generation_allowed=generation_allowed,
     )
 
 

@@ -117,6 +117,13 @@ Thumbs.db
 !app/core/runtime_context_types.py
 !app/core/runtime_context_knowledge.py
 !app/core/runtime_context_assemble.py
+!app/core/text_generation_port.py
+!app/core/yandex_llm_config.py
+!app/core/yandex_gpt_http.py
+!app/core/yandex_llm_factory.py
+!app/core/shadow_draft_types.py
+!app/core/shadow_draft_gate.py
+!app/core/shadow_draft_prompt.py
 !app/core/teya_request_types.py
 !app/core/teya_request_retry.py
 !app/core/s2s_rate_limit.py
@@ -296,6 +303,7 @@ Thumbs.db
 !app/services/control_plane_snapshot_service.py
 !app/services/control_plane_snapshot_worker.py
 !app/services/runtime_context_builder.py
+!app/services/shadow_draft_generation.py
 !app/services/amocrm_crm_oauth_lifecycle_worker.py
 !app/services/vk_master_adapter.py
 !app/services/outbound_arbiter.py
