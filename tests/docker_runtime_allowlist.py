@@ -102,6 +102,9 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/shadow_draft_types.py",
     "!app/core/shadow_draft_gate.py",
     "!app/core/shadow_draft_prompt.py",
+    "!app/core/shadow_draft_eval_types.py",
+    "!app/core/shadow_draft_eval_scenarios.py",
+    "!app/core/shadow_draft_eval_scoring.py",
     "!app/core/teya_request_types.py",
     "!app/core/teya_request_retry.py",
     "!app/core/s2s_rate_limit.py",
@@ -160,6 +163,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/teya_ops_router.py",
     "!app/amocrm_chat_webhook.py",
     "!app/identity_glue_ops.py",
+    "!app/shadow_draft_eval.py",
     "!app/amocrm_buyer_card_bind_ops.py",
     "!app/integrations/",
     "!app/integrations/__init__.py",
@@ -282,6 +286,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/control_plane_snapshot_worker.py",
     "!app/services/runtime_context_builder.py",
     "!app/services/shadow_draft_generation.py",
+    "!app/services/shadow_draft_eval.py",
     "!app/services/amocrm_crm_oauth_lifecycle_worker.py",
     "!app/services/vk_master_adapter.py",
     "!app/services/outbound_arbiter.py",
@@ -455,6 +460,14 @@ AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_01_DOCKER_RUN
     "app/core/shadow_draft_gate.py",
     "app/core/shadow_draft_prompt.py",
     "app/services/shadow_draft_generation.py",
+)
+
+AI_EVAL_01_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS + (
+    "app/core/shadow_draft_eval_types.py",
+    "app/core/shadow_draft_eval_scenarios.py",
+    "app/core/shadow_draft_eval_scoring.py",
+    "app/services/shadow_draft_eval.py",
+    "app/shadow_draft_eval.py",
 )
 
 
