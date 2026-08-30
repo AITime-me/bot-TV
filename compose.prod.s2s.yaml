@@ -21,19 +21,15 @@
 # Secrets stay in production .env only — never hardcode tokens here.
 # Worker is the sole consumer of control-plane snapshot refresh + live-facts
 # acquisition used by runtime context (api does not need this network/env).
-# Postgres must stay on the default network only.
+# This overlay must change worker only — never postgres (no aliases, no
+# networks). Applying it must not recreate PostgreSQL.
 #
 # DNS: worker joins both default and online-zapis production_internal. Both
-# stacks historically advertise hostname ``postgres``. DATABASE_URL must use
-# the unique alias ``bot-tv-postgres`` (not compose project instance names
-# like ``tv_bot_prod-postgres-1``). Postgres itself never joins the OZ network.
+# stacks historically advertise hostname ``postgres``, so the worker must not
+# use bare ``postgres`` as DATABASE_URL host. The production DB hostname is
+# host-local operational config (not a tracked overlay alias).
 
 services:
-  postgres:
-    networks:
-      default:
-        aliases:
-          - bot-tv-postgres
   worker:
     networks:
       - default

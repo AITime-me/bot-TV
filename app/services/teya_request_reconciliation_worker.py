@@ -133,6 +133,7 @@ class TeyaRequestReconciliationWorker:
         try:
             dto = self._remote.get(request_id=str(row.request_id))
         except Exception:
+            # Includes expected RATE_LIMITED: leave cursor/pending unchanged.
             return False
 
         now = await db_statement_now(session)

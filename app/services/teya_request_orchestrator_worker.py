@@ -9,6 +9,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.booking_request_http import BookingRequestHttpError
 from app.core.booking_request_remote import BookingRequestFeedCursor
 from app.core.teya_request_types import (
     TeyaRequestOrchestratorOutcome,
@@ -100,7 +101,12 @@ class TeyaRequestOrchestratorWorker:
                 cursor = BookingRequestFeedCursor(
                     created_at=created_at, id=cursor_id
                 )
-            page = self._remote.feed(limit=self._feed_limit, cursor=cursor)
+            try:
+                page = self._remote.feed(limit=self._feed_limit, cursor=cursor)
+            except BookingRequestHttpError as exc:
+                if exc.code == "RATE_LIMITED":
+                    return 0
+                raise
             pending = TeyaRequestPendingService(session)
             last_item = None
             for item in page.items:

@@ -161,8 +161,12 @@ Heartbeat содержит только техническое состояни�
 
 Настройки worker:
 
-- `WORKER_POLL_SECONDS=1` — poll основных очередей (не control-plane), 1–60 секунд;
+- `WORKER_POLL_SECONDS=1` — poll локальных очередей (ingress/outbound/…), 1–60 секунд;
 - `CONTROL_PLANE_POLL_SECONDS=30` — cadence `control_plane_snapshot` (alias `CONTROL_PLANE_REFRESH_SECONDS`);
+- `TEYA_REQUEST_POLL_SECONDS=5` — Teya BookingRequest feed (не generic 1s);
+- `TEYA_REQUEST_RECONCILIATION_POLL_SECONDS=30` — recon; HTTP только при pending rows;
+- `BOOKING_METHOD_ANALYTICS_POLL_SECONDS=30`;
+- `ACQUISITION_SOURCE_ANALYTICS_POLL_SECONDS=30`;
 - `WORKER_BATCH_SIZE=100` — максимум строк за tick, 1–1000;
 - `WORKER_TICK_TIMEOUT_SECONDS=20` — timeout tick, 5–300 секунд;
 - `WORKER_HEARTBEAT_INTERVAL_SECONDS=10` — период heartbeat, 1–60 секунд;

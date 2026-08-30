@@ -48,10 +48,15 @@ fits ~85 KiB ACTIVE knowledge; S2S transport hard cap 1_000_000).
 is the `control_plane_snapshot` loop cadence. It is independent of
 `WORKER_POLL_SECONDS`. One refresh = 2 GETs (settings + knowledge).
 
-Future production `DATABASE_URL` host must be the unique compose alias
-`bot-tv-postgres` (see `compose.prod.s2s.yaml`), not hostname `postgres`
-(collides with online-zapis-tv on the shared worker network) and not the
-ephemeral container name `tv_bot_prod-postgres-1`.
+Remote OZ feed loops also have separate cadences (defaults): Teya feed 5s,
+Teya reconciliation 30s (HTTP only when pending rows exist), booking-method
+and acquisition-source analytics 30s. Do not put those loops back on
+generic `WORKER_POLL_SECONDS=1`.
+
+Worker `DATABASE_URL` host is host-local operational config. This tracked
+overlay never aliases or recreates postgres. Bare hostname `postgres` must
+not be used from the worker: it collides with online-zapis-tv on the shared
+internal network.
 
 ## Canonical compose stack
 

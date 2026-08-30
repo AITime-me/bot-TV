@@ -37,7 +37,7 @@ def test_prod_s2s_overlay_exists_and_documents_stack() -> None:
 
 def test_prod_s2s_worker_only_env_and_external_network() -> None:
     doc = yaml.safe_load(PROD_S2S_COMPOSE.read_text(encoding="utf-8"))
-    assert set(doc["services"]) == {"worker", "postgres"}
+    assert set(doc["services"]) == {"worker"}
     worker = doc["services"]["worker"]
 
     env = worker["environment"]
@@ -75,11 +75,14 @@ def test_prod_s2s_does_not_join_oz_network_for_postgres_or_api() -> None:
     doc = yaml.safe_load(PROD_S2S_COMPOSE.read_text(encoding="utf-8"))
     assert "api" not in doc["services"]
     assert "migrate" not in doc["services"]
-    postgres = doc["services"]["postgres"]
-    nets = postgres["networks"]
-    assert set(nets) == {"default"}
-    assert nets["default"]["aliases"] == ["bot-tv-postgres"]
-    assert PROD_NETWORK not in yaml.dump(postgres)
+    assert "postgres" not in doc["services"]
+    text = PROD_S2S_COMPOSE.read_text(encoding="utf-8")
+    assert "bot-tv-postgres" not in text
+    # Overlay comments may mention postgres DNS collision, but must not declare
+    # a postgres service or alias that would recreate the DB container.
+    services_block = text.split("services:", 1)[1]
+    assert "aliases:" not in services_block
+    assert "DATABASE_URL" not in services_block
 
 
 def test_production_resource_overlay_still_resource_only() -> None:
@@ -109,11 +112,11 @@ def test_ops_doc_lists_env_and_no_deps_migrate() -> None:
     assert "20260829_37_control_plane" in text
     assert "--no-deps" in text
     assert "migrate" in text
-    assert "262144" in text or "256 KiB" in text or "262_144" in text
-    assert "bot-tv-postgres" in text
     assert "CONTROL_PLANE_POLL_SECONDS" in text
     assert "EMERGENCY_LOCK" in text
     assert "BOT_MODE" in text
+    assert "bot-tv-postgres" not in text
+    assert "WORKER_POLL_SECONDS" in text
 
 
 def test_control_plane_migration_present_on_main_tree() -> None:
@@ -140,7 +143,7 @@ def test_docker_compose_config_production_stack_with_dummy_env() -> None:
                 [
                     "BOT_MODE=OFF",
                     "EMERGENCY_LOCK=true",
-                    "DATABASE_URL=postgresql+asyncpg://bot:bot@bot-tv-postgres:5432/bot",
+                    "DATABASE_URL=postgresql+asyncpg://bot:bot@127.0.0.1:5432/bot",
                     f"BOOKING_ELIGIBILITY_BASE_URL={PROD_BASE_URL}",
                     f"BOOKING_ELIGIBILITY_BEARER_TOKEN={DUMMY_BEARER}",
                     "",
@@ -202,26 +205,23 @@ def test_docker_compose_config_production_stack_with_dummy_env() -> None:
             set(worker_nets) if isinstance(worker_nets, dict) else set(worker_nets)
         )
         assert PROD_NETWORK in worker_names
-        # Unique DB DNS: alias on default only; DATABASE_URL must not use
-        # colliding hostname ``postgres`` or instance name tv_bot_prod-postgres-1.
         postgres = doc["services"]["postgres"]
         pg_nets = postgres.get("networks")
-        assert pg_nets is not None
-        if isinstance(pg_nets, dict):
+        if pg_nets is None:
+            pass
+        elif isinstance(pg_nets, dict):
             assert PROD_NETWORK not in pg_nets
-            default_net = pg_nets.get("default") or pg_nets.get("tv_bot_prod_default")
-            # Compose may render the default network under the project name.
             aliases: list[str] = []
             for name, conf in pg_nets.items():
                 if name == PROD_NETWORK:
                     raise AssertionError("postgres joined online-zapis network")
                 if isinstance(conf, dict) and conf.get("aliases"):
                     aliases.extend(conf["aliases"])
-            assert "bot-tv-postgres" in aliases
+            assert "bot-tv-postgres" not in aliases
         else:
             assert PROD_NETWORK not in set(pg_nets)
-        assert "bot-tv-postgres" in rendered
-        assert "tv_bot_prod-postgres-1" not in rendered
+        overlay = Path(PROD_S2S_COMPOSE).read_text(encoding="utf-8")
+        assert "bot-tv-postgres" not in overlay
         worker_env = doc["services"]["worker"].get("environment") or {}
         if isinstance(worker_env, list):
             env_map = {}
