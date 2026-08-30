@@ -317,6 +317,15 @@ def test_default_runtime_registers_all_required_loops() -> None:
         for spec in specs
         if spec.name == AMOCRM_CRM_OAUTH_LIFECYCLE_LOOP
     ).poll_seconds == settings.worker_poll_seconds
+    assert next(
+        spec for spec in specs if spec.name == "control_plane_snapshot"
+    ).poll_seconds == settings.control_plane_refresh_seconds
+    assert (
+        next(
+            spec for spec in specs if spec.name == "control_plane_snapshot"
+        ).poll_seconds
+        != settings.worker_poll_seconds
+    )
     assert len(_lease_worker_id("x" * 128, "outbound")) == 128
 
 

@@ -18,9 +18,15 @@ _SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_UUID_RE: Final[re.Pattern[str]] = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-_STABLE_KEY_RE: Final[re.Pattern[str]] = re.compile(
-    r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+# Must stay in lockstep with online-zapis-tv
+# ``src/lib/bot-knowledge/stable-key.ts`` ``BOT_KNOWLEDGE_STABLE_KEY_RE``:
+# ``/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/`` — hierarchical keys
+# (``procedure.celosom``, ``procedure.pm_general``) and hyphenated
+# (``faq-general``). Leading/trailing/empty separators fail closed.
+BOT_KNOWLEDGE_STABLE_KEY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
 )
+_STABLE_KEY_RE: Final[re.Pattern[str]] = BOT_KNOWLEDGE_STABLE_KEY_RE
 
 _MAX_PUBLICATION_ID_LEN: Final[int] = 64
 _MAX_CONTENT_POLICY_CHARS: Final[int] = 100_000

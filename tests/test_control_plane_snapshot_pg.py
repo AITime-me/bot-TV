@@ -199,12 +199,18 @@ def _ok_knowledge(
     publication_id: str = _PUB_V3,
     version: int = 3,
     checksum: str = _CHECKSUM_A,
+    entries: list[dict[str, Any]] | None = None,
 ) -> ControlPlaneKnowledgeFetchResult:
-    pub = parse_knowledge_publication_v1(
-        _knowledge_env(
+    if entries is None:
+        env = _knowledge_env(
             publication_id=publication_id, version=version, checksum=checksum
         )
-    )
+    else:
+        env = _knowledge_env(
+            publication_id=publication_id, version=version, checksum=checksum
+        )
+        env["entries"] = entries
+    pub = parse_knowledge_publication_v1(env)
     return ControlPlaneKnowledgeFetchResult(
         code=ControlPlaneFetchCode.OK, publication=pub
     )
@@ -263,6 +269,61 @@ async def test_successful_settings_and_knowledge_persistence(
     assert knowledge_row is not None and knowledge_row.usable is True
     assert settings_row.version == 3
     assert knowledge_row.checksum == _CHECKSUM_A
+
+
+@pytest.mark.asyncio
+async def test_production_style_stable_keys_persist_usable_knowledge(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Exact production class: procedure.* / *_ / hyphen keys → durable LKG."""
+
+    remote = _ScriptedRemote()
+    remote.settings_queue.append(_ok_settings())
+    remote.knowledge_queue.append(
+        _ok_knowledge(
+            entries=[
+                {
+                    "key": "procedure.celosom",
+                    "category": "PROCEDURE_EXPLANATION",
+                    "title": "Celosom",
+                    "content": "Procedure explanation without prices.",
+                    "tags": ["celosom"],
+                    "serviceId": None,
+                },
+                {
+                    "key": "procedure.pm_general",
+                    "category": "PROCEDURE_EXPLANATION",
+                    "title": "PM general",
+                    "content": "Permanent makeup overview.",
+                    "tags": ["pm"],
+                    "serviceId": None,
+                },
+                {
+                    "key": "faq-general",
+                    "category": "FAQ",
+                    "title": "FAQ",
+                    "content": "General answer.",
+                    "tags": ["general"],
+                    "serviceId": None,
+                },
+            ]
+        )
+    )
+    service = ControlPlaneSnapshotService(
+        session_factory, remote=remote, max_stale_seconds=300
+    )
+    state = await service.refresh()
+    assert state.knowledge.usable is True
+    assert state.knowledge.readiness is ControlPlaneKindReadiness.READY_FRESH
+    async with session_scope(session_factory) as session:
+        knowledge_row = await snapshot_repo.get_by_kind(
+            session, kind=ControlPlaneSnapshotKind.KNOWLEDGE
+        )
+    assert knowledge_row is not None and knowledge_row.usable is True
+    entries = knowledge_row.payload.get("entries")
+    assert isinstance(entries, list) and len(entries) == 3
+    keys = {item["key"] for item in entries}
+    assert keys == {"procedure.celosom", "procedure.pm_general", "faq-general"}
 
 
 @pytest.mark.asyncio

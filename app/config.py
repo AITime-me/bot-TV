@@ -52,6 +52,38 @@ def _parse_int_range(name: str, value: str, *, minimum: int, maximum: int) -> in
     return parsed
 
 
+def _parse_control_plane_poll_seconds(source: Mapping[str, str]) -> int:
+    """Loop cadence for CONTROL_PLANE_SNAPSHOT_LOOP.
+
+    ``CONTROL_PLANE_POLL_SECONDS`` is canonical. ``CONTROL_PLANE_REFRESH_SECONDS``
+    remains a compatible alias. If both are set they must be equal.
+    Default 30s → 2 S2S GETs/refresh ≈ 4 req/min vs online-zapis 120/min bucket.
+    """
+
+    poll_raw = source.get("CONTROL_PLANE_POLL_SECONDS")
+    refresh_raw = source.get("CONTROL_PLANE_REFRESH_SECONDS")
+    if (
+        poll_raw is not None
+        and refresh_raw is not None
+        and poll_raw != refresh_raw
+    ):
+        raise ValueError(
+            "CONTROL_PLANE_POLL_SECONDS and CONTROL_PLANE_REFRESH_SECONDS "
+            "must be equal when both are set"
+        )
+    chosen = "30"
+    if poll_raw is not None:
+        chosen = poll_raw
+    elif refresh_raw is not None:
+        chosen = refresh_raw
+    return _parse_int_range(
+        "CONTROL_PLANE_POLL_SECONDS",
+        chosen,
+        minimum=5,
+        maximum=300,
+    )
+
+
 def _parse_float_range(name: str, value: str, *, minimum: float, maximum: float) -> float:
     # Reject boolean-looking strings before float() can mis-parse.
     if value in {"true", "false", "True", "False"}:
@@ -531,11 +563,8 @@ class Settings:
                 minimum=30,
                 maximum=3600,
             ),
-            control_plane_refresh_seconds=_parse_int_range(
-                "CONTROL_PLANE_REFRESH_SECONDS",
-                source.get("CONTROL_PLANE_REFRESH_SECONDS", "30"),
-                minimum=5,
-                maximum=300,
+            control_plane_refresh_seconds=_parse_control_plane_poll_seconds(
+                source
             ),
             **cls._eligibility_kwargs_from_env(source),
         )

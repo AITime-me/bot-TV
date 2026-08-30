@@ -21,3 +21,6 @@ BOT_KNOWLEDGE_PUBLICATION_INVALID_CODE: Final[str] = (
 )
 
 CONTROL_PLANE_SCHEMA_VERSION: Final[int] = 1
+# Snapshot refresh issues one GET per kind (settings + knowledge).
+# Live-facts are acquired on the runtime-context path, not this tick.
+CONTROL_PLANE_S2S_GETS_PER_REFRESH: Final[int] = 2

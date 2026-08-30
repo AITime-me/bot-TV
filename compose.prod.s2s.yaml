@@ -22,8 +22,18 @@
 # Worker is the sole consumer of control-plane snapshot refresh + live-facts
 # acquisition used by runtime context (api does not need this network/env).
 # Postgres must stay on the default network only.
+#
+# DNS: worker joins both default and online-zapis production_internal. Both
+# stacks historically advertise hostname ``postgres``. DATABASE_URL must use
+# the unique alias ``bot-tv-postgres`` (not compose project instance names
+# like ``tv_bot_prod-postgres-1``). Postgres itself never joins the OZ network.
 
 services:
+  postgres:
+    networks:
+      default:
+        aliases:
+          - bot-tv-postgres
   worker:
     networks:
       - default
@@ -32,7 +42,7 @@ services:
       BOOKING_ELIGIBILITY_BASE_URL: ${BOOKING_ELIGIBILITY_BASE_URL:?BOOKING_ELIGIBILITY_BASE_URL is required}
       BOOKING_ELIGIBILITY_BEARER_TOKEN: ${BOOKING_ELIGIBILITY_BEARER_TOKEN:?BOOKING_ELIGIBILITY_BEARER_TOKEN is required}
       BOOKING_ELIGIBILITY_TIMEOUT_SECONDS: ${BOOKING_ELIGIBILITY_TIMEOUT_SECONDS:-5.0}
-      BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES: ${BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES:-65536}
+      BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES: ${BOOKING_ELIGIBILITY_MAX_RESPONSE_BYTES:-262144}
 
 networks:
   tvoe-vremya-production_production_internal:

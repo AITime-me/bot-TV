@@ -63,7 +63,10 @@ _PRINTABLE_ASCII_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[\x21-\x7E]+$"
 _MAX_PUBLIC_NAME_LENGTH: Final[int] = 256
 _MAX_REQUEST_BYTES: Final[int] = 4096
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 5.0
-_DEFAULT_MAX_RESPONSE_BYTES: Final[int] = 65_536
+# Production ACTIVE knowledge publications are ~85 KiB. 64 KiB hid a
+# production drift (RESPONSE_TOO_LARGE / truncated JSON). 256 KiB fits
+# current KB with headroom; transport still caps at 1_000_000.
+_DEFAULT_MAX_RESPONSE_BYTES: Final[int] = 262_144
 DEFAULT_TIMEOUT_SECONDS: Final[float] = _DEFAULT_TIMEOUT_SECONDS
 DEFAULT_MAX_RESPONSE_BYTES: Final[int] = _DEFAULT_MAX_RESPONSE_BYTES
 _ABSENT: Final[object] = object()
