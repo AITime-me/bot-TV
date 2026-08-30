@@ -25,10 +25,13 @@ class ShadowDraftGateDecision:
 
 
 def _readiness_usable(value: ControlPlaneKindReadiness | None) -> bool:
-    return value in {
-        ControlPlaneKindReadiness.READY_FRESH,
-        ControlPlaneKindReadiness.READY_STALE,
-    }
+    """Shadow generation requires fresh LKG only.
+
+    Control-plane READY_STALE remains usable for other consumers, but must not
+    authorize YandexGPT shadow drafts.
+    """
+
+    return value is ControlPlaneKindReadiness.READY_FRESH
 
 
 def evaluate_shadow_draft_gate(

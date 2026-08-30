@@ -207,6 +207,8 @@ def _context(
     include_knowledge: bool = True,
     include_live: bool = True,
     knowledge_entries: list[dict[str, Any]] | None = None,
+    settings_readiness: ControlPlaneKindReadiness = ControlPlaneKindReadiness.READY_FRESH,
+    knowledge_readiness: ControlPlaneKindReadiness = ControlPlaneKindReadiness.READY_FRESH,
 ) -> Any:
     settings = (
         parse_settings_publication_v1(_settings_envelope())
@@ -238,13 +240,9 @@ def _context(
         bot_mode=BotMode.OFF,
         emergency_lock=emergency_lock,
         settings_publication=settings,
-        settings_readiness=(
-            ControlPlaneKindReadiness.READY_FRESH if settings else None
-        ),
+        settings_readiness=(settings_readiness if settings else None),
         knowledge_publication=knowledge,
-        knowledge_readiness=(
-            ControlPlaneKindReadiness.READY_FRESH if knowledge else None
-        ),
+        knowledge_readiness=(knowledge_readiness if knowledge else None),
         live_facts=live,
         conversation=conversation,
         handoff_state=handoff_state,
@@ -317,6 +315,80 @@ def test_generation_gate_requires_all_sources_and_feature() -> None:
         shadow_feature_enabled=True,
     )
     assert ShadowDraftReasonCode.LIVE_FACTS_NOT_USABLE in no_live.deny_reasons
+
+
+def test_settings_ready_stale_denies_shadow_without_provider_call() -> None:
+    """READY_STALE settings payload present — still deny shadow generation."""
+
+    ctx = _context(
+        emergency_lock=False,
+        settings_readiness=ControlPlaneKindReadiness.READY_STALE,
+        knowledge_readiness=ControlPlaneKindReadiness.READY_FRESH,
+    )
+    assert ctx.settings is not None
+    assert ctx.settings.settings_readiness is ControlPlaneKindReadiness.READY_STALE
+    assert ctx.provenance.settings_readiness is ControlPlaneKindReadiness.READY_STALE
+    assert ctx.knowledge is not None
+    assert ctx.knowledge.knowledge_readiness is ControlPlaneKindReadiness.READY_FRESH
+
+    port = _FakePort()
+    service = ShadowDraftGenerationService(port=port, shadow_feature_enabled=True)
+    reply = service.generate_from_context(ctx, generation_allowed=True)
+    assert reply.disposition is ShadowDraftDisposition.DENIED
+    assert reply.reason_code is ShadowDraftReasonCode.SETTINGS_NOT_USABLE
+    assert ShadowDraftReasonCode.SETTINGS_NOT_USABLE in (
+        evaluate_shadow_draft_gate(
+            context=ctx,
+            generation_allowed=True,
+            provider_configured=True,
+            shadow_feature_enabled=True,
+        ).deny_reasons
+    )
+    assert port.calls == []
+    assert reply.text is None
+
+
+def test_knowledge_ready_stale_denies_shadow_without_provider_call() -> None:
+    """READY_STALE knowledge payload present — still deny shadow generation."""
+
+    ctx = _context(
+        emergency_lock=False,
+        settings_readiness=ControlPlaneKindReadiness.READY_FRESH,
+        knowledge_readiness=ControlPlaneKindReadiness.READY_STALE,
+    )
+    assert ctx.knowledge is not None
+    assert ctx.knowledge.knowledge_readiness is ControlPlaneKindReadiness.READY_STALE
+    assert ctx.provenance.knowledge_readiness is ControlPlaneKindReadiness.READY_STALE
+    assert ctx.settings is not None
+    assert ctx.settings.settings_readiness is ControlPlaneKindReadiness.READY_FRESH
+
+    port = _FakePort()
+    service = ShadowDraftGenerationService(port=port, shadow_feature_enabled=True)
+    reply = service.generate_from_context(ctx, generation_allowed=True)
+    assert reply.disposition is ShadowDraftDisposition.DENIED
+    assert reply.reason_code is ShadowDraftReasonCode.KNOWLEDGE_NOT_USABLE
+    assert port.calls == []
+    assert reply.text is None
+
+
+def test_both_ready_fresh_allows_shadow_generation() -> None:
+    ctx = _context(
+        emergency_lock=False,
+        settings_readiness=ControlPlaneKindReadiness.READY_FRESH,
+        knowledge_readiness=ControlPlaneKindReadiness.READY_FRESH,
+    )
+    assert ctx.settings is not None
+    assert ctx.knowledge is not None
+    assert ctx.settings.settings_readiness is ControlPlaneKindReadiness.READY_FRESH
+    assert ctx.knowledge.knowledge_readiness is ControlPlaneKindReadiness.READY_FRESH
+
+    port = _FakePort("ok fresh draft")
+    service = ShadowDraftGenerationService(port=port, shadow_feature_enabled=True)
+    reply = service.generate_from_context(ctx, generation_allowed=True)
+    assert reply.disposition is ShadowDraftDisposition.REPLY
+    assert reply.reason_code is ShadowDraftReasonCode.OK
+    assert len(port.calls) == 1
+    assert reply.text == "ok fresh draft"
 
 
 def test_manager_takeover_and_handoff_deny_without_provider_call() -> None:

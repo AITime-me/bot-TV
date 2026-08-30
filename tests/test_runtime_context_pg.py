@@ -234,8 +234,12 @@ async def test_runtime_context_reads_real_history_ordered_and_isolated(
     result_a = await builder.build_for_conversation(conv_a)
     result_b = await builder.build_for_conversation(conv_b)
 
-    assert result_a.generation_allowed is True
-    assert result_a.readiness.value == "READY"
+    # Manager message marks takeover/handoff → fail-closed for generation.
+    # Settings/KB may also be NOT_READY when seeded verified_at is outside the
+    # stale window — that is correct LKG fail-closed, not a history bug.
+    assert result_a.readiness is RuntimeContextReadiness.NOT_READY
+    assert result_a.generation_allowed is False
+    assert RuntimeContextReason.HANDOFF_ACTIVE in result_a.reasons
     assert result_a.context is not None
     assert result_a.context.conversation is not None
     texts_a = [t.text for t in result_a.context.conversation.turns]
@@ -252,6 +256,7 @@ async def test_runtime_context_reads_real_history_ordered_and_isolated(
     texts_b = [t.text for t in result_b.context.conversation.turns]
     assert texts_b == ["Чужой диалог B — не должен попасть"]
     assert "Привет из диалога A" not in texts_b
+    assert result_b.generation_allowed is False
 
     # Live-facts fetched fresh each build — no durable cache row.
     assert live.fetch_count == 2
