@@ -102,6 +102,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/shadow_draft_types.py",
     "!app/core/shadow_draft_gate.py",
     "!app/core/shadow_draft_prompt.py",
+    "!app/core/shadow_draft_context_selection.py",
     "!app/core/shadow_draft_eval_types.py",
     "!app/core/shadow_draft_eval_scenarios.py",
     "!app/core/shadow_draft_eval_scoring.py",
@@ -459,6 +460,7 @@ AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_01_DOCKER_RUN
     "app/core/shadow_draft_types.py",
     "app/core/shadow_draft_gate.py",
     "app/core/shadow_draft_prompt.py",
+    "app/core/shadow_draft_context_selection.py",
     "app/services/shadow_draft_generation.py",
 )
 

@@ -31,6 +31,7 @@ class ShadowDraftReasonCode(StrEnum):
     MANAGER_TAKEOVER = "MANAGER_TAKEOVER"
     EMERGENCY_LOCK = "EMERGENCY_LOCK"
     CONTEXT_NOT_READY = "CONTEXT_NOT_READY"
+    PROMPT_BUDGET_EXCEEDED = "PROMPT_BUDGET_EXCEEDED"
     PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
     PROVIDER_TRANSPORT_ERROR = "PROVIDER_TRANSPORT_ERROR"
     PROVIDER_REMOTE_REJECTED = "PROVIDER_REMOTE_REJECTED"
@@ -49,6 +50,7 @@ _ALLOWED_METADATA_KEYS: Final[frozenset[str]] = frozenset(
         "error_code",
         "shadow",
         "model_configured",
+        "provider_transport_called",
     }
 )
 

@@ -43,6 +43,10 @@ from app.core.runtime_context_types import (
     RuntimeContextReadiness,
     RuntimeContextReason,
 )
+from app.core.shadow_draft_context_selection import (
+    build_knowledge_selection_hint,
+    client_turn_texts_newest_first,
+)
 from app.db.session import session_scope
 from app.models.conversation import Conversation
 from app.repositories import control_plane_snapshots as snapshot_repo
@@ -166,6 +170,25 @@ class RuntimeContextBuilder:
             else BotMode.OFF
         )
 
+        effective_hint = knowledge_hint
+        if (
+            effective_hint is None
+            and acquired.conversation_layer is not None
+            and acquired.live_facts is not None
+        ):
+            conv_text = ""
+            client_turns_nf: tuple[str, ...] = ()
+            if acquired.conversation_layer is not None:
+                client_turns_nf = client_turn_texts_newest_first(
+                    acquired.conversation_layer.turns  # type: ignore[attr-defined]
+                )
+                conv_text = client_turns_nf[0] if client_turns_nf else ""
+            effective_hint = build_knowledge_selection_hint(
+                conversation_text=conv_text,
+                live_facts=acquired.live_facts,
+                client_turns_newest_first=client_turns_nf,
+            )
+
         context = assemble_runtime_context(
             bot_mode=bot_mode,
             emergency_lock=emergency,
@@ -179,7 +202,7 @@ class RuntimeContextBuilder:
             ownership=ownership,
             conversation_status=status,
             manager_takeover_at_present=takeover,
-            knowledge_hint=knowledge_hint,
+            knowledge_hint=effective_hint,
             built_at=_utc_now(),
         )
 
