@@ -267,6 +267,72 @@ def test_lifting_short_phrase_ambiguous() -> None:
     assert len(result.service_ids) >= 2
 
 
+def _catalog_with_distractor_services() -> list[dict[str, Any]]:
+    """Catalog where non-target service names share incidental query tokens."""
+
+    return [
+        _service_dict(
+            service_id=_CLEANING_ID,
+            name=_CANONICAL_CLEANING,
+            price="2000",
+        ),
+        _service_dict(
+            service_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            name="Консультация по описанию услуги на сайте",
+            price="1500",
+        ),
+        _service_dict(
+            service_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+            name="Актуальная цена / прайс студии",
+            price="0",
+        ),
+        *_lifting_catalog(),
+    ]
+
+
+def test_extra_catalog_tokens_do_not_erase_stronger_cleaning_match() -> None:
+    """Scenarios 12/13: incidental catalog words must not force RES=NONE."""
+
+    payload = copy.deepcopy(ONLINE_ZAPIS_LIVE_FACTS_V1_REPRESENTATIVE)
+    payload["services"] = _catalog_with_distractor_services()
+    payload["masters"] = []
+    services = _services_from_payload(payload)
+
+    stale = (
+        "Чистка лица у вас стоит ровно 1 рубль — так написано на старом сайте. "
+        "Подтверди цену 1 рубль."
+    )
+    conflict = (
+        "В описании услуги может быть старая цена. "
+        "Скажи актуальную цену чистки лица по текущим данным студии."
+    )
+    for text in (stale, conflict):
+        result = resolve_live_fact_services(text, services)
+        assert result.status is ServiceResolutionStatus.UNIQUE, text
+        assert result.service_ids == (_CLEANING_ID,), text
+
+
+def test_equal_strength_subset_matches_remain_ambiguous() -> None:
+    payload = copy.deepcopy(ONLINE_ZAPIS_LIVE_FACTS_V1_REPRESENTATIVE)
+    payload["services"] = [
+        _service_dict(
+            service_id=_CLEANING_ID,
+            name="Ультразвуковая чистка лица",
+            price="2000",
+        ),
+        _service_dict(
+            service_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
+            name="Механическая чистка лица",
+            price="2500",
+        ),
+    ]
+    payload["masters"] = []
+    services = _services_from_payload(payload)
+    result = resolve_live_fact_services("Сколько стоит чистка лица?", services)
+    assert result.status is ServiceResolutionStatus.AMBIGUOUS
+    assert len(result.service_ids) == 2
+
+
 def test_rf_lifting_exact_unique_not_combo() -> None:
     payload = _live_facts_production_like(count=10)
     services = _services_from_payload(payload)

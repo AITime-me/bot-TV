@@ -542,6 +542,44 @@ def test_knowledge_missing_explicit_no_hardcoded_fallback() -> None:
     assert coverage2 is KnowledgeCoverage.MISSING
 
 
+def test_knowledge_keyword_match_is_token_boundary_safe() -> None:
+    """Substring 'бот' must not hit title/key token 'работа' (scenario 10)."""
+
+    entries = (
+        KnowledgeEntryV1(
+            key="preparation.pm_old_work",
+            category=KnowledgeCategory.PREPARATION,
+            title="Подготовка к старой работе",
+            content="Не выбирать по подстроке бот внутри работа.",
+            tags=("work",),
+            service_id=None,
+        ),
+        KnowledgeEntryV1(
+            key="policy.address",
+            category=KnowledgeCategory.FAQ,
+            title="Адрес студии",
+            content="Адрес и режим работы студии.",
+            tags=("address",),
+            service_id=None,
+        ),
+    )
+    bot_selected, bot_coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(keywords=("бот",)),
+    )
+    assert bot_coverage is KnowledgeCoverage.MISSING
+    assert bot_selected == ()
+    assert all(e.key != "preparation.pm_old_work" for e in bot_selected)
+
+    address_selected, address_coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(keywords=("адрес", "работы")),
+    )
+    assert address_coverage is KnowledgeCoverage.AVAILABLE
+    assert [e.key for e in address_selected] == ["policy.address"]
+    assert all(e.key != "preparation.pm_old_work" for e in address_selected)
+
+
 def test_live_facts_studio_repr_redacts_pii() -> None:
     payload = parse_live_facts_response_v1(_valid_live_facts())
     rendered = repr(payload) + repr(payload.studio)

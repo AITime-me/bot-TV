@@ -7,6 +7,7 @@ entries. Ordering and limits are deterministic.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.core.control_plane_types import (
@@ -23,6 +24,9 @@ from app.core.runtime_context_types import (
     knowledge_entry_to_selected,
 )
 
+# Split key/title into word tokens; never match arbitrary substrings inside words.
+_KEYWORD_TOKEN_SPLIT_RE = re.compile(r"[^\w]+", re.UNICODE)
+
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeSelectionHint:
@@ -38,13 +42,20 @@ def _normalize_token(value: str) -> str:
     return value.strip().lower()
 
 
+def _keyword_haystack_tokens(entry: KnowledgeEntryV1) -> frozenset[str]:
+    """Normalized whole-word tokens from stable key + title (boundary-safe)."""
+
+    text = f"{entry.key} {entry.title}".lower()
+    return frozenset(token for token in _KEYWORD_TOKEN_SPLIT_RE.split(text) if token)
+
+
 def _keyword_hit(entry: KnowledgeEntryV1, keywords: tuple[str, ...]) -> bool:
     if not keywords:
         return False
-    haystack = f"{entry.key} {entry.title}".lower()
+    haystack_tokens = _keyword_haystack_tokens(entry)
     for raw in keywords:
         token = _normalize_token(raw)
-        if token and token in haystack:
+        if token and token in haystack_tokens:
             return True
     return False
 
