@@ -34,6 +34,9 @@ _MAX_CATALOG_NAME_LINES: int = 40
 # Minimum stem length for morphology-tolerant Russian token match.
 _MIN_MORPH_STEM_LEN: int = 4
 
+# Single-token query-subset match requires this length (conservative false-positive guard).
+_MIN_DISTINCTIVE_QUERY_TOKEN_LEN: int = 6
+
 # Deterministic Russian inflection suffixes (longest first). No dictionary aliases.
 _RUSSIAN_INFLECTION_SUFFIXES: tuple[str, ...] = (
     "иями",
@@ -101,10 +104,21 @@ _STOP_WORDS = frozenset(
         "меня",
         "мне",
         "сколько",
+        "стоит",
+        "стоимость",
+        "цена",
+        "цены",
         "кто",
+        "делает",
+        "делать",
         "где",
         "когда",
         "про",
+        "расскажите",
+        "расскажи",
+        "подготовиться",
+        "после",
+        "нельзя",
         "при",
         "не",
         "да",
@@ -257,6 +271,98 @@ def _token_stem_matches(name_token: str, text_tokens: Sequence[str]) -> bool:
     return False
 
 
+def _query_significant_tokens(normalized_text: str) -> tuple[str, ...]:
+    """Significant tokens from a client phrase for query-subset matching."""
+
+    if not normalized_text:
+        return ()
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in normalized_text.split():
+        if len(raw) < 3 or raw in _STOP_WORDS:
+            continue
+        if raw not in seen:
+            seen.add(raw)
+            tokens.append(raw)
+    return tuple(tokens)
+
+
+def _service_name_tokens(service_name: str) -> tuple[str, ...]:
+    """Significant tokens from canonical service name (incl. slash-separated forms)."""
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for segment in service_name.split("/"):
+        normalized = normalize_match_text(segment)
+        for raw in normalized.split():
+            if len(raw) < 3 or raw in _STOP_WORDS:
+                continue
+            if raw not in seen:
+                seen.add(raw)
+                tokens.append(raw)
+    return tuple(tokens)
+
+
+def _query_subset_match(service_name: str, query_tokens: Sequence[str]) -> bool:
+    """True when every significant client token matches a canonical service-name token/stem."""
+
+    if not query_tokens:
+        return False
+    service_tokens = _service_name_tokens(service_name)
+    if not service_tokens:
+        return False
+    return all(_token_stem_matches(query_token, service_tokens) for query_token in query_tokens)
+
+
+def _filter_identity_query_tokens(
+    query_tokens: Sequence[str],
+    services: Sequence[LiveFactsServiceV1],
+) -> tuple[str, ...]:
+    """Keep client tokens that stem-match at least one active service-name token."""
+
+    if not query_tokens:
+        return ()
+    catalog_tokens: list[str] = []
+    seen: set[str] = set()
+    for service in services:
+        if not service.is_active:
+            continue
+        for token in _service_name_tokens(service.name):
+            if token not in seen:
+                seen.add(token)
+                catalog_tokens.append(token)
+    if not catalog_tokens:
+        return ()
+    return tuple(
+        query_token
+        for query_token in query_tokens
+        if _token_stem_matches(query_token, catalog_tokens)
+    )
+
+
+def _collect_query_subset_matches(
+    services: Sequence[LiveFactsServiceV1],
+    normalized_text: str,
+) -> list[LiveFactsServiceV1]:
+    query_tokens = _filter_identity_query_tokens(
+        _query_significant_tokens(normalized_text),
+        services,
+    )
+    if not query_tokens:
+        return []
+    if len(query_tokens) == 1:
+        if len(query_tokens[0]) < _MIN_DISTINCTIVE_QUERY_TOKEN_LEN:
+            return []
+
+    matches: list[LiveFactsServiceV1] = []
+    for service in services:
+        if not service.is_active:
+            continue
+        if _query_subset_match(service.name, query_tokens):
+            matches.append(service)
+    return matches
+
+
 def _service_name_morphology_match(service_name: str, normalized_text: str) -> bool:
     name_tokens = _significant_name_tokens(service_name)
     if not name_tokens:
@@ -295,11 +401,27 @@ def _collect_tier_matches(
             name_cf = service.name.casefold().strip()
             if name_cf and name_cf in text_cf:
                 matches.append(service)
-        elif tier == "morphology" and _service_name_morphology_match(
-            service.name, normalized
-        ):
-            matches.append(service)
+        elif tier == "morphology":
+            # Single-token canonical names are too ambiguous for morphology alone.
+            if len(_significant_name_tokens(service.name)) < 2:
+                continue
+            if _service_name_morphology_match(service.name, normalized):
+                matches.append(service)
     return matches
+
+
+def _collect_resolution_matches(
+    services: Sequence[LiveFactsServiceV1],
+    normalized: str,
+    text_cf: str,
+) -> list[LiveFactsServiceV1]:
+    for tier in ("exact", "substring", "morphology"):
+        matches = _collect_tier_matches(
+            services, normalized, text_cf, tier=tier
+        )
+        if matches:
+            return matches
+    return _collect_query_subset_matches(services, normalized)
 
 
 def _resolution_from_matches(
@@ -326,7 +448,7 @@ def resolve_live_fact_services(
 ) -> ServiceResolutionResult:
     """Resolve relevant service(s) from a single client turn.
 
-    Priority: exact/full name → substring → morphology-tolerant token match.
+    Priority: exact/full name → substring → morphology → query-token subset.
     Never silently picks the first service when multiple match.
     """
 
@@ -339,13 +461,10 @@ def resolve_live_fact_services(
     normalized = normalize_match_text(text)
     text_cf = text.casefold()
 
-    for tier in ("exact", "substring", "morphology"):
-        matches = _collect_tier_matches(
-            services, normalized, text_cf, tier=tier
-        )
-        resolved = _resolution_from_matches(matches)
-        if resolved is not None:
-            return resolved
+    matches = _collect_resolution_matches(services, normalized, text_cf)
+    resolved = _resolution_from_matches(matches)
+    if resolved is not None:
+        return resolved
 
     return ServiceResolutionResult(
         status=ServiceResolutionStatus.NONE,

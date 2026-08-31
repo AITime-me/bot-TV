@@ -123,6 +123,9 @@ class ShadowDraftPromptSectionMetrics:
     handoff_rules_chars: int
     safety_rules_chars: int
     generation_policy_total_chars: int
+    resolved_service_names: tuple[str, ...] = ()
+    live_service_names_final: tuple[str, ...] = ()
+    kb_keys_final: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -143,6 +146,11 @@ class ShadowDraftPromptSectionMetrics:
             "handoffRulesChars": self.handoff_rules_chars,
             "safetyRulesChars": self.safety_rules_chars,
             "generationPolicyTotalChars": self.generation_policy_total_chars,
+            "resolvedServiceNames": list(self.resolved_service_names),
+            "liveServiceNamesFinal": list(self.live_service_names_final),
+            "kbKeysFinal": list(self.kb_keys_final),
+            "kbEntriesFinal": len(self.kb_keys_final),
+            "liveServicesFinal": self.live_services_included,
         }
 
 
@@ -331,6 +339,54 @@ def _dialog_messages(
 
 def _total_chars(messages: Sequence[TextGenerationMessage]) -> int:
     return sum(len(m.text) for m in messages)
+
+
+def _extract_kb_keys_from_system(system_text: str) -> tuple[str, ...]:
+    keys: list[str] = []
+    for line in system_text.splitlines():
+        marker = "ENTRY key="
+        if marker not in line:
+            continue
+        rest = line.split(marker, 1)[1]
+        keys.append(rest.split(";", 1)[0])
+    return tuple(keys)
+
+
+def _extract_live_service_names_from_system(system_text: str) -> tuple[str, ...]:
+    names: list[str] = []
+    mode: str | None = None
+    for line in system_text.splitlines():
+        stripped = line.strip()
+        if stripped == "services:":
+            mode = "services"
+            continue
+        if stripped == "masters:":
+            mode = None
+            continue
+        if stripped.startswith("service_catalog_names_only"):
+            mode = "catalog"
+            continue
+        if mode in {"services", "catalog"} and stripped.startswith("- ") and "; name=" in stripped:
+            rest = stripped.split("; name=", 1)[1]
+            names.append(rest.split(";", 1)[0])
+    return tuple(names)
+
+
+def _resolved_service_names(
+    *,
+    services: Sequence[object],
+    service_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    if not service_ids:
+        return ()
+    target = frozenset(service_ids)
+    names: list[str] = []
+    for service in services:
+        sid = getattr(service, "id", None)
+        sname = getattr(service, "name", None)
+        if type(sid) is str and sid in target and type(sname) is str:
+            names.append(sname)
+    return tuple(names)
 
 
 def compile_shadow_draft_messages(
@@ -539,6 +595,13 @@ def measure_shadow_draft_prompt(
     dialog_chars = sum(len(m.text) for m in messages if m.role != "system")
     total = system_chars + dialog_chars
 
+    resolved_names = _resolved_service_names(
+        services=context.live_facts.facts.services,
+        service_ids=lf_slice.resolution.service_ids,
+    )
+    live_names_final = _extract_live_service_names_from_system(system_text)
+    kb_keys_final = _extract_kb_keys_from_system(system_text)
+
     return ShadowDraftPromptSectionMetrics(
         message_count=len(messages),
         system_chars=system_chars,
@@ -557,4 +620,7 @@ def measure_shadow_draft_prompt(
         handoff_rules_chars=policy_metrics.handoff_rules_chars,
         safety_rules_chars=policy_metrics.safety_rules_chars,
         generation_policy_total_chars=policy_metrics.generation_policy_total_chars,
+        resolved_service_names=resolved_names,
+        live_service_names_final=live_names_final,
+        kb_keys_final=kb_keys_final,
     )
