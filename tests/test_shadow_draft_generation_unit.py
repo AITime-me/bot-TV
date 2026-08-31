@@ -106,11 +106,18 @@ def _settings_envelope() -> dict[str, Any]:
                 "whatsapp": False,
             },
             "contentPolicy": {
-                "mainInstruction": "Помощник менеджера студии «Твоё время»",
-                "knowledgeBaseNote": None,
+                "mainInstruction": (
+                    "Помощник менеджера студии «Твоё время». "
+                    "На прямой вопрос отвечает честно, что она AI/виртуальный помощник. "
+                    "Не придумывает факты, цены, слоты."
+                ),
+                "knowledgeBaseNote": "Admin-only knowledge note must not appear in generation prompt.",
                 "handoffRules": "При нехватке данных — менеджеру",
-                "taggingRules": None,
-                "safetyRules": "Без медицинской диагностики",
+                "taggingRules": "Admin-only tagging rules must not appear in generation prompt.",
+                "safetyRules": (
+                    "Без медицинской диагностики. "
+                    "Relatox: никаких индивидуальных дозировок по возрасту или фото."
+                ),
             },
             "limits": {
                 "maxMessagesPerClient": 20,
