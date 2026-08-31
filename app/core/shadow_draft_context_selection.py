@@ -303,15 +303,22 @@ def _service_name_tokens(service_name: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def _query_subset_match(service_name: str, query_tokens: Sequence[str]) -> bool:
-    """True when every significant client token matches a canonical service-name token/stem."""
+def _query_token_match_score(
+    service_name: str,
+    query_tokens: Sequence[str],
+) -> int:
+    """Count of identity query tokens that stem-match the canonical service name."""
 
     if not query_tokens:
-        return False
+        return 0
     service_tokens = _service_name_tokens(service_name)
     if not service_tokens:
-        return False
-    return all(_token_stem_matches(query_token, service_tokens) for query_token in query_tokens)
+        return 0
+    return sum(
+        1
+        for query_token in query_tokens
+        if _token_stem_matches(query_token, service_tokens)
+    )
 
 
 def _filter_identity_query_tokens(
@@ -344,23 +351,46 @@ def _collect_query_subset_matches(
     services: Sequence[LiveFactsServiceV1],
     normalized_text: str,
 ) -> list[LiveFactsServiceV1]:
+    """Conservative subset match: strongest unique evidence wins.
+
+    Extra catalog-matching words in the client phrase must not erase a stronger
+    unique service match. Equal top scores stay AMBIGUOUS (caller fail-closes).
+    """
+
     query_tokens = _filter_identity_query_tokens(
         _query_significant_tokens(normalized_text),
         services,
     )
     if not query_tokens:
         return []
-    if len(query_tokens) == 1:
-        if len(query_tokens[0]) < _MIN_DISTINCTIVE_QUERY_TOKEN_LEN:
-            return []
 
-    matches: list[LiveFactsServiceV1] = []
+    scored: list[tuple[int, LiveFactsServiceV1]] = []
     for service in services:
         if not service.is_active:
             continue
-        if _query_subset_match(service.name, query_tokens):
-            matches.append(service)
-    return matches
+        score = _query_token_match_score(service.name, query_tokens)
+        if score <= 0:
+            continue
+        if score == 1:
+            matching = [
+                query_token
+                for query_token in query_tokens
+                if _token_stem_matches(
+                    query_token, _service_name_tokens(service.name)
+                )
+            ]
+            if (
+                len(matching) != 1
+                or len(matching[0]) < _MIN_DISTINCTIVE_QUERY_TOKEN_LEN
+            ):
+                continue
+        scored.append((score, service))
+
+    if not scored:
+        return []
+
+    max_score = max(score for score, _ in scored)
+    return [service for score, service in scored if score == max_score]
 
 
 def _service_name_morphology_match(service_name: str, normalized_text: str) -> bool:
