@@ -54,6 +54,14 @@ _PUB_ID = "44444444-4444-4444-8444-444444444444"
 _SERVICE_A = "11111111-1111-4111-8111-111111111111"
 _SERVICE_B = "22222222-2222-4222-8222-222222222222"
 _TARGET = "Чистка лица"
+_CANONICAL_CLEANING = "Ультразвуковая чистка лица / УЗ-чистка лица"
+_MASTER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+_MASTER_NAME = "Ксения Вайзер"
+_MASTER_FANOUT = 65
+
+# Production-shaped BEFORE fix (master fan-out): mandatory prompt without KB ≈ 12668.
+_BEFORE_LIVE_FACT_CHARS_APPROX = 3117
+_BEFORE_TOTAL_CHARS_APPROX = 12668
 
 # Proven production-size field lengths (AI-DIALOGUE-02-POLICY-BUDGET-02).
 _MAIN_LEN = 6548
@@ -212,6 +220,93 @@ def _live_facts_many(*, count: int = 110) -> dict[str, Any]:
     return payload
 
 
+def _live_facts_production_shaped_master_fanout(*, count: int = 110) -> dict[str, Any]:
+    """Production shape: canonical target service + master with ~65 serviceIds."""
+
+    payload = copy.deepcopy(ONLINE_ZAPIS_LIVE_FACTS_V1_REPRESENTATIVE)
+    services = [
+        _service_dict(
+            service_id=_SERVICE_A,
+            name=_CANONICAL_CLEANING,
+            price="2000",
+        )
+    ]
+    for i in range(1, count):
+        services.append(
+            _service_dict(
+                service_id=f"{i + 10:08d}-1111-4111-8111-111111111111",
+                name=f"Услуга {i}",
+                price=f"{1000 + i}.00",
+            )
+        )
+    fanout_ids = [_SERVICE_A] + [s["id"] for s in services[1:_MASTER_FANOUT]]
+    assert len(fanout_ids) == _MASTER_FANOUT
+    payload["services"] = services
+    payload["masters"] = [
+        {
+            "id": _MASTER_ID,
+            "name": _MASTER_NAME,
+            "isActive": True,
+            "isOnlineBookingEnabled": True,
+            "serviceIds": fanout_ids,
+        }
+    ]
+    return payload
+
+
+def _context_production_shaped(*, client_text: str) -> Any:
+    settings = parse_settings_publication_v1(_settings_envelope())
+    knowledge = parse_knowledge_publication_v1(_knowledge_envelope())
+    lf = parse_live_facts_response_v1(_live_facts_production_shaped_master_fanout())
+    turns = (
+        map_history_author(
+            author="client",
+            conversation_event_seq=1,
+            text=client_text,
+            occurred_at=datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc),
+        ),
+    )
+    conversation = build_conversation_layer_from_turns(
+        conversation_id=uuid4(),
+        event_seq_hwm=1,
+        turns=turns,
+    )
+    hint = build_knowledge_selection_hint(
+        conversation_text=client_text,
+        live_facts=lf,
+        client_turns_newest_first=(client_text,),
+    )
+    return assemble_runtime_context(
+        bot_mode=BotMode.OFF,
+        emergency_lock=False,
+        settings_publication=settings,
+        settings_readiness=ControlPlaneKindReadiness.READY_FRESH,
+        knowledge_publication=knowledge,
+        knowledge_readiness=ControlPlaneKindReadiness.READY_FRESH,
+        live_facts=lf,
+        conversation=conversation,
+        handoff_state="BOT_ACTIVE",
+        ownership="BOT",
+        conversation_status="OPEN",
+        manager_takeover_at_present=False,
+        knowledge_hint=hint,
+    )
+
+
+def _safe_section_metrics(ctx: Any) -> dict[str, object]:
+    metrics = measure_shadow_draft_prompt(ctx)
+    return {
+        "policyChars": metrics.policy_chars,
+        "liveFactChars": metrics.live_fact_chars,
+        "kbChars": metrics.kb_chars,
+        "dialogChars": metrics.dialog_chars,
+        "totalChars": metrics.total_chars,
+        "serviceResolution": metrics.service_resolution,
+        "liveServicesFinal": metrics.live_services_included,
+        "kbEntriesFinal": len(metrics.kb_keys_final),
+    }
+
+
 def _sources() -> ShadowDraftEvalPublishedSources:
     return ShadowDraftEvalPublishedSources(
         settings=parse_settings_publication_v1(_settings_envelope()),
@@ -330,6 +425,42 @@ def test_no_duplicated_large_hardcoded_behavior_block() -> None:
     assert "Поведенческие правила Теи" not in system
     assert "IMMUTABLE TRUST GUARD" in system
     assert "LIVE FACTS >" in system
+
+
+def test_production_shaped_master_fanout_documents_pre_fix_overhead() -> None:
+    """Unfixed serialization would exceed budget (production evidence: ~12668 mandatory)."""
+
+    assert _BEFORE_LIVE_FACT_CHARS_APPROX > 2500
+    assert _BEFORE_TOTAL_CHARS_APPROX > SHADOW_DRAFT_COMPILED_CHAR_BUDGET
+
+
+def test_production_shaped_master_fanout_compacts_under_budget() -> None:
+    ctx = _context_production_shaped(client_text="Сколько стоит чистка лица?")
+    metrics = measure_shadow_draft_prompt(ctx)
+    system = compile_shadow_draft_messages(ctx)[0].text
+    after = _safe_section_metrics(ctx)
+
+    assert after["serviceResolution"] == "UNIQUE"
+    assert metrics.resolved_service_names == (_CANONICAL_CLEANING,)
+    assert metrics.live_services_included == 1
+    assert metrics.live_masters_included == 1
+    assert after["totalChars"] <= SHADOW_DRAFT_COMPILED_CHAR_BUDGET
+    assert after["totalChars"] <= YANDEX_PROVIDER_MESSAGE_CHAR_CEILING
+    assert metrics.within_budget is True
+    assert after["liveFactChars"] < _BEFORE_LIVE_FACT_CHARS_APPROX
+    assert after["kbEntriesFinal"] >= 1
+    assert "procedure.cleaning" in metrics.kb_keys_final
+
+    assert _MASTER_NAME in system
+    assert "price_from=2000" in system
+    assert "price_from=1001.00" not in system
+    assert f"resolved_service_ids=[{_SERVICE_A}]" in system
+    master_section = system.split("masters:", 1)[1].split("ACTIVE MANAGED KB", 1)[0]
+    assert "resolved_service_ids=[" in master_section
+    assert "; service_ids=[" not in master_section
+    assert master_section.count(_SERVICE_A) == 1
+    unrelated_master_uuid = f"{11 + 10:08d}-1111-4111-8111-111111111111"
+    assert unrelated_master_uuid not in master_section
 
 
 def test_real_policy_relevant_service_compiles_under_budget() -> None:

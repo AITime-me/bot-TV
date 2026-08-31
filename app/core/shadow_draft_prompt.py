@@ -21,6 +21,7 @@ from app.core.runtime_context_types import (
 from app.core.shadow_draft_context_selection import (
     SHADOW_DRAFT_COMPILED_CHAR_BUDGET,
     SelectedLiveFactsSlice,
+    ServiceResolutionStatus,
     resolve_and_select_live_facts,
 )
 from app.core.text_generation_port import TextGenerationMessage
@@ -257,14 +258,27 @@ def _live_facts_block(
             f"online_booking={service.is_online_booking_enabled}"
         )
     lines.append("masters:")
+    compact_master_link = (
+        slice_.resolution.status is ServiceResolutionStatus.UNIQUE
+        and not slice_.catalog_names_only
+    )
     for master in slice_.masters:
-        service_ids = ",".join(master.service_ids)
-        lines.append(
-            "- "
-            f"id={master.id}; name={master.name}; is_active={master.is_active}; "
-            f"online_booking={master.is_online_booking_enabled}; "
-            f"service_ids=[{service_ids}]"
-        )
+        if compact_master_link:
+            resolved_ids = ",".join(slice_.resolution.service_ids)
+            lines.append(
+                "- "
+                f"name={master.name}; is_active={master.is_active}; "
+                f"online_booking={master.is_online_booking_enabled}; "
+                f"resolved_service_ids=[{resolved_ids}]"
+            )
+        else:
+            service_ids = ",".join(master.service_ids)
+            lines.append(
+                "- "
+                f"id={master.id}; name={master.name}; is_active={master.is_active}; "
+                f"online_booking={master.is_online_booking_enabled}; "
+                f"service_ids=[{service_ids}]"
+            )
     return "\n".join(lines)
 
 
@@ -587,7 +601,7 @@ def measure_shadow_draft_prompt(
     )
     if "masters:" in live_block:
         master_section = live_block.split("masters:", 1)[1]
-        live_masters_included = master_section.count("\n- id=")
+        live_masters_included = master_section.count("\n- ")
         service_section = live_block.split("masters:", 1)[0]
         live_services_included = service_section.count("\n- id=")
 
