@@ -108,12 +108,14 @@ def _denied(
         ShadowDraftReasonCode.KNOWLEDGE_NOT_USABLE,
         ShadowDraftReasonCode.SETTINGS_NOT_USABLE,
         ShadowDraftReasonCode.CONTEXT_NOT_READY,
+        ShadowDraftReasonCode.PROMPT_BUDGET_EXCEEDED,
     }
     meta = {
         "provider": "yandex",
         "shadow": True,
         "error_code": reason.value,
         "model_configured": False,
+        "provider_transport_called": False,
     }
     if metadata:
         meta.update(dict(metadata))
@@ -198,6 +200,9 @@ class ShadowDraftGenerationService:
             result = self.port.generate(messages)
         except Exception as exc:
             reason = _map_provider_error(exc)
+            transport_called = reason not in {
+                ShadowDraftReasonCode.PROVIDER_CONFIG_INVALID,
+            }
             _log_safe("provider_error", reason.value)
             return ShadowDraftReply(
                 text=None,
@@ -211,6 +216,7 @@ class ShadowDraftGenerationService:
                     "error_code": reason.value,
                     "message_count": len(messages),
                     "model_configured": True,
+                    "provider_transport_called": transport_called,
                 },
             )
 
@@ -243,6 +249,7 @@ class ShadowDraftGenerationService:
                 "text_len": len(text),
                 "message_count": len(messages),
                 "model_configured": True,
+                "provider_transport_called": True,
             },
         )
 

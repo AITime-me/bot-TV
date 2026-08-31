@@ -124,6 +124,7 @@ Thumbs.db
 !app/core/shadow_draft_types.py
 !app/core/shadow_draft_gate.py
 !app/core/shadow_draft_prompt.py
+!app/core/shadow_draft_context_selection.py
 !app/core/shadow_draft_eval_types.py
 !app/core/shadow_draft_eval_scenarios.py
 !app/core/shadow_draft_eval_scoring.py

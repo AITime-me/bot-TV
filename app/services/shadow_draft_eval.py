@@ -33,6 +33,7 @@ from app.core.runtime_context_assemble import (
     build_conversation_layer_from_turns,
     map_history_author,
 )
+from app.core.shadow_draft_context_selection import build_knowledge_selection_hint
 from app.core.runtime_context_types import (
     RuntimeContextBuildResult,
     RuntimeContextReadiness,
@@ -215,6 +216,15 @@ def build_synthetic_eval_context(
         turns=turns,
     )
 
+    conversation_text = scenario.client_text
+    if scenario.client_followup:
+        conversation_text = f"{scenario.client_text} {scenario.client_followup}"
+    knowledge_hint = build_knowledge_selection_hint(
+        conversation_text=conversation_text,
+        live_facts=sources.live_facts if include_live_facts else None,
+        structured_service_hint=scenario.service_name_contains,
+    )
+
     return assemble_runtime_context(
         bot_mode=BotMode.OFF,
         emergency_lock=emergency_lock,
@@ -236,6 +246,7 @@ def build_synthetic_eval_context(
         ownership="BOT",
         conversation_status="OPEN",
         manager_takeover_at_present=False,
+        knowledge_hint=knowledge_hint,
     )
 
 
@@ -356,15 +367,9 @@ def _infer_provider_called(
     reply: ShadowDraftReply,
     provider_configured: bool,
 ) -> bool:
-    if reply.disposition.value in {"REPLY", "HANDOFF"}:
-        return True
-    if reply.disposition.value == "PROVIDER_ERROR":
-        return True
     meta = reply.generation_metadata
-    if meta.get("model_configured") is True and reply.reason_code.value.startswith(
-        "PROVIDER_"
-    ):
-        return True
+    if "provider_transport_called" in meta:
+        return meta.get("provider_transport_called") is True
     if not provider_configured:
         return False
     return False
