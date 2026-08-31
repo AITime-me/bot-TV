@@ -51,7 +51,7 @@ EVAL_SCENARIOS: tuple[dict[str, Any], ...] = (
         "expect_disposition": "HANDOFF",
         "expect_reason": "OK",
         "expect_provider_called": True,
-        "system_must_contain": ("Не придумывает",),
+        "system_must_contain": ("Не придумывает", "IMMUTABLE TRUST GUARD"),
     },
     {
         "id": "06_are_you_a_bot",
