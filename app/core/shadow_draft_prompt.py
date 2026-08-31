@@ -18,7 +18,6 @@ from app.core.shadow_draft_context_selection import (
     SHADOW_DRAFT_COMPILED_CHAR_BUDGET,
     SelectedLiveFactsSlice,
     ShadowDraftPromptMetrics,
-    conversation_client_text,
     measure_prompt_messages,
     resolve_and_select_live_facts,
 )

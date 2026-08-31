@@ -16,17 +16,18 @@ from app.core.control_plane_types import (
     parse_settings_publication_v1,
 )
 from app.core.live_facts_types import parse_live_facts_response_v1
-from app.core.runtime_context_assemble import (
-    assemble_runtime_context,
-    build_conversation_layer_from_turns,
-    map_history_author,
-)
 from app.core.shadow_draft_context_selection import (
     SHADOW_DRAFT_COMPILED_CHAR_BUDGET,
     YANDEX_PROVIDER_MESSAGE_CHAR_CEILING,
     ServiceResolutionStatus,
     build_knowledge_selection_hint,
     resolve_live_fact_services,
+    resolve_live_fact_services_from_client_turns,
+)
+from app.core.runtime_context_assemble import (
+    assemble_runtime_context,
+    build_conversation_layer_from_turns,
+    map_history_author,
 )
 from app.core.shadow_draft_eval_scenarios import LIVE_EVAL_SCENARIOS
 from app.core.shadow_draft_prompt import (
@@ -218,6 +219,7 @@ def _live_facts_many(*, count: int = 110, target_name: str = _TARGET) -> dict[st
 def _context(
     *,
     client_text: str,
+    client_followup: str | None = None,
     live_facts: dict[str, Any] | None = None,
     knowledge_hint=None,
 ) -> Any:
@@ -226,24 +228,31 @@ def _context(
     lf = parse_live_facts_response_v1(
         live_facts if live_facts is not None else _live_facts_many()
     )
-    turns = (
+    turn_specs = [client_text]
+    if client_followup:
+        turn_specs.append(client_followup)
+    turns = tuple(
         map_history_author(
             author="client",
-            conversation_event_seq=1,
-            text=client_text,
-            occurred_at=datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc),
-        ),
+            conversation_event_seq=i + 1,
+            text=text,
+            occurred_at=datetime(2026, 8, 30, 12, i, tzinfo=timezone.utc),
+        )
+        for i, text in enumerate(turn_specs)
     )
     conversation = build_conversation_layer_from_turns(
         conversation_id=uuid4(),
-        event_seq_hwm=1,
+        event_seq_hwm=len(turns),
         turns=turns,
     )
+    client_turns_nf = tuple(reversed(turn_specs))
+    latest = client_turns_nf[0]
     hint = knowledge_hint
     if hint is None:
         hint = build_knowledge_selection_hint(
-            conversation_text=client_text,
+            conversation_text=latest,
             live_facts=lf,
+            client_turns_newest_first=client_turns_nf,
         )
     return assemble_runtime_context(
         bot_mode=BotMode.OFF,
@@ -298,10 +307,67 @@ def test_unrelated_service_prices_absent() -> None:
 
 
 def test_assigned_masters_only_for_target_service() -> None:
-    ctx = _context(client_text=f"Кто выполняет {_TARGET}?")
+    ctx = _context(client_text=f"Кто выполняет чистку лица?")
     system = compile_shadow_draft_messages(ctx)[0].text
     assert "Мастер Чистка" in system
     assert "Мастер Другой" not in system
+
+
+def test_inflection_resolves_cleaning_service_unique() -> None:
+    lf = parse_live_facts_response_v1(_live_facts_many())
+    for text in (
+        "Хочу записаться на чистку лица",
+        "Кто делает чистку лица?",
+    ):
+        result = resolve_live_fact_services(text, lf.services)
+        assert result.status is ServiceResolutionStatus.UNIQUE, text
+        assert result.service_ids == (_SERVICE_A,)
+
+
+def test_multi_turn_latest_turn_wins_not_ambiguous() -> None:
+    payload = _live_facts_many(count=3)
+    payload["services"] = [
+        _service_dict(service_id=_SERVICE_A, name="Чистка лица", price="2000"),
+        _service_dict(service_id=_SERVICE_B, name="RF-лифтинг", price="3000"),
+    ]
+    lf = parse_live_facts_response_v1(payload)
+    turns = (
+        "А RF-лифтинг?",
+        "Сколько стоит Чистка лица?",
+    )
+    result = resolve_live_fact_services_from_client_turns(turns, lf.services)
+    assert result.status is ServiceResolutionStatus.UNIQUE
+    assert result.service_ids == (_SERVICE_B,)
+
+    ctx = _context(
+        client_text="Сколько стоит Чистка лица?",
+        client_followup="А RF-лифтинг?",
+        live_facts=payload,
+    )
+    metrics = measure_shadow_draft_prompt(ctx)
+    assert metrics.service_resolution == ServiceResolutionStatus.UNIQUE.value
+    assert metrics.live_services_included == 1
+    system = compile_shadow_draft_messages(ctx)[0].text
+    assert "price_from=3000" in system
+    assert "price_from=2000" not in system
+
+
+def test_multi_turn_inflected_latest_wins() -> None:
+    payload = _live_facts_many(count=3)
+    payload["services"] = [
+        _service_dict(service_id=_SERVICE_A, name="Чистка лица", price="2000"),
+        _service_dict(service_id=_SERVICE_B, name="RF-лифтинг", price="3000"),
+    ]
+    ctx = _context(
+        client_text="Сколько стоит чистку лица?",
+        client_followup="А RF-лифтинг?",
+        live_facts=payload,
+    )
+    metrics = measure_shadow_draft_prompt(ctx)
+    assert metrics.service_resolution == ServiceResolutionStatus.UNIQUE.value
+    assert metrics.live_services_included == 1
+    system = compile_shadow_draft_messages(ctx)[0].text
+    assert "RF-лифтинг" in system or "price_from=3000" in system
 
 
 def test_ambiguous_service_no_arbitrary_first_pick() -> None:

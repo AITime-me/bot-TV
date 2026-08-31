@@ -31,6 +31,51 @@ YANDEX_PROVIDER_MESSAGE_CHAR_CEILING: int = 12_000
 # Compact names-only catalog when service cannot be resolved uniquely.
 _MAX_CATALOG_NAME_LINES: int = 40
 
+# Minimum stem length for morphology-tolerant Russian token match.
+_MIN_MORPH_STEM_LEN: int = 4
+
+# Deterministic Russian inflection suffixes (longest first). No dictionary aliases.
+_RUSSIAN_INFLECTION_SUFFIXES: tuple[str, ...] = (
+    "иями",
+    "ями",
+    "ами",
+    "ого",
+    "его",
+    "ому",
+    "ему",
+    "ией",
+    "иям",
+    "иях",
+    "ую",
+    "юю",
+    "ая",
+    "яя",
+    "ое",
+    "ее",
+    "ие",
+    "ые",
+    "ом",
+    "ем",
+    "ам",
+    "ям",
+    "ах",
+    "ях",
+    "ов",
+    "ев",
+    "ей",
+    "ий",
+    "ый",
+    "ой",
+    "ю",
+    "у",
+    "а",
+    "е",
+    "и",
+    "о",
+    "ы",
+    "я",
+)
+
 _NORMALIZE_RE = re.compile(r"[^\w\s]+", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
 
@@ -135,22 +180,91 @@ def normalize_match_text(text: str) -> str:
 
 
 def conversation_client_text(context: TeyaRuntimeContext) -> str:
+    """Latest non-empty client turn (for keywords/categories)."""
+
     if context.conversation is None:
         return ""
-    return conversation_client_text_from_turns(context.conversation.turns)
+    turns = client_turn_texts_newest_first(context.conversation.turns)
+    return turns[0] if turns else ""
 
 
 def conversation_client_text_from_turns(
     turns: Sequence[object],
 ) -> str:
-    parts: list[str] = []
+    """Latest non-empty client turn text."""
+
+    newest = client_turn_texts_newest_first(turns)
+    return newest[0] if newest else ""
+
+
+def client_turn_texts_newest_first(
+    turns: Sequence[object],
+) -> tuple[str, ...]:
+    """Non-empty client turn texts, newest first."""
+
+    ordered: list[str] = []
     for turn in turns:
         role = getattr(turn, "role", None)
         if role is ConversationTurnRole.CLIENT:
             text = getattr(turn, "text", "")
             if type(text) is str and text.strip():
-                parts.append(text)
-    return " ".join(parts).strip()
+                ordered.append(text.strip())
+    ordered.reverse()
+    return tuple(ordered)
+
+
+def _inflection_stem(token: str) -> str:
+    """Deterministic morphology-tolerant stem for Russian tokens (no LLM/dictionary)."""
+
+    if len(token) <= _MIN_MORPH_STEM_LEN:
+        return token
+    for suffix in _RUSSIAN_INFLECTION_SUFFIXES:
+        if not token.endswith(suffix):
+            continue
+        stem = token[: -len(suffix)]
+        if len(stem) >= _MIN_MORPH_STEM_LEN:
+            return stem
+    if len(token) > _MIN_MORPH_STEM_LEN:
+        candidate = token[:-1]
+        if len(candidate) >= _MIN_MORPH_STEM_LEN:
+            return candidate
+    return token
+
+
+def _significant_name_tokens(service_name: str) -> tuple[str, ...]:
+    normalized = normalize_match_text(service_name)
+    if not normalized:
+        return ()
+    tokens: list[str] = []
+    for raw in normalized.split():
+        if len(raw) < 3 or raw in _STOP_WORDS:
+            continue
+        tokens.append(raw)
+    return tuple(tokens)
+
+
+def _token_stem_matches(name_token: str, text_tokens: Sequence[str]) -> bool:
+    if name_token in text_tokens:
+        return True
+    name_stem = _inflection_stem(name_token)
+    if len(name_stem) < _MIN_MORPH_STEM_LEN:
+        return name_token in text_tokens
+    for text_token in text_tokens:
+        if text_token == name_token:
+            return True
+        if _inflection_stem(text_token) == name_stem:
+            return True
+    return False
+
+
+def _service_name_morphology_match(service_name: str, normalized_text: str) -> bool:
+    name_tokens = _significant_name_tokens(service_name)
+    if not name_tokens:
+        return False
+    text_tokens = tuple(normalize_match_text(normalized_text).split())
+    if not text_tokens:
+        return False
+    return all(_token_stem_matches(token, text_tokens) for token in name_tokens)
 
 
 def _service_name_in_text(service_name: str, normalized_text: str) -> bool:
@@ -166,15 +280,54 @@ def _service_name_in_text(service_name: str, normalized_text: str) -> bool:
     ) is not None
 
 
+def _collect_tier_matches(
+    services: Sequence[LiveFactsServiceV1],
+    normalized: str,
+    text_cf: str,
+    *,
+    tier: str,
+) -> list[LiveFactsServiceV1]:
+    matches: list[LiveFactsServiceV1] = []
+    for service in services:
+        if tier == "exact" and _service_name_in_text(service.name, normalized):
+            matches.append(service)
+        elif tier == "substring":
+            name_cf = service.name.casefold().strip()
+            if name_cf and name_cf in text_cf:
+                matches.append(service)
+        elif tier == "morphology" and _service_name_morphology_match(
+            service.name, normalized
+        ):
+            matches.append(service)
+    return matches
+
+
+def _resolution_from_matches(
+    matches: Sequence[LiveFactsServiceV1],
+) -> ServiceResolutionResult | None:
+    if len(matches) == 1:
+        return ServiceResolutionResult(
+            status=ServiceResolutionStatus.UNIQUE,
+            service_ids=(matches[0].id,),
+            match_count=1,
+        )
+    if len(matches) > 1:
+        return ServiceResolutionResult(
+            status=ServiceResolutionStatus.AMBIGUOUS,
+            service_ids=tuple(s.id for s in matches),
+            match_count=len(matches),
+        )
+    return None
+
+
 def resolve_live_fact_services(
     text: str,
     services: Sequence[LiveFactsServiceV1],
 ) -> ServiceResolutionResult:
-    """Resolve relevant service(s) from trusted conversation text.
+    """Resolve relevant service(s) from a single client turn.
 
-    Exact/full service name match has priority. Substring match is used only
-    when it yields exactly one candidate. Never silently picks the first
-    service when multiple match.
+    Priority: exact/full name → substring → morphology-tolerant token match.
+    Never silently picks the first service when multiple match.
     """
 
     if not text.strip() or not services:
@@ -186,42 +339,54 @@ def resolve_live_fact_services(
     normalized = normalize_match_text(text)
     text_cf = text.casefold()
 
-    full_matches: list[LiveFactsServiceV1] = []
-    for service in services:
-        if _service_name_in_text(service.name, normalized):
-            full_matches.append(service)
+    for tier in ("exact", "substring", "morphology"):
+        matches = _collect_tier_matches(
+            services, normalized, text_cf, tier=tier
+        )
+        resolved = _resolution_from_matches(matches)
+        if resolved is not None:
+            return resolved
 
-    if len(full_matches) == 1:
+    return ServiceResolutionResult(
+        status=ServiceResolutionStatus.NONE,
+        match_count=0,
+    )
+
+
+def resolve_live_fact_services_from_client_turns(
+    client_turns_newest_first: Sequence[str],
+    services: Sequence[LiveFactsServiceV1],
+) -> ServiceResolutionResult:
+    """Latest client turn first; unique-only fallback to earlier turns.
+
+    - Latest UNIQUE → use it.
+    - Latest AMBIGUOUS → fail closed (no history bleed).
+    - Latest NONE → try older turns; each must resolve UNIQUE to adopt.
+    """
+
+    if not services:
         return ServiceResolutionResult(
-            status=ServiceResolutionStatus.UNIQUE,
-            service_ids=(full_matches[0].id,),
-            match_count=1,
-        )
-    if len(full_matches) > 1:
-        return ServiceResolutionResult(
-            status=ServiceResolutionStatus.AMBIGUOUS,
-            service_ids=tuple(s.id for s in full_matches),
-            match_count=len(full_matches),
+            status=ServiceResolutionStatus.NONE,
+            match_count=0,
         )
 
-    substring_matches: list[LiveFactsServiceV1] = []
-    for service in services:
-        name_cf = service.name.casefold().strip()
-        if name_cf and name_cf in text_cf:
-            substring_matches.append(service)
+    turns = tuple(
+        t.strip()
+        for t in client_turns_newest_first
+        if type(t) is str and t.strip()
+    )
+    if not turns:
+        return ServiceResolutionResult(
+            status=ServiceResolutionStatus.NONE,
+            match_count=0,
+        )
 
-    if len(substring_matches) == 1:
-        return ServiceResolutionResult(
-            status=ServiceResolutionStatus.UNIQUE,
-            service_ids=(substring_matches[0].id,),
-            match_count=1,
-        )
-    if len(substring_matches) > 1:
-        return ServiceResolutionResult(
-            status=ServiceResolutionStatus.AMBIGUOUS,
-            service_ids=tuple(s.id for s in substring_matches),
-            match_count=len(substring_matches),
-        )
+    for turn in turns:
+        result = resolve_live_fact_services(turn, services)
+        if result.status is ServiceResolutionStatus.UNIQUE:
+            return result
+        if result.status is ServiceResolutionStatus.AMBIGUOUS:
+            return result
 
     return ServiceResolutionResult(
         status=ServiceResolutionStatus.NONE,
@@ -249,6 +414,7 @@ def build_knowledge_selection_hint(
     conversation_text: str,
     live_facts: LiveFactsPayloadV1 | None,
     structured_service_hint: str | None = None,
+    client_turns_newest_first: Sequence[str] | None = None,
 ) -> KnowledgeSelectionHint:
     """Build deterministic KB hint from conversation + optional structured hint.
 
@@ -256,14 +422,14 @@ def build_knowledge_selection_hint(
     keyword signal — it does not bypass resolution architecture.
     """
 
-    resolution_source = conversation_text
-    if structured_service_hint:
-        resolution_source = f"{conversation_text} {structured_service_hint}"
+    turns = client_turns_newest_first
+    if turns is None and conversation_text.strip():
+        turns = (conversation_text.strip(),)
 
     service_ids: tuple[str, ...] = ()
-    if live_facts is not None:
-        resolution = resolve_live_fact_services(
-            resolution_source, live_facts.services
+    if live_facts is not None and turns:
+        resolution = resolve_live_fact_services_from_client_turns(
+            turns, live_facts.services
         )
         if resolution.status is ServiceResolutionStatus.UNIQUE:
             service_ids = resolution.service_ids
@@ -334,9 +500,11 @@ def resolve_and_select_live_facts(
 ) -> SelectedLiveFactsSlice | None:
     if context.live_facts is None:
         return None
-    text = conversation_client_text(context)
-    resolution = resolve_live_fact_services(
-        text, context.live_facts.facts.services
+    if context.conversation is None:
+        return None
+    turns = client_turn_texts_newest_first(context.conversation.turns)
+    resolution = resolve_live_fact_services_from_client_turns(
+        turns, context.live_facts.facts.services
     )
     return select_live_facts_slice(context.live_facts.facts, resolution)
 

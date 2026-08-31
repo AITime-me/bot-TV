@@ -45,7 +45,7 @@ from app.core.runtime_context_types import (
 )
 from app.core.shadow_draft_context_selection import (
     build_knowledge_selection_hint,
-    conversation_client_text_from_turns,
+    client_turn_texts_newest_first,
 )
 from app.db.session import session_scope
 from app.models.conversation import Conversation
@@ -176,12 +176,17 @@ class RuntimeContextBuilder:
             and acquired.conversation_layer is not None
             and acquired.live_facts is not None
         ):
-            conv_text = conversation_client_text_from_turns(
-                acquired.conversation_layer.turns  # type: ignore[attr-defined]
-            )
+            conv_text = ""
+            client_turns_nf: tuple[str, ...] = ()
+            if acquired.conversation_layer is not None:
+                client_turns_nf = client_turn_texts_newest_first(
+                    acquired.conversation_layer.turns  # type: ignore[attr-defined]
+                )
+                conv_text = client_turns_nf[0] if client_turns_nf else ""
             effective_hint = build_knowledge_selection_hint(
                 conversation_text=conv_text,
                 live_facts=acquired.live_facts,
+                client_turns_newest_first=client_turns_nf,
             )
 
         context = assemble_runtime_context(
