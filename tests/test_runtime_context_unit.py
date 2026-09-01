@@ -580,6 +580,187 @@ def test_knowledge_keyword_match_is_token_boundary_safe() -> None:
     assert all(e.key != "preparation.pm_old_work" for e in address_selected)
 
 
+def test_service_specific_faq_excludes_generic_faq_when_linked_exists() -> None:
+    entries = (
+        KnowledgeEntryV1(
+            key="faq.relatox_units",
+            category=KnowledgeCategory.FAQ,
+            title="Единицы Релатокс",
+            content="Ориентир.",
+            tags=("relatox",),
+            service_id=_SERVICE_A,
+        ),
+        KnowledgeEntryV1(
+            key="faq.biorev_type",
+            category=KnowledgeCategory.FAQ,
+            title="Тип Biorev",
+            content="Generic.",
+            tags=("biorev",),
+            service_id=None,
+        ),
+    )
+    selected, coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(
+            service_ids=(_SERVICE_A,),
+            categories=(KnowledgeCategory.FAQ,),
+        ),
+    )
+    assert coverage is KnowledgeCoverage.AVAILABLE
+    assert [e.key for e in selected] == ["faq.relatox_units"]
+
+
+def test_wrong_category_service_entry_does_not_suppress_generic_fallback() -> None:
+    """Service-linked PROCEDURE must not block generic FAQ when FAQ is requested."""
+
+    entries = (
+        KnowledgeEntryV1(
+            key="procedure.relatox",
+            category=KnowledgeCategory.PROCEDURE_EXPLANATION,
+            title="Релатокс",
+            content="Procedure.",
+            tags=("relatox",),
+            service_id=_SERVICE_A,
+        ),
+        KnowledgeEntryV1(
+            key="faq.generic_safety",
+            category=KnowledgeCategory.FAQ,
+            title="Общая безопасность",
+            content="Generic safety FAQ.",
+            tags=("safety",),
+            service_id=None,
+        ),
+    )
+    selected, coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(
+            service_ids=(_SERVICE_A,),
+            categories=(KnowledgeCategory.FAQ,),
+        ),
+    )
+    assert coverage is KnowledgeCoverage.AVAILABLE
+    assert [e.key for e in selected] == ["faq.generic_safety"]
+
+
+def test_generic_null_service_fallback_when_no_service_linked_match() -> None:
+    entries = (
+        KnowledgeEntryV1(
+            key="faq.biorev_type",
+            category=KnowledgeCategory.FAQ,
+            title="Тип Biorev",
+            content="Generic.",
+            tags=("biorev",),
+            service_id=None,
+        ),
+        KnowledgeEntryV1(
+            key="policy.address",
+            category=KnowledgeCategory.FAQ,
+            title="Адрес студии",
+            content="Address.",
+            tags=("address",),
+            service_id=None,
+        ),
+    )
+    selected, coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(
+            service_ids=(_SERVICE_A,),
+            categories=(KnowledgeCategory.FAQ,),
+            keywords=("адрес",),
+        ),
+    )
+    assert coverage is KnowledgeCoverage.AVAILABLE
+    keys = [e.key for e in selected]
+    assert "policy.address" in keys
+    # Both null generics may match FAQ; address also gets keyword boost.
+    assert keys[0] == "policy.address"
+
+
+def test_other_service_entry_never_becomes_fallback() -> None:
+    entries = (
+        KnowledgeEntryV1(
+            key="faq.other_service",
+            category=KnowledgeCategory.FAQ,
+            title="Другая услуга",
+            content="Other.",
+            tags=("other",),
+            service_id=_SERVICE_B,
+        ),
+        KnowledgeEntryV1(
+            key="faq.generic",
+            category=KnowledgeCategory.FAQ,
+            title="Общий FAQ",
+            content="Generic.",
+            tags=("generic",),
+            service_id=None,
+        ),
+    )
+    selected, coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(
+            service_ids=(_SERVICE_A,),
+            categories=(KnowledgeCategory.FAQ,),
+        ),
+    )
+    assert coverage is KnowledgeCoverage.AVAILABLE
+    assert [e.key for e in selected] == ["faq.generic"]
+    assert all(e.service_id != _SERVICE_B for e in selected)
+
+
+def test_without_service_ids_selection_semantics_unchanged() -> None:
+    entries = (
+        KnowledgeEntryV1(
+            key="faq.alpha",
+            category=KnowledgeCategory.FAQ,
+            title="Alpha",
+            content="A",
+            tags=("a",),
+            service_id=_SERVICE_A,
+        ),
+        KnowledgeEntryV1(
+            key="faq.generic",
+            category=KnowledgeCategory.FAQ,
+            title="Generic",
+            content="G",
+            tags=("g",),
+            service_id=None,
+        ),
+    )
+    selected, coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(categories=(KnowledgeCategory.FAQ,)),
+    )
+    assert coverage is KnowledgeCoverage.AVAILABLE
+    assert [e.key for e in selected] == ["faq.alpha", "faq.generic"]
+
+
+def test_scenario_16_policy_address_still_selected_without_service_ids() -> None:
+    entries = (
+        KnowledgeEntryV1(
+            key="policy.address",
+            category=KnowledgeCategory.FAQ,
+            title="Адрес студии",
+            content="Адрес и режим работы студии.",
+            tags=("address",),
+            service_id=None,
+        ),
+        KnowledgeEntryV1(
+            key="preparation.pm_old_work",
+            category=KnowledgeCategory.PREPARATION,
+            title="Подготовка к старой работе",
+            content="Work.",
+            tags=("work",),
+            service_id=None,
+        ),
+    )
+    selected, coverage = select_knowledge_entries(
+        entries,
+        hint=KnowledgeSelectionHint(keywords=("адрес", "работы")),
+    )
+    assert coverage is KnowledgeCoverage.AVAILABLE
+    assert [e.key for e in selected] == ["policy.address"]
+
+
 def test_live_facts_studio_repr_redacts_pii() -> None:
     payload = parse_live_facts_response_v1(_valid_live_facts())
     rendered = repr(payload) + repr(payload.studio)

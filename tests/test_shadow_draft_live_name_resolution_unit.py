@@ -11,6 +11,8 @@ from uuid import uuid4
 from app.config import BotMode
 from app.core.control_plane_types import (
     ControlPlaneKindReadiness,
+    KnowledgeCategory,
+    KnowledgeEntryV1,
     parse_knowledge_publication_v1,
     parse_settings_publication_v1,
 )
@@ -20,6 +22,7 @@ from app.core.runtime_context_assemble import (
     build_conversation_layer_from_turns,
     map_history_author,
 )
+from app.core.runtime_context_knowledge import select_knowledge_entries
 from app.core.shadow_draft_context_selection import (
     SHADOW_DRAFT_COMPILED_CHAR_BUDGET,
     ServiceResolutionStatus,
@@ -331,6 +334,142 @@ def test_equal_strength_subset_matches_remain_ambiguous() -> None:
     result = resolve_live_fact_services("Сколько стоит чистка лица?", services)
     assert result.status is ServiceResolutionStatus.AMBIGUOUS
     assert len(result.service_ids) == 2
+
+
+_RELATOX_ID = "a3000001-0000-4000-8000-000000000088"
+_RELATOX_CANONICAL = "Ботулинотерапия препаратом Релатокс"
+_RELATOX_SCENARIO_14 = (
+    "Мне 45 лет, вот описание лица — сколько единиц Relatox "
+    "колоть именно мне? Дай точную дозу."
+)
+
+
+def _relatox_live_facts_payload() -> dict[str, Any]:
+    payload = copy.deepcopy(ONLINE_ZAPIS_LIVE_FACTS_V1_REPRESENTATIVE)
+    payload["services"] = [
+        _service_dict(
+            service_id=_RELATOX_ID,
+            name=_RELATOX_CANONICAL,
+            price="9000",
+        ),
+        _service_dict(
+            service_id=_CLEANING_ID,
+            name=_CANONICAL_CLEANING,
+            price="2000",
+        ),
+        *_lifting_catalog(),
+    ]
+    payload["masters"] = []
+    return payload
+
+
+def test_latin_relatox_resolves_unique_to_cyrillic_canonical() -> None:
+    services = _services_from_payload(_relatox_live_facts_payload())
+    result = resolve_live_fact_services(_RELATOX_SCENARIO_14, services)
+    assert result.status is ServiceResolutionStatus.UNIQUE
+    assert result.service_ids == (_RELATOX_ID,)
+
+
+def test_cyrillic_relatoks_still_resolves_unique() -> None:
+    services = _services_from_payload(_relatox_live_facts_payload())
+    result = resolve_live_fact_services(
+        "Сколько единиц Релатокс можно ориентировочно?",
+        services,
+    )
+    assert result.status is ServiceResolutionStatus.UNIQUE
+    assert result.service_ids == (_RELATOX_ID,)
+
+
+def test_unrelated_latin_token_does_not_resolve_relatox() -> None:
+    services = _services_from_payload(_relatox_live_facts_payload())
+    result = resolve_live_fact_services(
+        "Сколько единиц Botox колоть именно мне?",
+        services,
+    )
+    assert result.status is ServiceResolutionStatus.NONE
+
+
+def test_short_cross_script_token_cannot_create_unique() -> None:
+    """Skeleton shorter than distinctive guard must not UNIQUE-match."""
+
+    payload = copy.deepcopy(ONLINE_ZAPIS_LIVE_FACTS_V1_REPRESENTATIVE)
+    payload["services"] = [
+        _service_dict(
+            service_id=_RELATOX_ID,
+            name="Услуга Рела",
+            price="1000",
+        )
+    ]
+    payload["masters"] = []
+    services = _services_from_payload(payload)
+    # Latin "Rela" → skeleton "rela" (len 4) < 6
+    result = resolve_live_fact_services("Интересует Rela", services)
+    assert result.status is ServiceResolutionStatus.NONE
+
+
+def test_equal_cross_script_candidates_remain_ambiguous() -> None:
+    payload = copy.deepcopy(ONLINE_ZAPIS_LIVE_FACTS_V1_REPRESENTATIVE)
+    payload["services"] = [
+        _service_dict(
+            service_id=_RELATOX_ID,
+            name="Ботулинотерапия препаратом Релатокс",
+            price="9000",
+        ),
+        _service_dict(
+            service_id="a3000001-0000-4000-8000-000000000099",
+            name="Коррекция препаратом Релатокс Light",
+            price="7000",
+        ),
+    ]
+    payload["masters"] = []
+    services = _services_from_payload(payload)
+    result = resolve_live_fact_services("Сколько стоит Relatox?", services)
+    assert result.status is ServiceResolutionStatus.AMBIGUOUS
+    assert len(result.service_ids) == 2
+
+
+def test_relatox_resolution_selects_faq_relatox_units_not_biorev() -> None:
+    """Integration: UNIQUE Relatox + FAQ intent → faq.relatox_units, not biorev."""
+
+    live = parse_live_facts_response_v1(_relatox_live_facts_payload())
+    hint = build_knowledge_selection_hint(
+        conversation_text=_RELATOX_SCENARIO_14,
+        live_facts=live,
+        client_turns_newest_first=(_RELATOX_SCENARIO_14,),
+    )
+    assert hint.service_ids == (_RELATOX_ID,)
+    assert KnowledgeCategory.FAQ in hint.categories
+
+    entries = (
+        KnowledgeEntryV1(
+            key="procedure.relatox",
+            category=KnowledgeCategory.PROCEDURE_EXPLANATION,
+            title="Релатокс",
+            content="Описание процедуры Релатокс.",
+            tags=("relatox",),
+            service_id=_RELATOX_ID,
+        ),
+        KnowledgeEntryV1(
+            key="faq.relatox_units",
+            category=KnowledgeCategory.FAQ,
+            title="Единицы Релатокс",
+            content="Ориентир единиц только справочно, без индивидуальной дозы.",
+            tags=("relatox", "units"),
+            service_id=_RELATOX_ID,
+        ),
+        KnowledgeEntryV1(
+            key="faq.biorev_type",
+            category=KnowledgeCategory.FAQ,
+            title="Тип Biorev",
+            content="Справочно о типе Biorev.",
+            tags=("biorev",),
+            service_id=None,
+        ),
+    )
+    selected, _coverage = select_knowledge_entries(entries, hint=hint)
+    keys = [entry.key for entry in selected]
+    assert "faq.relatox_units" in keys
+    assert "faq.biorev_type" not in keys
 
 
 def test_rf_lifting_exact_unique_not_combo() -> None:

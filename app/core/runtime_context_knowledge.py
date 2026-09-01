@@ -147,6 +147,18 @@ def select_knowledge_entries(
             return (), KnowledgeCoverage.MISSING
         return (), KnowledgeCoverage.MISSING
 
+    # service-specific-first: when resolved service_ids are present, prefer
+    # matching service-linked candidates; generic (serviceId=null) is fallback only.
+    resolved_ids = frozenset(selection_hint.service_ids)
+    if resolved_ids:
+        service_linked = [
+            item for item in scored if item[2].service_id in resolved_ids
+        ]
+        if service_linked:
+            scored = service_linked
+        else:
+            scored = [item for item in scored if item[2].service_id is None]
+
     # Deterministic: score desc, then stable key asc.
     scored.sort(key=lambda item: (-item[0], item[1]))
     selected_raw = [item[2] for item in scored[:ceiling]]
