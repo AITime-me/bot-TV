@@ -37,6 +37,46 @@ _MIN_MORPH_STEM_LEN: int = 4
 # Single-token query-subset match requires this length (conservative false-positive guard).
 _MIN_DISTINCTIVE_QUERY_TOKEN_LEN: int = 6
 
+# Minimum latin-skeleton length for cross-script token equivalence.
+_MIN_CROSS_SCRIPT_SKELETON_LEN: int = 6
+
+# Deterministic Cyrillic → Latin skeleton (no brand alias dictionary).
+_CYRILLIC_TO_LATIN_SKELETON: dict[str, str] = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
 # Deterministic Russian inflection suffixes (longest first). No dictionary aliases.
 _RUSSIAN_INFLECTION_SUFFIXES: tuple[str, ...] = (
     "иями",
@@ -245,6 +285,47 @@ def _inflection_stem(token: str) -> str:
     return token
 
 
+def _latin_script_skeleton(token: str) -> str:
+    """Fold a token to a latin letter skeleton for conservative cross-script equality.
+
+    Cyrillic letters are mapped via a fixed table. Latin ``x`` expands to ``ks``
+    (conventional Russian brand spelling). No brand-specific aliases.
+    """
+
+    folded = token.casefold()
+    parts: list[str] = []
+    for char in folded:
+        mapped = _CYRILLIC_TO_LATIN_SKELETON.get(char)
+        if mapped is not None:
+            parts.append(mapped)
+        elif "a" <= char <= "z" or char.isdigit():
+            parts.append(char)
+    skeleton = "".join(parts)
+    return skeleton.replace("x", "ks")
+
+
+def _cross_script_token_equivalent(left: str, right: str) -> bool:
+    """True when tokens share the same distinctive latin skeleton (or stems)."""
+
+    left_skel = _latin_script_skeleton(left)
+    right_skel = _latin_script_skeleton(right)
+    if (
+        len(left_skel) < _MIN_CROSS_SCRIPT_SKELETON_LEN
+        or len(right_skel) < _MIN_CROSS_SCRIPT_SKELETON_LEN
+    ):
+        return False
+    if left_skel == right_skel:
+        return True
+    left_stem_skel = _latin_script_skeleton(_inflection_stem(left))
+    right_stem_skel = _latin_script_skeleton(_inflection_stem(right))
+    if (
+        len(left_stem_skel) < _MIN_CROSS_SCRIPT_SKELETON_LEN
+        or len(right_stem_skel) < _MIN_CROSS_SCRIPT_SKELETON_LEN
+    ):
+        return False
+    return left_stem_skel == right_stem_skel
+
+
 def _significant_name_tokens(service_name: str) -> tuple[str, ...]:
     normalized = normalize_match_text(service_name)
     if not normalized:
@@ -262,11 +343,16 @@ def _token_stem_matches(name_token: str, text_tokens: Sequence[str]) -> bool:
         return True
     name_stem = _inflection_stem(name_token)
     if len(name_stem) < _MIN_MORPH_STEM_LEN:
-        return name_token in text_tokens
+        return name_token in text_tokens or any(
+            _cross_script_token_equivalent(name_token, text_token)
+            for text_token in text_tokens
+        )
     for text_token in text_tokens:
         if text_token == name_token:
             return True
         if _inflection_stem(text_token) == name_stem:
+            return True
+        if _cross_script_token_equivalent(name_token, text_token):
             return True
     return False
 
