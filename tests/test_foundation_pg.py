@@ -934,7 +934,7 @@ async def test_db_rejects_sent_and_unknown_channel(
                     text(
                         "INSERT INTO conversations "
                         "(id, channel, external_conversation_id, status) "
-                        "VALUES (CAST(:id AS uuid), 'vk', 'bad-channel', 'OPEN')"
+                        "VALUES (CAST(:id AS uuid), 'unknown', 'bad-channel', 'OPEN')"
                     ),
                     {"id": str(uuid4())},
                 )
