@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
 
 from app.amocrm_chat_webhook import build_amocrm_chat_router
+from app.channels.vk_client_config import VkClientCallbackConfig, VkClientConfigError
+from app.channels.vk_client_http import build_vk_client_router
 from app.channels.vk_master_config import VkMasterAdapterConfig, VkMasterConfigError
 from app.channels.vk_master_http import NullVkMasterSender, VkMasterHttpSender
 from app.teya_ops_router import build_teya_ops_router, load_teya_ops_config
@@ -209,6 +211,13 @@ def create_app(
         engine=engine,
     )
 
+    # VK CLIENT shadow observer Callback — separate from master; default-off.
+    _register_vk_client_route(
+        application,
+        settings=loaded_settings,
+        engine=engine,
+    )
+
     # BOT-CLOSED-TEST-01A: synthetic closed-test HTTP surface (default-off).
     _register_closed_test_routes(
         application,
@@ -292,6 +301,30 @@ def _register_amocrm_chat_routes(
     session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
     application.include_router(
         build_amocrm_chat_router(config=config, session_factory=session_factory)
+    )
+
+
+def _register_vk_client_route(
+    application: FastAPI,
+    *,
+    settings: Settings,
+    engine: AsyncEngine | None,
+) -> None:
+    """Register `/webhooks/vk/client` only when enabled and fully configured.
+
+    Disabled → no route. Enabled + incomplete/invalid config fails closed (raises).
+    Secrets stay on the API surface only; worker does not need callback config.
+    """
+
+    config = VkClientCallbackConfig.from_env()
+    if not config.enabled:
+        return
+    if engine is None or settings.database_url is None:
+        raise VkClientConfigError("VK_CLIENT_DATABASE_REQUIRED") from None
+
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    application.include_router(
+        build_vk_client_router(config=config, session_factory=session_factory)
     )
 
 

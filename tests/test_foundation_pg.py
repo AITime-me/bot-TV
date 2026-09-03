@@ -61,7 +61,7 @@ _FOUNDATION_TABLES = (
 # and adds casts/parentheses, so the applied CHECK is verified by column plus
 # allowed literal set instead of by raw SQL text.
 _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
-    "ck_conversations_channel": ("channel", frozenset({"synthetic"})),
+    "ck_conversations_channel": ("channel", frozenset({"synthetic", "vk"})),
     "ck_conversations_status": (
         "status",
         frozenset({"OPEN", "HANDOFF", "CLOSED"}),
@@ -163,7 +163,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "context_version",
         frozenset(),
     ),
-    "ck_inbox_channel": ("channel", frozenset({"synthetic"})),
+    "ck_inbox_channel": ("channel", frozenset({"synthetic", "vk"})),
     "ck_inbox_direction": ("direction", frozenset({"INBOUND"})),
     "ck_inbox_message_type": ("message_type", frozenset({"TEXT"})),
     "ck_inbox_processing_status": (
@@ -225,10 +225,12 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "lease_token",
         frozenset({"PROCESSING"}),
     ),
-    "ck_ingress_channel": ("channel", frozenset({"synthetic", "amocrm"})),
+    "ck_ingress_channel": ("channel", frozenset({"synthetic", "amocrm", "vk"})),
     "ck_ingress_event_type": (
         "event_type",
-        frozenset({"SYNTHETIC_MESSAGE", "AMOCRM_MANAGER_MESSAGE"}),
+        frozenset(
+            {"SYNTHETIC_MESSAGE", "AMOCRM_MANAGER_MESSAGE", "VK_CLIENT_MESSAGE"}
+        ),
     ),
     "ck_ingress_channel_event_pairing": (
         "channel",
@@ -238,6 +240,8 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "SYNTHETIC_MESSAGE",
                 "amocrm",
                 "AMOCRM_MANAGER_MESSAGE",
+                "vk",
+                "VK_CLIENT_MESSAGE",
             }
         ),
     ),
@@ -930,7 +934,7 @@ async def test_db_rejects_sent_and_unknown_channel(
                     text(
                         "INSERT INTO conversations "
                         "(id, channel, external_conversation_id, status) "
-                        "VALUES (CAST(:id AS uuid), 'vk', 'bad-channel', 'OPEN')"
+                        "VALUES (CAST(:id AS uuid), 'unknown', 'bad-channel', 'OPEN')"
                     ),
                     {"id": str(uuid4())},
                 )

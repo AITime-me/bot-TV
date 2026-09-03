@@ -58,6 +58,15 @@ x-yandex-shadow-environment: &yandex-shadow-environment
   YANDEX_LLM_TEMPERATURE: ${YANDEX_LLM_TEMPERATURE:-0.3}
   YANDEX_LLM_MAX_TOKENS: ${YANDEX_LLM_MAX_TOKENS:-1024}
 
+# VK CLIENT shadow Callback — api only. Default-off / fail-closed.
+# Never attach to worker: callback secrets are not needed for durable processing.
+# Separate from VK_MASTER_* (master command channel).
+x-vk-client-environment: &vk-client-environment
+  VK_CLIENT_CALLBACK_ENABLED: ${VK_CLIENT_CALLBACK_ENABLED:-false}
+  VK_CLIENT_GROUP_ID: ${VK_CLIENT_GROUP_ID:-}
+  VK_CLIENT_CALLBACK_SECRET: ${VK_CLIENT_CALLBACK_SECRET:-}
+  VK_CLIENT_CONFIRMATION: ${VK_CLIENT_CONFIRMATION:-}
+
 x-runtime-hardening: &runtime-hardening
   read_only: true
   init: true
@@ -88,7 +97,7 @@ services:
       - --port
       - "8000"
     environment:
-      <<: [*runtime-environment, *amocrm-environment]
+      <<: [*runtime-environment, *amocrm-environment, *vk-client-environment]
     env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening
     depends_on:

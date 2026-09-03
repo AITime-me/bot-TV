@@ -31,6 +31,7 @@ class IngressEventType(str, enum.Enum):
 
     SYNTHETIC_MESSAGE = "SYNTHETIC_MESSAGE"
     AMOCRM_MANAGER_MESSAGE = "AMOCRM_MANAGER_MESSAGE"
+    VK_CLIENT_MESSAGE = "VK_CLIENT_MESSAGE"
 
 
 class IngressChannel(str, enum.Enum):
@@ -38,6 +39,7 @@ class IngressChannel(str, enum.Enum):
 
     SYNTHETIC = "synthetic"
     AMOCRM = "amocrm"
+    VK = "vk"
 
 
 class IngressStatus(str, enum.Enum):
@@ -99,16 +101,17 @@ class IngressEvent(Base):
             name="uq_ingress_channel_external_event_id",
         ),
         CheckConstraint(
-            "channel IN ('synthetic', 'amocrm')",
+            "channel IN ('synthetic', 'amocrm', 'vk')",
             name="ck_ingress_channel",
         ),
         CheckConstraint(
-            "event_type IN ('SYNTHETIC_MESSAGE', 'AMOCRM_MANAGER_MESSAGE')",
+            "event_type IN ('SYNTHETIC_MESSAGE', 'AMOCRM_MANAGER_MESSAGE', 'VK_CLIENT_MESSAGE')",
             name="ck_ingress_event_type",
         ),
         CheckConstraint(
             "(channel = 'synthetic' AND event_type = 'SYNTHETIC_MESSAGE') OR "
-            "(channel = 'amocrm' AND event_type = 'AMOCRM_MANAGER_MESSAGE')",
+            "(channel = 'amocrm' AND event_type = 'AMOCRM_MANAGER_MESSAGE') OR "
+            "(channel = 'vk' AND event_type = 'VK_CLIENT_MESSAGE')",
             name="ck_ingress_channel_event_pairing",
         ),
         CheckConstraint(
