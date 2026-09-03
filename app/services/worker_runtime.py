@@ -19,11 +19,13 @@ from app.core.booking_method_http import BookingMethodHttpClient
 from app.core.acquisition_source_http import AcquisitionSourceHttpClient
 from app.core.booking_request_http import BookingRequestHttpClient
 from app.core.ephemeral_pii_types import EphemeralPiiError
+from app.core.live_facts_http import LiveFactsHttpClient
 from app.core.s2s_http_stdlib import S2sHttpStdlibTransport
 from app.core.s2s_rate_limit import (
     RATE_LIMITED_CODE,
     is_expected_s2s_rate_limited,
 )
+from app.core.yandex_llm_factory import build_text_generation_port
 from app.db.session import session_scope
 from app.models.worker_heartbeat import (
     ACQUISITION_SOURCE_ANALYTICS_LOOP,
@@ -72,6 +74,9 @@ from app.services.acquisition_source_analytics_worker import (
 from app.core.control_plane_http import ControlPlaneHttpClient
 from app.services.control_plane_snapshot_service import ControlPlaneSnapshotService
 from app.services.control_plane_snapshot_worker import ControlPlaneSnapshotWorker
+from app.services.runtime_context_builder import RuntimeContextBuilder
+from app.services.shadow_draft_generation import build_shadow_draft_generation_service
+from app.services.shadow_draft_ingress_hook import run_shadow_draft_after_client_inbound
 from app.services.teya_request_crm_wiring import build_teya_request_crm_service
 from app.services.teya_request_orchestrator_worker import (
     TeyaRequestOrchestratorWorker,
@@ -434,15 +439,57 @@ def build_default_loop_specs(
     )
     control_plane_snapshot = ControlPlaneSnapshotWorker(control_plane_service)
 
+    # Shadow draft stack (internal only). Never feeds ReplyPlan / outbox / CRM.
+    live_facts_remote = (
+        LiveFactsHttpClient(booking_s2s_config, S2sHttpStdlibTransport())
+        if booking_s2s_config is not None
+        else None
+    )
+    shadow_runtime_builder = RuntimeContextBuilder(
+        session_factory=session_factory,
+        local_settings=settings,
+        control_plane=control_plane_service,
+        live_facts_remote=live_facts_remote,
+    )
+    try:
+        shadow_text_port = build_text_generation_port()
+    except (ValueError, TypeError, RuntimeError):
+        # Partial/invalid Yandex config must not abort the worker process.
+        shadow_text_port = None
+    shadow_draft_service = build_shadow_draft_generation_service(
+        port=shadow_text_port,
+    )
+
     async def ingress_tick() -> None:
         for _ in range(settings.worker_batch_size):
             claim = await ingress.claim_one()
             if claim is None:
                 return
             try:
-                await ingress.process_claimed(claim)
+                result = await ingress.process_claimed(claim)
             except StaleIngressLeaseError:
                 continue
+            # After durable inbound + lease completion: fail-soft shadow only.
+            if (
+                shadow_draft_service.shadow_feature_enabled
+                and result.conversation_id is not None
+                and result.inbox_id is not None
+                and not result.duplicate_business
+            ):
+                try:
+                    await run_shadow_draft_after_client_inbound(
+                        conversation_id=result.conversation_id,
+                        builder=shadow_runtime_builder,
+                        service=shadow_draft_service,
+                    )
+                except Exception as exc:
+                    try:
+                        logger.info(
+                            "shadow_draft event=ingress_hook_failed error_type=%s",
+                            type(exc).__name__,
+                        )
+                    except Exception:
+                        pass
 
     async def handoff_tick() -> None:
         await handoff.tick(max_items=settings.worker_batch_size)

@@ -309,6 +309,7 @@ Thumbs.db
 !app/services/control_plane_snapshot_worker.py
 !app/services/runtime_context_builder.py
 !app/services/shadow_draft_generation.py
+!app/services/shadow_draft_ingress_hook.py
 !app/services/shadow_draft_eval.py
 !app/services/amocrm_crm_oauth_lifecycle_worker.py
 !app/services/vk_master_adapter.py
