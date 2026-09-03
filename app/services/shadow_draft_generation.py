@@ -36,16 +36,35 @@ from app.core.yandex_llm_config import YandexLlmConfigError
 logger = logging.getLogger(__name__)
 
 _SHADOW_FEATURE_ENV = "YANDEX_SHADOW_DRAFT_ENABLED"
+_SHADOW_ALLOW_UNDER_LOCK_ENV = "YANDEX_SHADOW_ALLOW_UNDER_EMERGENCY_LOCK"
+
+
+def _env_flag_true(
+    name: str,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    source = os.environ if environ is None else environ
+    raw = source.get(name, "false")
+    if type(raw) is not str:
+        return False
+    return raw.strip().lower() == "true"
 
 
 def is_yandex_shadow_draft_enabled(
     environ: Mapping[str, str] | None = None,
 ) -> bool:
-    source = os.environ if environ is None else environ
-    raw = source.get(_SHADOW_FEATURE_ENV, "false")
-    if type(raw) is not str:
-        return False
-    return raw.strip().lower() == "true"
+    return _env_flag_true(_SHADOW_FEATURE_ENV, environ)
+
+
+def is_yandex_shadow_allow_under_emergency_lock(
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Explicit fail-closed flag: allow internal shadow only under EMERGENCY_LOCK.
+
+    Never authorizes outbound / CRM / booking / client delivery.
+    """
+
+    return _env_flag_true(_SHADOW_ALLOW_UNDER_LOCK_ENV, environ)
 
 
 def _provenance_from_context(
@@ -142,6 +161,7 @@ class ShadowDraftGenerationService:
 
     port: TextGenerationPort | None
     shadow_feature_enabled: bool = False
+    allow_under_emergency_lock: bool = False
 
     @property
     def provider_configured(self) -> bool:
@@ -153,6 +173,7 @@ class ShadowDraftGenerationService:
         *,
         generation_allowed: bool,
         readiness=None,
+        build_reasons=None,
     ) -> ShadowDraftReply:
         gate = evaluate_shadow_draft_gate(
             context=context,
@@ -160,6 +181,8 @@ class ShadowDraftGenerationService:
             provider_configured=self.provider_configured,
             shadow_feature_enabled=self.shadow_feature_enabled,
             readiness=readiness,
+            allow_under_emergency_lock=self.allow_under_emergency_lock,
+            build_reasons=build_reasons,
         )
         return self._run(context=context, gate=gate)
 
@@ -171,6 +194,7 @@ class ShadowDraftGenerationService:
             build,
             provider_configured=self.provider_configured,
             shadow_feature_enabled=self.shadow_feature_enabled,
+            allow_under_emergency_lock=self.allow_under_emergency_lock,
         )
         return self._run(context=build.context, gate=gate)
 
@@ -262,4 +286,7 @@ def build_shadow_draft_generation_service(
     return ShadowDraftGenerationService(
         port=port,
         shadow_feature_enabled=is_yandex_shadow_draft_enabled(environ),
+        allow_under_emergency_lock=is_yandex_shadow_allow_under_emergency_lock(
+            environ
+        ),
     )

@@ -58,13 +58,15 @@ class IngressProcessResult:
     duplicate_business: bool
     inbox_id: uuid.UUID | None
     outbox_id: uuid.UUID | None
+    conversation_id: uuid.UUID | None = None
 
     def __repr__(self) -> str:
         return (
             f"IngressProcessResult(event_id={self.event_id!r}, "
             f"status={self.status!r}, "
             f"duplicate_business={self.duplicate_business!r}, "
-            f"inbox_id={self.inbox_id!r}, outbox_id={self.outbox_id!r})"
+            f"inbox_id={self.inbox_id!r}, outbox_id={self.outbox_id!r}, "
+            f"conversation_id={self.conversation_id!r})"
         )
 
 
@@ -197,6 +199,7 @@ class IngressWorker:
                     duplicate_business=accept.duplicate,
                     inbox_id=accept.inbox.id,
                     outbox_id=accept.outbox.id,
+                    conversation_id=accept.conversation.id,
                 )
         except StaleIngressLeaseError:
             raise

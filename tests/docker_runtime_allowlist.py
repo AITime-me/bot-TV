@@ -287,6 +287,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/control_plane_snapshot_worker.py",
     "!app/services/runtime_context_builder.py",
     "!app/services/shadow_draft_generation.py",
+    "!app/services/shadow_draft_ingress_hook.py",
     "!app/services/shadow_draft_eval.py",
     "!app/services/amocrm_crm_oauth_lifecycle_worker.py",
     "!app/services/vk_master_adapter.py",
@@ -462,6 +463,7 @@ AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_01_DOCKER_RUN
     "app/core/shadow_draft_prompt.py",
     "app/core/shadow_draft_context_selection.py",
     "app/services/shadow_draft_generation.py",
+    "app/services/shadow_draft_ingress_hook.py",
 )
 
 AI_EVAL_01_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS + (
