@@ -41,6 +41,23 @@ x-amocrm-oauth-keys-env-file: &amocrm-oauth-keys-env-file
   - path: ${AMOCRM_CRM_OAUTH_KEYS_ENV_FILE:-/etc/bot-tv/amocrm-crm-oauth-keys.env}
     required: false
 
+# YandexGPT shadow draft — worker only. Default-off / fail-closed.
+# Never attach this anchor to api/migrate: credentials stay off the API surface.
+# Optional numeric/base vars use explicit defaults (empty string != absent in
+# YandexLlmConfig.from_env and would fail closed when LLM is enabled).
+x-yandex-shadow-environment: &yandex-shadow-environment
+  YANDEX_LLM_ENABLED: ${YANDEX_LLM_ENABLED:-false}
+  YANDEX_API_KEY: ${YANDEX_API_KEY:-}
+  YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
+  YANDEX_SHADOW_DRAFT_ENABLED: ${YANDEX_SHADOW_DRAFT_ENABLED:-false}
+  YANDEX_SHADOW_ALLOW_UNDER_EMERGENCY_LOCK: ${YANDEX_SHADOW_ALLOW_UNDER_EMERGENCY_LOCK:-false}
+  YANDEX_MODEL_URI: ${YANDEX_MODEL_URI:-}
+  YANDEX_LLM_API_BASE_URL: ${YANDEX_LLM_API_BASE_URL:-https://llm.api.cloud.yandex.net}
+  YANDEX_LLM_TIMEOUT_SECONDS: ${YANDEX_LLM_TIMEOUT_SECONDS:-15.0}
+  YANDEX_LLM_MAX_RESPONSE_BYTES: ${YANDEX_LLM_MAX_RESPONSE_BYTES:-65536}
+  YANDEX_LLM_TEMPERATURE: ${YANDEX_LLM_TEMPERATURE:-0.3}
+  YANDEX_LLM_MAX_TOKENS: ${YANDEX_LLM_MAX_TOKENS:-1024}
+
 x-runtime-hardening: &runtime-hardening
   read_only: true
   init: true
@@ -92,7 +109,7 @@ services:
       context: .
     command: ["python", "-m", "app.worker"]
     environment:
-      <<: [*runtime-environment, *amocrm-environment]
+      <<: [*runtime-environment, *amocrm-environment, *yandex-shadow-environment]
       WORKER_INSTANCE_ID: bot-tv-worker
     env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening
