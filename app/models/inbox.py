@@ -49,7 +49,7 @@ class InboxMessage(Base):
             name="uq_inbox_channel_external_message_id",
         ),
         CheckConstraint(
-            "channel IN ('synthetic')",
+            "channel IN ('synthetic', 'vk')",
             name="ck_inbox_channel",
         ),
         CheckConstraint(

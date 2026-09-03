@@ -186,6 +186,10 @@ def _assert_channel_event_pairing(
         if event_type is not IngressEventType.SYNTHETIC_MESSAGE:
             raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
         return
+    if channel_value == IngressChannel.VK.value:
+        if event_type is not IngressEventType.VK_CLIENT_MESSAGE:
+            raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
+        return
     raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
 
 

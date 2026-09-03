@@ -493,12 +493,15 @@ def test_applied_check_verification_tolerates_postgres_normalization() -> None:
     """Regression: PostgreSQL rewrites `IN (...)`, so raw SQL text never matches."""
     from tests.test_foundation_pg import _assert_check_semantics, _check_literals
 
-    single = "CHECK (((channel)::text = 'synthetic'::text))"
+    single = (
+        "CHECK (((channel)::text = ANY ((ARRAY['synthetic'::character varying, "
+        "'vk'::character varying])::text[])))"
+    )
     multi = (
         "CHECK (((status)::text = ANY ((ARRAY['OPEN'::character varying, "
         "'HANDOFF'::character varying, 'CLOSED'::character varying])::text[])))"
     )
-    assert _check_literals(single) == {"synthetic"}
+    assert _check_literals(single) == {"synthetic", "vk"}
     _assert_check_semantics("ck_conversations_channel", single)
     _assert_check_semantics("ck_conversations_status", multi)
 

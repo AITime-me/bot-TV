@@ -25,8 +25,10 @@ from app.schemas.self_booking_confirm_action import SyntheticConfirmSelectedSlot
 from app.schemas.inbound import SyntheticInboundEvent
 from app.schemas.ingress import SyntheticIngressEvent
 from app.schemas.manager_message import SyntheticManagerMessageEvent
+from app.schemas.vk_client_ingress import VkClientInboundEvent
 from app.services.inbound import InboundService
 from app.services.manager_messages import apply_manager_message_in_session
+from app.services.vk_client_inbound import VkClientInboundService
 
 
 class IngressPersistError(RuntimeError):
@@ -158,7 +160,7 @@ class IngressWorker:
             )
 
     async def process_claimed(self, claim: IngressClaim) -> IngressProcessResult:
-        """Apply foundation inbound or amoCRM manager path under the held lease."""
+        """Apply foundation inbound, VK observer, or amoCRM manager path."""
         # Fail closed: never route mismatched channel/event pairs into synthetic
         # client inbound (AMO-01A / M1).
         if claim.channel == "amocrm":
@@ -169,6 +171,14 @@ class IngressWorker:
                 )
                 raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
             return await self._process_amocrm_manager(claim)
+        if claim.channel == "vk":
+            if claim.event_type != IngressEventType.VK_CLIENT_MESSAGE.value:
+                await self.fail_claimed(
+                    claim,
+                    error_code="INGRESS_CHANNEL_EVENT_MISMATCH",
+                )
+                raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
+            return await self._process_vk_client(claim)
         if (
             claim.channel != "synthetic"
             or claim.event_type != IngressEventType.SYNTHETIC_MESSAGE.value
@@ -199,6 +209,33 @@ class IngressWorker:
                     duplicate_business=accept.duplicate,
                     inbox_id=accept.inbox.id,
                     outbox_id=accept.outbox.id,
+                    conversation_id=accept.conversation.id,
+                )
+        except StaleIngressLeaseError:
+            raise
+        except Exception as exc:
+            await self.fail_claimed(claim, error_code=type(exc).__name__)
+            raise
+
+    async def _process_vk_client(self, claim: IngressClaim) -> IngressProcessResult:
+        """Observer path: VK conversation + inbox only. No CRM / outbound."""
+
+        inbound = _vk_envelope_to_inbound(claim)
+        try:
+            async with session_scope(self._session_factory) as session:
+                accept = await VkClientInboundService(session).accept(inbound)
+                event = await ingress_repo.complete_with_lease(
+                    session,
+                    event_id=claim.event_id,
+                    lease_token=claim.lease_token,
+                    lease_version=claim.lease_version,
+                )
+                return IngressProcessResult(
+                    event_id=event.id,
+                    status=event.status,
+                    duplicate_business=accept.duplicate,
+                    inbox_id=accept.inbox.id,
+                    outbox_id=None,
                     conversation_id=accept.conversation.id,
                 )
         except StaleIngressLeaseError:
@@ -388,6 +425,29 @@ def _envelope_to_inbound(claim: IngressClaim) -> SyntheticInboundEvent:
         text=text,
         booking=booking,
         action=action,
+    )
+
+
+def _vk_envelope_to_inbound(claim: IngressClaim) -> VkClientInboundEvent:
+    envelope = claim.envelope_json
+    text = envelope.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError("INGRESS_ENVELOPE_INVALID")
+    received_at = None
+    raw_received = envelope.get("received_at")
+    if isinstance(raw_received, str) and raw_received:
+        from datetime import datetime
+
+        try:
+            received_at = datetime.fromisoformat(raw_received)
+        except ValueError as exc:
+            raise ValueError("INGRESS_ENVELOPE_INVALID") from exc
+    return VkClientInboundEvent(
+        channel="vk",
+        external_conversation_id=claim.external_conversation_id,
+        external_message_id=claim.external_event_id,
+        text=text,
+        received_at=received_at,
     )
 
 

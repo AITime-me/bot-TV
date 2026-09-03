@@ -45,6 +45,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260828_35_acquisition_source.py",
     "!alembic/versions/20260828_36_amocrm_oauth_loop.py",
     "!alembic/versions/20260829_37_control_plane.py",
+    "!alembic/versions/20260903_38_vk_client_ingress.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -54,6 +55,10 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/channels/vk_master_webhook.py",
     "!app/channels/vk_master_reply.py",
     "!app/channels/vk_master_http.py",
+    "!app/channels/vk_client_config.py",
+    "!app/channels/vk_client_types.py",
+    "!app/channels/vk_client_webhook.py",
+    "!app/channels/vk_client_http.py",
     "!app/config.py",
     "!app/core/",
     "!app/core/__init__.py",
@@ -237,6 +242,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/schemas/self_booking_confirm_action.py",
     "!app/schemas/closed_test.py",
     "!app/schemas/amocrm_manager_ingress.py",
+    "!app/schemas/vk_client_ingress.py",
     "!app/services/",
     "!app/services/__init__.py",
     "!app/services/amocrm_adapter.py",
@@ -291,6 +297,8 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/shadow_draft_eval.py",
     "!app/services/amocrm_crm_oauth_lifecycle_worker.py",
     "!app/services/vk_master_adapter.py",
+    "!app/services/vk_client_ingress.py",
+    "!app/services/vk_client_inbound.py",
     "!app/services/outbound_arbiter.py",
     "!app/services/reply_outbound.py",
     "!app/services/synthetic_outbound.py",
@@ -341,6 +349,18 @@ CURSOR29_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/channels/vk_master_reply.py",
     "app/channels/vk_master_http.py",
     "app/services/vk_master_adapter.py",
+)
+
+# VK CLIENT shadow observer ingress paths that must be present in Docker build.
+VK_CLIENT_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260903_38_vk_client_ingress.py",
+    "app/channels/vk_client_config.py",
+    "app/channels/vk_client_types.py",
+    "app/channels/vk_client_webhook.py",
+    "app/channels/vk_client_http.py",
+    "app/schemas/vk_client_ingress.py",
+    "app/services/vk_client_ingress.py",
+    "app/services/vk_client_inbound.py",
 )
 
 # CURSOR-30 Identity Resolution paths that must be present in Docker build context.

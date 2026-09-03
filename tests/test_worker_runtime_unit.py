@@ -466,6 +466,7 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         CURSOR28_DOCKER_RUNTIME_PATHS,
         CURSOR29_DOCKER_RUNTIME_PATHS,
         CURSOR30_DOCKER_RUNTIME_PATHS,
+        VK_CLIENT_DOCKER_RUNTIME_PATHS,
         collect_app_import_graph_modules,
         is_included_in_docker_build_context,
     )
@@ -483,6 +484,10 @@ def test_docker_runtime_has_real_health_restart_and_secret_exclusions() -> None:
         assert is_included_in_docker_build_context(rel, lines) is True
         assert (_REPO_ROOT / rel).is_file()
     for rel in CURSOR30_DOCKER_RUNTIME_PATHS:
+        assert f"!{rel}" in allow_rules
+        assert is_included_in_docker_build_context(rel, lines) is True
+        assert (_REPO_ROOT / rel).is_file()
+    for rel in VK_CLIENT_DOCKER_RUNTIME_PATHS:
         assert f"!{rel}" in allow_rules
         assert is_included_in_docker_build_context(rel, lines) is True
         assert (_REPO_ROOT / rel).is_file()

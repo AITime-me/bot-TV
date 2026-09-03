@@ -74,6 +74,20 @@ _EXPECTED_CHECKS_20 = {
     "ck_amocrm_chat_bindings_chat_id_nonempty": "char_length(amocrm_chat_id) >= 1",
 }
 
+_EXPECTED_CHECKS_38 = {
+    "ck_conversations_channel": "channel IN ('synthetic', 'vk')",
+    "ck_inbox_channel": "channel IN ('synthetic', 'vk')",
+    "ck_ingress_channel": "channel IN ('synthetic', 'amocrm', 'vk')",
+    "ck_ingress_event_type": (
+        "event_type IN ('SYNTHETIC_MESSAGE', 'AMOCRM_MANAGER_MESSAGE', 'VK_CLIENT_MESSAGE')"
+    ),
+    "ck_ingress_channel_event_pairing": (
+        "(channel = 'synthetic' AND event_type = 'SYNTHETIC_MESSAGE') OR "
+        "(channel = 'amocrm' AND event_type = 'AMOCRM_MANAGER_MESSAGE') OR "
+        "(channel = 'vk' AND event_type = 'VK_CLIENT_MESSAGE')"
+    ),
+}
+
 _EXPECTED_UNIQUES_20 = {
     "uq_amocrm_chat_bindings_conversation_id",
     "uq_amocrm_chat_bindings_amocrm_chat_id",
@@ -493,6 +507,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260829_37_control_plane"].down_revision
         == "20260828_36_amocrm_oauth_loop"
     )
+    assert "20260903_38_vk_client_ingress" in by_id
+    assert (
+        by_id["20260903_38_vk_client_ingress"].down_revision
+        == "20260829_37_control_plane"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -524,6 +543,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260828_35_acquisition_source",
         "20260828_36_amocrm_oauth_loop",
         "20260829_37_control_plane",
+        "20260903_38_vk_client_ingress",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -581,7 +601,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260828_36_amocrm_oauth_loop") <= 32
     assert "20260829_37_control_plane" in revision_ids
     assert len("20260829_37_control_plane") <= 32
-    assert heads == ["20260829_37_control_plane"]
+    assert "20260903_38_vk_client_ingress" in revision_ids
+    assert len("20260903_38_vk_client_ingress") <= 32
+    assert heads == ["20260903_38_vk_client_ingress"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -672,6 +694,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_37 = (
         root / "alembic" / "versions" / "20260829_37_control_plane.py"
     ).read_text(encoding="utf-8")
+    migration_38 = (
+        root / "alembic" / "versions" / "20260903_38_vk_client_ingress.py"
+    ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
     ).read_text(encoding="utf-8")
@@ -728,10 +753,14 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert set(_EXPECTED_CHECKS_24) <= set(model_checks)
     assert set(_EXPECTED_CHECKS_25) <= set(model_checks)
     assert set(_EXPECTED_CHECKS_26) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_38) <= set(model_checks)
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
         assert sql in migration_01a
+        if name in {"ck_conversations_channel", "ck_inbox_channel"}:
+            # 01A historically synthetic-only; VK client ingress widens.
+            continue
         assert model_checks[name] == sql
 
     # 01A historically created the narrow outbox checks; 01C replaces them.
@@ -839,12 +868,27 @@ def test_model_migration_check_and_unique_parity() -> None:
 
     for name, sql in _EXPECTED_CHECKS_20.items():
         assert name in migration_20
+        if name in {
+            "ck_ingress_channel",
+            "ck_ingress_event_type",
+            "ck_ingress_channel_event_pairing",
+        }:
+            # AMO-01A historically; VK client ingress widens again.
+            assert sql in migration_20
+            continue
         assert model_checks[name] == sql
         assert sql in migration_20
 
     for name in _EXPECTED_UNIQUES_20:
         assert name in migration_20
     assert "amocrm_chat_bindings" in migration_20
+
+    for name, sql in _EXPECTED_CHECKS_38.items():
+        assert name in migration_38
+        assert model_checks[name] == sql
+        # Migration may keep long CHECK SQL in a module constant / split literals.
+        for token in re.findall(r"'[A-Za-z0-9_]+'", sql):
+            assert token in migration_38, f"{name} missing {token}"
 
     for name, sql in _EXPECTED_CHECKS_21.items():
         assert name in migration_21

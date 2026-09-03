@@ -24,6 +24,7 @@ from app.db.base import Base
 
 class Channel(str, enum.Enum):
     SYNTHETIC = "synthetic"
+    VK = "vk"
 
 
 class ConversationStatus(str, enum.Enum):
@@ -93,7 +94,7 @@ class Conversation(Base):
             ),
         ),
         CheckConstraint(
-            "channel IN ('synthetic')",
+            "channel IN ('synthetic', 'vk')",
             name="ck_conversations_channel",
         ),
         CheckConstraint(
