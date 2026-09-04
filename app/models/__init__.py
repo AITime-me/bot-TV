@@ -84,6 +84,7 @@ from app.models.acquisition_source_analytics_pending import (
 )
 from app.models.control_plane_snapshot import ControlPlaneSnapshot
 from app.models.integration_circuit_breaker import IntegrationCircuitBreaker
+from app.models.yandex_shadow_draft import YandexShadowDraft
 from app.models.outbox import (
     OUTBOUND_TRANSITIONS,
     DeliveryStatus,
@@ -180,6 +181,7 @@ __all__ = [
     "AcquisitionSourceAnalyticsPending",
     "ControlPlaneSnapshot",
     "CONTROL_PLANE_SNAPSHOT_LOOP",
+    "YandexShadowDraft",
     "MirrorPayloadViolation",
     "OutboxMessage",
     "OUTBOUND_LOOP",

@@ -46,6 +46,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260828_36_amocrm_oauth_loop.py",
     "!alembic/versions/20260829_37_control_plane.py",
     "!alembic/versions/20260903_38_vk_client_ingress.py",
+    "!alembic/versions/20260904_39_shadow_drafts.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -198,6 +199,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/booking_method_analytics_pending.py",
     "!app/models/acquisition_source_analytics_pending.py",
     "!app/models/control_plane_snapshot.py",
+    "!app/models/yandex_shadow_draft.py",
     "!app/models/integration_circuit_breaker.py",
     "!app/models/self_booking_active_offer.py",
     "!app/models/self_booking_pii_admission.py",
@@ -226,6 +228,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/booking_method_analytics_pendings.py",
     "!app/repositories/acquisition_source_analytics_pendings.py",
     "!app/repositories/control_plane_snapshots.py",
+    "!app/repositories/yandex_shadow_drafts.py",
     "!app/repositories/integration_circuit_breakers.py",
     "!app/repositories/self_booking_active_offers.py",
     "!app/repositories/self_booking_pii_admissions.py",
@@ -474,6 +477,7 @@ AI_DIALOGUE_01_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
 )
 
 AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_01_DOCKER_RUNTIME_PATHS + (
+    "alembic/versions/20260904_39_shadow_drafts.py",
     "app/core/text_generation_port.py",
     "app/core/yandex_llm_config.py",
     "app/core/yandex_gpt_http.py",
@@ -482,6 +486,8 @@ AI_DIALOGUE_02_DOCKER_RUNTIME_PATHS: tuple[str, ...] = AI_DIALOGUE_01_DOCKER_RUN
     "app/core/shadow_draft_gate.py",
     "app/core/shadow_draft_prompt.py",
     "app/core/shadow_draft_context_selection.py",
+    "app/models/yandex_shadow_draft.py",
+    "app/repositories/yandex_shadow_drafts.py",
     "app/services/shadow_draft_generation.py",
     "app/services/shadow_draft_ingress_hook.py",
 )

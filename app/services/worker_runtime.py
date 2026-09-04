@@ -479,6 +479,8 @@ def build_default_loop_specs(
                 try:
                     await run_shadow_draft_after_client_inbound(
                         conversation_id=result.conversation_id,
+                        inbox_message_id=result.inbox_id,
+                        session_factory=session_factory,
                         builder=shadow_runtime_builder,
                         service=shadow_draft_service,
                     )

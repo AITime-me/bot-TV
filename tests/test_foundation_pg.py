@@ -55,6 +55,7 @@ _FOUNDATION_TABLES = (
     "amocrm_crm_oauth_tokens",
     "amocrm_entity_links",
     "control_plane_snapshots",
+    "yandex_shadow_drafts",
 )
 
 # PostgreSQL rewrites `col IN (...)` into `= 'x'::text` or `= ANY (ARRAY[...])`
@@ -460,6 +461,46 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         "payload",
         frozenset({"object"}),
     ),
+    "ck_yandex_shadow_drafts_disposition": (
+        "disposition",
+        frozenset({"REPLY", "HANDOFF", "DENIED", "PROVIDER_ERROR"}),
+    ),
+    "ck_yandex_shadow_drafts_reason_code": (
+        "reason_code",
+        frozenset(
+            {
+                "OK",
+                "GATE_DENIED",
+                "SETTINGS_NOT_USABLE",
+                "KNOWLEDGE_NOT_USABLE",
+                "LIVE_FACTS_NOT_USABLE",
+                "GENERATION_NOT_ALLOWED",
+                "PROVIDER_NOT_CONFIGURED",
+                "SHADOW_FEATURE_DISABLED",
+                "HANDOFF_ACTIVE",
+                "MANAGER_TAKEOVER",
+                "EMERGENCY_LOCK",
+                "CONTEXT_NOT_READY",
+                "PROMPT_BUDGET_EXCEEDED",
+                "PROVIDER_TIMEOUT",
+                "PROVIDER_TRANSPORT_ERROR",
+                "PROVIDER_REMOTE_REJECTED",
+                "PROVIDER_RESPONSE_INVALID",
+                "PROVIDER_RESPONSE_TOO_LARGE",
+                "PROVIDER_EMPTY",
+                "PROVIDER_CONFIG_INVALID",
+                "PROVIDER_ERROR",
+            }
+        ),
+    ),
+    "ck_yandex_shadow_drafts_provenance_object": (
+        "provenance_json",
+        frozenset({"object"}),
+    ),
+    "ck_yandex_shadow_drafts_metadata_object": (
+        "generation_metadata_json",
+        frozenset({"object"}),
+    ),
 }
 
 _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
@@ -510,6 +551,7 @@ _EXPECTED_UNIQUES: dict[str, tuple[str, ...]] = {
     "uq_amocrm_message_projections_integration_msgid": ("integration_msgid",),
     "uq_amocrm_message_projections_amocrm_message_id": ("amocrm_message_id",),
     "uq_amocrm_crm_oauth_tokens_connection_scope": ("connection_scope",),
+    "uq_yandex_shadow_drafts_inbox_message_id": ("inbox_message_id",),
 }
 
 _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
@@ -539,6 +581,10 @@ _EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     ),
     "ix_worker_heartbeats_last_succeeded_at": ("last_succeeded_at",),
     "ix_control_plane_snapshots_verified_at": ("verified_at",),
+    "ix_yandex_shadow_drafts_conversation_created": (
+        "conversation_id",
+        "created_at",
+    ),
     "ix_conversation_ops_events_conversation_created": (
         "conversation_id",
         "created_at",

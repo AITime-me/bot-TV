@@ -68,6 +68,7 @@ Thumbs.db
 !alembic/versions/20260828_36_amocrm_oauth_loop.py
 !alembic/versions/20260829_37_control_plane.py
 !alembic/versions/20260903_38_vk_client_ingress.py
+!alembic/versions/20260904_39_shadow_drafts.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -220,6 +221,7 @@ Thumbs.db
 !app/models/booking_method_analytics_pending.py
 !app/models/acquisition_source_analytics_pending.py
 !app/models/control_plane_snapshot.py
+!app/models/yandex_shadow_draft.py
 !app/models/integration_circuit_breaker.py
 !app/models/self_booking_active_offer.py
 !app/models/self_booking_pii_admission.py
@@ -248,6 +250,7 @@ Thumbs.db
 !app/repositories/booking_method_analytics_pendings.py
 !app/repositories/acquisition_source_analytics_pendings.py
 !app/repositories/control_plane_snapshots.py
+!app/repositories/yandex_shadow_drafts.py
 !app/repositories/integration_circuit_breakers.py
 !app/repositories/self_booking_active_offers.py
 !app/repositories/self_booking_pii_admissions.py

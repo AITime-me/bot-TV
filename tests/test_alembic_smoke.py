@@ -39,6 +39,7 @@ from app.models import (
     BookingMethodAnalyticsPending,
     AcquisitionSourceAnalyticsPending,
     WorkerHeartbeat,
+    YandexShadowDraft,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +87,34 @@ _EXPECTED_CHECKS_38 = {
         "(channel = 'amocrm' AND event_type = 'AMOCRM_MANAGER_MESSAGE') OR "
         "(channel = 'vk' AND event_type = 'VK_CLIENT_MESSAGE')"
     ),
+}
+
+_EXPECTED_CHECKS_39 = {
+    "ck_yandex_shadow_drafts_disposition": (
+        "disposition IN ('REPLY', 'HANDOFF', 'DENIED', 'PROVIDER_ERROR')"
+    ),
+    "ck_yandex_shadow_drafts_reason_code": (
+        "reason_code IN ("
+        "'OK', 'GATE_DENIED', 'SETTINGS_NOT_USABLE', 'KNOWLEDGE_NOT_USABLE', "
+        "'LIVE_FACTS_NOT_USABLE', 'GENERATION_NOT_ALLOWED', "
+        "'PROVIDER_NOT_CONFIGURED', 'SHADOW_FEATURE_DISABLED', "
+        "'HANDOFF_ACTIVE', 'MANAGER_TAKEOVER', 'EMERGENCY_LOCK', "
+        "'CONTEXT_NOT_READY', 'PROMPT_BUDGET_EXCEEDED', "
+        "'PROVIDER_TIMEOUT', 'PROVIDER_TRANSPORT_ERROR', "
+        "'PROVIDER_REMOTE_REJECTED', 'PROVIDER_RESPONSE_INVALID', "
+        "'PROVIDER_RESPONSE_TOO_LARGE', 'PROVIDER_EMPTY', "
+        "'PROVIDER_CONFIG_INVALID', 'PROVIDER_ERROR')"
+    ),
+    "ck_yandex_shadow_drafts_provenance_object": (
+        "jsonb_typeof(provenance_json) = 'object'"
+    ),
+    "ck_yandex_shadow_drafts_metadata_object": (
+        "jsonb_typeof(generation_metadata_json) = 'object'"
+    ),
+}
+
+_EXPECTED_UNIQUES_39 = {
+    "uq_yandex_shadow_drafts_inbox_message_id",
 }
 
 _EXPECTED_UNIQUES_20 = {
@@ -331,6 +360,7 @@ def test_alembic_metadata_imports() -> None:
     assert AmocrmEntityLink.__tablename__ == "amocrm_entity_links"
     assert IdentityReviewCase.__tablename__ == "identity_review_cases"
     assert ControlPlaneSnapshot.__tablename__ == "control_plane_snapshots"
+    assert YandexShadowDraft.__tablename__ == "yandex_shadow_drafts"
     table_names = set(Base.metadata.tables)
     assert table_names == {
         "conversations",
@@ -362,6 +392,7 @@ def test_alembic_metadata_imports() -> None:
         "amocrm_entity_links",
         "identity_review_cases",
         "control_plane_snapshots",
+        "yandex_shadow_drafts",
     }
 
 
@@ -512,6 +543,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260903_38_vk_client_ingress"].down_revision
         == "20260829_37_control_plane"
     )
+    assert "20260904_39_shadow_drafts" in by_id
+    assert (
+        by_id["20260904_39_shadow_drafts"].down_revision
+        == "20260903_38_vk_client_ingress"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -544,6 +580,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260828_36_amocrm_oauth_loop",
         "20260829_37_control_plane",
         "20260903_38_vk_client_ingress",
+        "20260904_39_shadow_drafts",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -603,7 +640,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260829_37_control_plane") <= 32
     assert "20260903_38_vk_client_ingress" in revision_ids
     assert len("20260903_38_vk_client_ingress") <= 32
-    assert heads == ["20260903_38_vk_client_ingress"]
+    assert "20260904_39_shadow_drafts" in revision_ids
+    assert len("20260904_39_shadow_drafts") <= 32
+    assert heads == ["20260904_39_shadow_drafts"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -697,6 +736,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_38 = (
         root / "alembic" / "versions" / "20260903_38_vk_client_ingress.py"
     ).read_text(encoding="utf-8")
+    migration_39 = (
+        root / "alembic" / "versions" / "20260904_39_shadow_drafts.py"
+    ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
     ).read_text(encoding="utf-8")
@@ -754,6 +796,8 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert set(_EXPECTED_CHECKS_25) <= set(model_checks)
     assert set(_EXPECTED_CHECKS_26) <= set(model_checks)
     assert set(_EXPECTED_CHECKS_38) <= set(model_checks)
+    assert set(_EXPECTED_CHECKS_39) <= set(model_checks)
+    assert _EXPECTED_UNIQUES_39 <= model_uniques
 
     for name, sql in _EXPECTED_CHECKS_01A_STABLE.items():
         assert name in migration_01a
@@ -931,6 +975,25 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert "amocrm_crm_oauth_tokens" in migration_23
     assert "control_plane_snapshots" in migration_37
     assert "'control_plane_snapshot'" in migration_37
+    for name, sql in _EXPECTED_CHECKS_39.items():
+        assert name in migration_39
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_39, f"{name} missing {token}"
+        if "'" not in sql:
+            assert sql in migration_39
+    for name in _EXPECTED_UNIQUES_39:
+        assert name in migration_39
+    assert "yandex_shadow_drafts" in migration_39
+    assert "ix_yandex_shadow_drafts_conversation_created" in migration_39
+    for forbidden in (
+        "reply_plans",
+        "outbox_messages",
+        "amocrm_mirror",
+        "create_client_reply_plan",
+        "INTERNAL_DRAFT",
+    ):
+        assert forbidden not in migration_39
     for forbidden in ("AMOCRM_CHAT", "channel_secret", "body_text"):
         assert forbidden not in migration_23
 
