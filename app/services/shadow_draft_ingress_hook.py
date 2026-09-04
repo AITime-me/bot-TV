@@ -13,13 +13,15 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.shadow_draft_types import ShadowDraftReply
+from app.core.shadow_draft_types import ShadowAssistantTurn, ShadowDraftReply
 from app.db.session import session_scope
 from app.repositories import yandex_shadow_drafts as shadow_draft_repo
 from app.services.runtime_context_builder import RuntimeContextBuilder
 from app.services.shadow_draft_generation import ShadowDraftGenerationService
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_SHADOW_ASSISTANT_TURNS: tuple[ShadowAssistantTurn, ...] = ()
 
 
 def _log_hook(event: str, **fields: object) -> None:
@@ -31,6 +33,26 @@ def _log_hook(event: str, **fields: object) -> None:
             logger.info("shadow_draft event=%s", event)
     except Exception:
         return
+
+
+async def _load_prior_shadow_assistant_turns_fail_soft(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    conversation_id: UUID,
+    inbox_message_id: UUID,
+) -> tuple[ShadowAssistantTurn, ...]:
+    """Read-only prior virtual assistants. Never raises; never logs text."""
+
+    try:
+        async with session_scope(session_factory) as session:
+            return await shadow_draft_repo.list_prior_textful_assistant_turns(
+                session,
+                conversation_id=conversation_id,
+                current_inbox_message_id=inbox_message_id,
+            )
+    except Exception as exc:
+        _log_hook("shadow_history_load_failed", error_type=type(exc).__name__)
+        return _EMPTY_SHADOW_ASSISTANT_TURNS
 
 
 async def _persist_shadow_draft_fail_soft(
@@ -70,8 +92,10 @@ async def run_shadow_draft_after_client_inbound(
 ) -> ShadowDraftReply | None:
     """Build runtime context, generate shadow draft, persist QA copy.
 
-    Observability uses ``diagnostic_summary`` only (no raw client/generated text).
-    Persistence failures never change ingress outcomes.
+    When the shadow feature is enabled, loads prior textful drafts for
+    shadow-only multi-turn continuity before generation. Observability uses
+    ``diagnostic_summary`` only (no raw client/generated text). Persistence
+    failures never change ingress outcomes.
     """
 
     try:
@@ -83,8 +107,19 @@ async def run_shadow_draft_after_client_inbound(
         )
         return None
 
+    shadow_assistant_turns = _EMPTY_SHADOW_ASSISTANT_TURNS
+    if getattr(service, "shadow_feature_enabled", False) is True:
+        shadow_assistant_turns = await _load_prior_shadow_assistant_turns_fail_soft(
+            session_factory=session_factory,
+            conversation_id=conversation_id,
+            inbox_message_id=inbox_message_id,
+        )
+
     try:
-        reply = service.generate_from_build(build)
+        reply = service.generate_from_build(
+            build,
+            shadow_assistant_turns=shadow_assistant_turns,
+        )
     except Exception as exc:
         _log_hook(
             "ingress_hook_generate_error",

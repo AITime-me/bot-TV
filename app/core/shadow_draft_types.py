@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Mapping
+from uuid import UUID
 
 
 class ShadowDraftDisposition(StrEnum):
@@ -87,6 +88,35 @@ class ShadowDraftProvenanceSummary:
             f"knowledge={self.knowledge_publication_id!r}, "
             f"kb_keys={len(self.selected_knowledge_keys)!r}, "
             f"turns={self.history_turn_count!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ShadowAssistantTurn:
+    """Shadow-only virtual assistant turn for multi-turn QA continuity.
+
+    Not a shared RuntimeConversationTurn. Never written to inbox/manager/outbox.
+    """
+
+    conversation_event_seq: int
+    inbox_message_id: UUID
+    text: str
+
+    def __post_init__(self) -> None:
+        if type(self.conversation_event_seq) is not int or self.conversation_event_seq < 1:
+            raise ValueError("conversation_event_seq invalid")
+        if not isinstance(self.inbox_message_id, UUID):
+            raise ValueError("inbox_message_id invalid")
+        if type(self.text) is not str or not self.text:
+            raise ValueError("text invalid")
+
+    def __repr__(self) -> str:
+        return (
+            "ShadowAssistantTurn("
+            f"conversation_event_seq={self.conversation_event_seq!r}, "
+            f"inbox_message_id={self.inbox_message_id!r}, "
+            f"text_len={len(self.text)!r}, "
+            "text=<redacted>)"
         )
 
 

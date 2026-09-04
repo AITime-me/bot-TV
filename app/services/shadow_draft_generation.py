@@ -24,6 +24,7 @@ from app.core.shadow_draft_gate import (
 )
 from app.core.shadow_draft_prompt import compile_shadow_draft_messages
 from app.core.shadow_draft_types import (
+    ShadowAssistantTurn,
     ShadowDraftDisposition,
     ShadowDraftProvenanceSummary,
     ShadowDraftReasonCode,
@@ -34,6 +35,8 @@ from app.core.yandex_gpt_http import YandexGptHttpError
 from app.core.yandex_llm_config import YandexLlmConfigError
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_SHADOW_ASSISTANT_TURNS: tuple[ShadowAssistantTurn, ...] = ()
 
 _SHADOW_FEATURE_ENV = "YANDEX_SHADOW_DRAFT_ENABLED"
 _SHADOW_ALLOW_UNDER_LOCK_ENV = "YANDEX_SHADOW_ALLOW_UNDER_EMERGENCY_LOCK"
@@ -174,6 +177,9 @@ class ShadowDraftGenerationService:
         generation_allowed: bool,
         readiness=None,
         build_reasons=None,
+        shadow_assistant_turns: tuple[ShadowAssistantTurn, ...] = (
+            _EMPTY_SHADOW_ASSISTANT_TURNS
+        ),
     ) -> ShadowDraftReply:
         gate = evaluate_shadow_draft_gate(
             context=context,
@@ -184,11 +190,19 @@ class ShadowDraftGenerationService:
             allow_under_emergency_lock=self.allow_under_emergency_lock,
             build_reasons=build_reasons,
         )
-        return self._run(context=context, gate=gate)
+        return self._run(
+            context=context,
+            gate=gate,
+            shadow_assistant_turns=shadow_assistant_turns,
+        )
 
     def generate_from_build(
         self,
         build: RuntimeContextBuildResult,
+        *,
+        shadow_assistant_turns: tuple[ShadowAssistantTurn, ...] = (
+            _EMPTY_SHADOW_ASSISTANT_TURNS
+        ),
     ) -> ShadowDraftReply:
         gate = evaluate_shadow_draft_gate_from_build(
             build,
@@ -196,13 +210,20 @@ class ShadowDraftGenerationService:
             shadow_feature_enabled=self.shadow_feature_enabled,
             allow_under_emergency_lock=self.allow_under_emergency_lock,
         )
-        return self._run(context=build.context, gate=gate)
+        return self._run(
+            context=build.context,
+            gate=gate,
+            shadow_assistant_turns=shadow_assistant_turns,
+        )
 
     def _run(
         self,
         *,
         context: TeyaRuntimeContext | None,
         gate: ShadowDraftGateDecision,
+        shadow_assistant_turns: tuple[ShadowAssistantTurn, ...] = (
+            _EMPTY_SHADOW_ASSISTANT_TURNS
+        ),
     ) -> ShadowDraftReply:
         if not gate.allowed:
             _log_safe("denied", gate.reason_code.value)
@@ -211,7 +232,10 @@ class ShadowDraftGenerationService:
         assert context is not None
         assert self.port is not None
         try:
-            messages = compile_shadow_draft_messages(context)
+            messages = compile_shadow_draft_messages(
+                context,
+                shadow_assistant_turns=shadow_assistant_turns,
+            )
         except ValueError as exc:
             code = str(exc) if str(exc) in ShadowDraftReasonCode.__members__ else (
                 ShadowDraftReasonCode.CONTEXT_NOT_READY.value
