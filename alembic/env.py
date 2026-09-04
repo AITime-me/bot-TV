@@ -25,6 +25,7 @@ from app.models import (  # noqa: F401 — register metadata
     OutboxMessage,
     ReplyPlan,
     WorkerHeartbeat,
+    YandexShadowDraft,
 )
 
 config = context.config

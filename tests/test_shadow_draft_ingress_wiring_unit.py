@@ -355,7 +355,13 @@ def test_strict_gate_unchanged_without_override() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingress_hook_calls_builder_and_generate_once() -> None:
+async def test_ingress_hook_calls_builder_and_generate_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.shadow_draft_ingress_hook._persist_shadow_draft_fail_soft",
+        AsyncMock(),
+    )
     conversation_id = uuid4()
     port = _FakePort("hook-ok")
     service = ShadowDraftGenerationService(
@@ -369,6 +375,8 @@ async def test_ingress_hook_calls_builder_and_generate_once() -> None:
 
     reply = await run_shadow_draft_after_client_inbound(
         conversation_id=conversation_id,
+        inbox_message_id=uuid4(),
+        session_factory=MagicMock(),
         builder=builder,
         service=service,
     )
@@ -379,9 +387,15 @@ async def test_ingress_hook_calls_builder_and_generate_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingress_hook_provider_exception_is_fail_soft() -> None:
+async def test_ingress_hook_provider_exception_is_fail_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.core.yandex_gpt_http import YandexGptHttpError
 
+    monkeypatch.setattr(
+        "app.services.shadow_draft_ingress_hook._persist_shadow_draft_fail_soft",
+        AsyncMock(),
+    )
     conversation_id = uuid4()
     port = _FakePort()
     port.error = YandexGptHttpError("TIMEOUT")
@@ -397,6 +411,8 @@ async def test_ingress_hook_provider_exception_is_fail_soft() -> None:
 
     reply = await run_shadow_draft_after_client_inbound(
         conversation_id=conversation_id,
+        inbox_message_id=uuid4(),
+        session_factory=MagicMock(),
         builder=builder,
         service=service,
     )
@@ -416,6 +432,8 @@ async def test_ingress_hook_builder_exception_returns_none() -> None:
 
     reply = await run_shadow_draft_after_client_inbound(
         conversation_id=uuid4(),
+        inbox_message_id=uuid4(),
+        session_factory=MagicMock(),
         builder=builder,
         service=service,
     )

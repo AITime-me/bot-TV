@@ -206,6 +206,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_yandex_shadow_drafts = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.yandex_shadow_drafts') "
+                    "IS NOT NULL"
+                )
+            )
             has_circuit_breakers = await session.scalar(
                 text(
                     "SELECT to_regclass('public.integration_circuit_breakers') "
@@ -213,6 +219,8 @@ async def truncate_foundation_tables(
                 )
             )
             tables = ["outbox_messages", "inbox_messages", "conversations"]
+            if has_yandex_shadow_drafts:
+                tables.insert(0, "yandex_shadow_drafts")
             if has_reply_plans:
                 tables.insert(0, "reply_plans")
             if has_mirror_jobs:
