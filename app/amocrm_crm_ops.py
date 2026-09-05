@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import json
 import logging
+import os
 import sys
 from collections.abc import Mapping, Sequence
 
@@ -100,6 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
     refresh_terminal = sub.add_parser("controlled-refresh-terminal-move", help="Move one terminal REFRESH lead to the same terminal SALON status.")
     refresh_terminal.add_argument("--lead-id", required=True, type=int)
     refresh_terminal.add_argument("--apply", action="store_true")
+    fenced = sub.add_parser("fenced-on-demand-write", help="One owner-invoked lead/task PATCH plan from stdin.")
+    fenced.add_argument("--apply", action="store_true")
     reconcile.add_argument(
         "--confirmed-deal-id",
         required=True,
@@ -192,6 +196,21 @@ async def _run(
         elif args.command == "controlled-refresh-terminal-move":
             receipt = await service.run_controlled_refresh_terminal_move(lead_id=args.lead_id, apply=args.apply)
             print(f"controlled_refresh_terminal_move lead_id={receipt.lead_id} outcome={receipt.outcome} error_code={receipt.error_code or '-'}")
+            return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
+        elif args.command == "fenced-on-demand-write":
+            # Payload stays off argv. This per-run opt-in is absent from API,
+            # worker and normal compose startup, so it cannot become a writer.
+            try:
+                plan = json.loads(sys.stdin.read())
+            except ValueError:
+                print("fenced_on_demand_write outcome=REFUSED error_code=FENCED_WRITE_PLAN_INVALID")
+                return 1
+            receipt = await service.run_fenced_on_demand_write(
+                plan=plan,
+                apply=args.apply,
+                enabled=os.environ.get("AMOCRM_CRM_ON_DEMAND_WRITE_ENABLED") == "true",
+            )
+            print(f"fenced_on_demand_write outcome={receipt.outcome} kind={receipt.kind or '-'} entity_id={receipt.entity_id or '-'} error_code={receipt.error_code or '-'}")
             return 0 if receipt.outcome in {"APPLIED", "DRY_RUN"} else 1
         else:
             return 2
