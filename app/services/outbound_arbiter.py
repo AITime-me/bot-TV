@@ -177,6 +177,27 @@ class OutboundArbiter:
             await self._fail_admitted_delivery(claim, permanent=True, now=now)
             raise OutboundArbiterDenied(result.error_code or "TRANSPORT_PERMANENT")
 
+        # Persist VK provider message id before DELIVERED to shrink
+        # callback-vs-receipt race for own-echo detection.
+        if (
+            claim.destination_type == DestinationType.VK_CLIENT_OUTBOUND.value
+            and type(result.provider_message_id) is int
+            and result.provider_message_id > 0
+        ):
+            async with session_scope(self._session_factory) as session:
+                await conversation_repo.lock_for_update(
+                    session,
+                    conversation_id=claim.conversation_id,
+                )
+                await outbound_repo.set_vk_provider_message_id_with_lease(
+                    session,
+                    outbound_id=claim.outbound_id,
+                    lease_token=claim.lease_token,
+                    lease_version=claim.lease_version,
+                    provider_message_id=result.provider_message_id,
+                    now=now,
+                )
+
         async with session_scope(self._session_factory) as session:
             # Preserve global lock order even though manager ownership can no
             # longer cancel an ADMITTED row.
@@ -190,6 +211,7 @@ class OutboundArbiter:
                 lease_token=claim.lease_token,
                 lease_version=claim.lease_version,
                 now=now,
+                provider_message_id=result.provider_message_id,
             )
             # SELF-BOOKING-COMMAND-03C: same UoW as mark_delivered.
             # OFFER_SLOTS bind failures must roll back DELIVERED (no swallow).
@@ -308,7 +330,10 @@ class OutboundArbiter:
             outbound_id=claim.outbound_id,
         )
         if send_result.outcome is VkClientSendOutcome.SUCCESS:
-            return SyntheticOutboundResult(outcome=SyntheticOutboundOutcome.SUCCESS)
+            return SyntheticOutboundResult(
+                outcome=SyntheticOutboundOutcome.SUCCESS,
+                provider_message_id=send_result.provider_message_id,
+            )
         if send_result.outcome is VkClientSendOutcome.TRANSIENT_ERROR:
             return SyntheticOutboundResult(
                 outcome=SyntheticOutboundOutcome.TRANSIENT_ERROR,

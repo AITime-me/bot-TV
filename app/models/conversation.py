@@ -235,6 +235,10 @@ class Conversation(Base):
         BigInteger,
         nullable=True,
     )
+    vk_client_external_reply_hwm: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
     handoff_deadline_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

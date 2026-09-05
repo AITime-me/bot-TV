@@ -9,6 +9,7 @@ from typing import Final
 from app.channels.vk_client_config import VkClientCallbackConfig
 from app.channels.vk_client_types import (
     VkClientNormalizedMessage,
+    VkClientNormalizedMessageReply,
     VkClientWebhookKind,
     VkClientWebhookResult,
     utc_from_unix,
@@ -58,6 +59,18 @@ def parse_vk_client_callback(
         return VkClientWebhookResult(
             kind=VkClientWebhookKind.CONFIRMATION,
             confirmation_response=config.confirmation,
+        )
+
+    if event_type == "message_reply":
+        reply = _extract_private_message_reply(
+            payload.get("object"),
+            group_id=group_id,
+        )
+        if reply is None:
+            return VkClientWebhookResult(kind=VkClientWebhookKind.IGNORED)
+        return VkClientWebhookResult(
+            kind=VkClientWebhookKind.MESSAGE_REPLY,
+            message_reply=reply,
         )
 
     if event_type != "message_new":
@@ -140,6 +153,82 @@ def _extract_private_message(
             conversation_message_id=cmid,
             occurred_at=occurred,
             group_id=group_id,
+        )
+    except ValueError:
+        return None
+
+
+def _extract_private_message_reply(
+    obj: object,
+    *,
+    group_id: int,
+) -> VkClientNormalizedMessageReply | None:
+    """Parse production-proven flat ``object`` for ``message_reply``.
+
+    Proven shape places message fields directly on ``object`` (not
+    ``object.message``). Nested ``object.message`` is accepted as fallback.
+    """
+
+    if type(obj) is not dict:
+        return None
+    message = obj
+    nested = obj.get("message")
+    if type(nested) is dict:
+        message = nested
+
+    out = message.get("out")
+    if out not in (1, True):
+        return None
+    if message.get("action") is not None:
+        return None
+
+    from_id = message.get("from_id")
+    peer_id = message.get("peer_id")
+    if type(from_id) is not int or isinstance(from_id, bool):
+        return None
+    if type(peer_id) is not int or isinstance(peer_id, bool) or peer_id <= 0:
+        return None
+    # Community outgoing: from_id == -group_id; peer is private user id.
+    if from_id != -group_id:
+        return None
+    # Private user peer only (no chat/channel peer ids).
+    if peer_id >= 2_000_000_000:
+        return None
+
+    cmid = message.get(_STABLE_MESSAGE_ID_FIELD)
+    if type(cmid) is not int or isinstance(cmid, bool) or cmid <= 0:
+        return None
+
+    provider_id = message.get("id")
+    if type(provider_id) is not int or isinstance(provider_id, bool) or provider_id <= 0:
+        return None
+
+    occurred = utc_from_unix(message.get("date"))
+    if occurred is None:
+        return None
+
+    random_id = message.get("random_id")
+    if random_id is None:
+        random_value: int | None = None
+    elif type(random_id) is int and not isinstance(random_id, bool) and random_id >= 0:
+        random_value = random_id
+    else:
+        return None
+
+    payload = message.get("payload")
+    # Accept dict/str/None only — never coerce free-form structures.
+    if payload is not None and type(payload) not in (dict, str):
+        payload = None
+
+    try:
+        return VkClientNormalizedMessageReply(
+            group_id=group_id,
+            peer_id=peer_id,
+            conversation_message_id=cmid,
+            provider_message_id=provider_id,
+            occurred_at=occurred,
+            random_id=random_value,
+            payload=payload,
         )
     except ValueError:
         return None

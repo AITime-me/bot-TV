@@ -111,6 +111,82 @@ class VkClientIngressEvent(BaseModel):
         return self.__repr__()
 
 
+class VkClientMessageReplyIngressEvent(BaseModel):
+    """Durable technical envelope for VK ``message_reply`` (no text/PII)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: Literal["vk"] = IngressChannel.VK.value
+    external_event_id: str = Field(min_length=1, max_length=128)
+    external_conversation_id: str = Field(min_length=1, max_length=128)
+    event_type: Literal["VK_CLIENT_MESSAGE_REPLY"] = (
+        IngressEventType.VK_CLIENT_MESSAGE_REPLY.value
+    )
+    group_id: int = Field(gt=0)
+    peer_id: int = Field(gt=0)
+    conversation_message_id: int = Field(gt=0)
+    provider_message_id: int = Field(gt=0)
+    occurred_at: datetime
+    random_id: int | None = Field(default=None, ge=0)
+    # Bounded technical provenance only (dict or JSON string).
+    payload: dict[str, Any] | str | None = None
+    correlation_id: uuid.UUID | None = None
+
+    @field_validator("external_event_id", "external_conversation_id")
+    @classmethod
+    def _safe_external_id(cls, value: str) -> str:
+        if not value.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("external id must be alphanumeric with -/_")
+        return value
+
+    def correlation_id_or_new(self) -> uuid.UUID:
+        return self.correlation_id if self.correlation_id is not None else uuid.uuid4()
+
+    def safe_envelope(self) -> dict[str, Any]:
+        envelope: dict[str, Any] = {
+            "schema": "vk.client.message_reply.v1",
+            "event_type": self.event_type,
+            "group_id": self.group_id,
+            "peer_id": self.peer_id,
+            "conversation_message_id": self.conversation_message_id,
+            "provider_message_id": self.provider_message_id,
+            "occurred_at": self.occurred_at.astimezone(timezone.utc).isoformat()
+            if self.occurred_at.tzinfo is not None
+            else self.occurred_at.replace(tzinfo=timezone.utc).isoformat(),
+            "external_conversation_id": self.external_conversation_id,
+        }
+        if self.random_id is not None:
+            envelope["random_id"] = self.random_id
+        if self.payload is not None:
+            if type(self.payload) is dict and len(self.payload) <= 8:
+                envelope["payload"] = self.payload
+            elif type(self.payload) is str and 0 < len(self.payload) <= 1000:
+                envelope["payload"] = self.payload
+        return envelope
+
+    def redacted_view(self) -> dict[str, Any]:
+        return {
+            "channel": self.channel,
+            "external_event_id": safe_fingerprint(
+                self.external_event_id,
+                purpose="external_event_id",
+            ),
+            "external_conversation_id": safe_fingerprint(
+                self.external_conversation_id,
+                purpose="external_conversation_id",
+            ),
+            "event_type": self.event_type,
+            "group_id": self.group_id,
+            "payload": "<redacted>" if self.payload is not None else None,
+        }
+
+    def __repr__(self) -> str:
+        return f"VkClientMessageReplyIngressEvent({self.redacted_view()!r})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+
 class VkClientInboundEvent(BaseModel):
     """Normalized VK client inbound for observer persistence."""
 

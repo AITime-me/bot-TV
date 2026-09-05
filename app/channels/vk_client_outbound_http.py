@@ -17,6 +17,9 @@ from enum import Enum
 from typing import Final, Protocol
 
 from app.channels.vk_client_outbound_config import VkClientOutboundConfig
+from app.channels.vk_client_outbound_provenance import (
+    build_vk_outbound_provenance_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,7 @@ class VkClientSendOutcome(str, Enum):
 class VkClientSendResult:
     outcome: VkClientSendOutcome
     error_code: str | None = None
+    provider_message_id: int | None = None
 
 
 def vk_client_random_id_from_outbound_id(outbound_id: uuid.UUID) -> int:
@@ -153,7 +157,16 @@ class VkClientHttpSender:
         if type(outbound_id) is not uuid.UUID:
             return _permanent("VK_CLIENT_OUTBOUND_ID_INVALID")
         assert self._config.access_token is not None
+        if type(self._config.provenance_key) is not str or not self._config.provenance_key:
+            return _permanent("VK_CLIENT_PROVENANCE_KEY_MISSING")
         random_id = vk_client_random_id_from_outbound_id(outbound_id)
+        try:
+            provenance = build_vk_outbound_provenance_payload(
+                outbound_id=outbound_id,
+                provenance_key=self._config.provenance_key,
+            )
+        except ValueError:
+            return _permanent("VK_CLIENT_PROVENANCE_INVALID")
         params = urllib.parse.urlencode(
             {
                 "access_token": self._config.access_token,
@@ -161,6 +174,7 @@ class VkClientHttpSender:
                 "peer_id": str(peer_id),
                 "message": text,
                 "random_id": str(random_id),
+                "payload": provenance,
             }
         )
         url = f"{self._config.api_base_url}/method/messages.send"
@@ -202,8 +216,22 @@ class VkClientHttpSender:
             return _classify_vk_error(payload.get("error"))
         if "response" not in payload:
             return _permanent("VK_CLIENT_RESPONSE_INVALID")
+        provider_message_id = _parse_provider_message_id(payload.get("response"))
+        if provider_message_id is None:
+            return _permanent("VK_CLIENT_RESPONSE_MESSAGE_ID_INVALID")
         _log("VK_CLIENT_SEND_OK")
-        return VkClientSendResult(outcome=VkClientSendOutcome.SUCCESS)
+        return VkClientSendResult(
+            outcome=VkClientSendOutcome.SUCCESS,
+            provider_message_id=provider_message_id,
+        )
+
+
+def _parse_provider_message_id(value: object) -> int | None:
+    """VK messages.send ``response`` is the global message id (positive int)."""
+
+    if type(value) is int and not isinstance(value, bool) and value > 0:
+        return value
+    return None
 
 
 def _classify_vk_error(error: object) -> VkClientSendResult:

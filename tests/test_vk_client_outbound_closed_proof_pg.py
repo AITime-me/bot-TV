@@ -62,6 +62,7 @@ def _outbound_cfg() -> VkClientOutboundConfig:
             "VK_CLIENT_OUTBOUND_PROOF_TRIGGER": _TRIGGER,
             "VK_CLIENT_OUTBOUND_PROOF_REPLY": _REPLY,
             "VK_CLIENT_GROUP_ID": str(_GROUP),
+            "VK_CLIENT_CALLBACK_SECRET": _SECRET,
         }
     )
 
@@ -104,7 +105,11 @@ class _RecordingVkSender:
                 "random_id": vk_client_random_id_from_outbound_id(outbound_id),  # type: ignore[arg-type]
             }
         )
-        return VkClientSendResult(outcome=self.outcome, error_code=self.error_code)
+        return VkClientSendResult(
+            outcome=self.outcome,
+            error_code=self.error_code,
+            provider_message_id=900001 if self.outcome is VkClientSendOutcome.SUCCESS else None,
+        )
 
 
 @pytest_asyncio.fixture(autouse=True)

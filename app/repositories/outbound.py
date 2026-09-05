@@ -445,6 +445,7 @@ async def mark_delivered_with_lease(
     lease_token: uuid.UUID,
     lease_version: int,
     now: datetime | None = None,
+    provider_message_id: int | None = None,
 ) -> OutboxMessage:
     """Finalize a previously admitted outbound after the sink returns success."""
     moment = await resolve_moment(session, now)
@@ -453,6 +454,19 @@ async def mark_delivered_with_lease(
         DeliveryStatus.DELIVERED,
     ):
         raise OutboundStateError("OUTBOUND_TRANSITION_DENIED")
+    values: dict[str, object] = {
+        "delivery_status": DeliveryStatus.DELIVERED.value,
+        "lease_owner": None,
+        "lease_token": None,
+        "lease_until": None,
+        "updated_at": moment,
+    }
+    if (
+        type(provider_message_id) is int
+        and not isinstance(provider_message_id, bool)
+        and provider_message_id > 0
+    ):
+        values["provider_message_id"] = provider_message_id
     stmt = (
         update(OutboxMessage)
         .where(
@@ -462,13 +476,7 @@ async def mark_delivered_with_lease(
             OutboxMessage.lease_token == lease_token,
             OutboxMessage.lease_version == lease_version,
         )
-        .values(
-            delivery_status=DeliveryStatus.DELIVERED.value,
-            lease_owner=None,
-            lease_token=None,
-            lease_until=None,
-            updated_at=moment,
-        )
+        .values(**values)
         .returning(OutboxMessage.id)
     )
     updated = await session.scalar(stmt)
@@ -478,6 +486,116 @@ async def mark_delivered_with_lease(
     if row is None:
         raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
     return row
+
+
+async def set_vk_provider_message_id_with_lease(
+    session: AsyncSession,
+    *,
+    outbound_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_version: int,
+    provider_message_id: int,
+    now: datetime | None = None,
+) -> OutboxMessage:
+    """Persist VK provider message id on ADMITTED row before DELIVERED (race close)."""
+
+    if (
+        type(provider_message_id) is not int
+        or isinstance(provider_message_id, bool)
+        or provider_message_id <= 0
+    ):
+        raise ValueError("PROVIDER_MESSAGE_ID_INVALID")
+    moment = await resolve_moment(session, now)
+    stmt = (
+        update(OutboxMessage)
+        .where(
+            OutboxMessage.id == outbound_id,
+            OutboxMessage.destination_type
+            == DestinationType.VK_CLIENT_OUTBOUND.value,
+            OutboxMessage.delivery_status == DeliveryStatus.ADMITTED.value,
+            OutboxMessage.admitted_at.is_not(None),
+            OutboxMessage.lease_token == lease_token,
+            OutboxMessage.lease_version == lease_version,
+            OutboxMessage.provider_message_id.is_(None),
+        )
+        .values(
+            provider_message_id=provider_message_id,
+            updated_at=moment,
+        )
+        .returning(OutboxMessage.id)
+    )
+    updated = await session.scalar(stmt)
+    if updated is None:
+        row = await get_by_id(session, outbound_id=outbound_id)
+        if (
+            row is not None
+            and row.provider_message_id == provider_message_id
+            and row.lease_token == lease_token
+            and row.lease_version == lease_version
+        ):
+            return row
+        raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
+    row = await get_by_id(session, outbound_id=outbound_id)
+    if row is None:
+        raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
+    return row
+
+
+async def find_vk_outbound_by_provider_message_id(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    provider_message_id: int,
+) -> OutboxMessage | None:
+    if (
+        type(provider_message_id) is not int
+        or isinstance(provider_message_id, bool)
+        or provider_message_id <= 0
+    ):
+        return None
+    stmt = select(OutboxMessage).where(
+        OutboxMessage.conversation_id == conversation_id,
+        OutboxMessage.destination_type == DestinationType.VK_CLIENT_OUTBOUND.value,
+        OutboxMessage.provider_message_id == provider_message_id,
+    )
+    return await session.scalar(stmt)
+
+
+async def find_vk_outbound_by_id(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    outbound_id: uuid.UUID,
+) -> OutboxMessage | None:
+    row = await get_by_id(session, outbound_id=outbound_id)
+    if row is None:
+        return None
+    if row.conversation_id != conversation_id:
+        return None
+    if row.destination_type != DestinationType.VK_CLIENT_OUTBOUND.value:
+        return None
+    return row
+
+
+async def has_admitted_vk_outbound_without_provider_id(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+) -> bool:
+    """True when a send may still be racing receipt persist."""
+
+    stmt = (
+        select(OutboxMessage.id)
+        .where(
+            OutboxMessage.conversation_id == conversation_id,
+            OutboxMessage.destination_type
+            == DestinationType.VK_CLIENT_OUTBOUND.value,
+            OutboxMessage.delivery_status == DeliveryStatus.ADMITTED.value,
+            OutboxMessage.provider_message_id.is_(None),
+        )
+        .limit(1)
+    )
+    return await session.scalar(stmt) is not None
 
 
 async def fail_admitted_delivery_with_lease(
