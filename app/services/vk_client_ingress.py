@@ -164,6 +164,7 @@ def _assert_vk_reply_duplicate_matches(
         "group_id",
         "peer_id",
         "event_type",
+        "provenance",
     ):
         if envelope.get(key) != expected.get(key):
             raise VkClientIngressIdempotencyConflict()

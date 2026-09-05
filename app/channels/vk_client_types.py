@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Final
 
+from app.channels.vk_client_outbound_provenance import (
+    VkReplyProvenanceTechnical,
+)
+
 __all__ = (
     "VK_CLIENT_TEXT_MAX_LEN",
     "VkClientWebhookKind",
@@ -166,7 +170,7 @@ class VkClientNormalizedMessageReply:
     provider_message_id: int
     occurred_at: datetime
     random_id: int | None
-    payload: object | None
+    provenance: VkReplyProvenanceTechnical
 
     def __post_init__(self) -> None:
         if type(self.group_id) is not int or self.group_id <= 0:
@@ -188,6 +192,8 @@ class VkClientNormalizedMessageReply:
             or self.random_id < 0
         ):
             raise ValueError("INVALID_VK_CLIENT_REPLY") from None
+        if type(self.provenance) is not VkReplyProvenanceTechnical:
+            raise ValueError("INVALID_VK_CLIENT_REPLY") from None
 
     @property
     def external_conversation_id(self) -> str:
@@ -205,7 +211,7 @@ class VkClientNormalizedMessageReply:
         )
 
     def technical_envelope(self) -> dict[str, Any]:
-        """Storage-only technical fields — never includes text/raw body."""
+        """Storage-only technical fields — never includes text/raw body/payload."""
 
         envelope: dict[str, Any] = {
             "schema": "vk.client.message_reply.v1",
@@ -216,16 +222,10 @@ class VkClientNormalizedMessageReply:
             "provider_message_id": self.provider_message_id,
             "occurred_at": self.occurred_at.isoformat(),
             "external_conversation_id": self.external_conversation_id,
+            "provenance": self.provenance.to_envelope_fragment(),
         }
         if self.random_id is not None:
             envelope["random_id"] = self.random_id
-        # Bounded provenance only: keep raw payload object if small dict/str,
-        # never text/attachments. Verification reads this field.
-        if self.payload is not None:
-            if type(self.payload) is dict and len(self.payload) <= 8:
-                envelope["payload"] = self.payload
-            elif type(self.payload) is str and 0 < len(self.payload) <= 1000:
-                envelope["payload"] = self.payload
         return envelope
 
     def __repr__(self) -> str:
@@ -235,6 +235,7 @@ class VkClientNormalizedMessageReply:
             "peer_id=<redacted>, "
             "conversation_message_id=<redacted>, "
             "provider_message_id=<redacted>, "
+            f"provenance={self.provenance!r}, "
             f"occurred_at={self.occurred_at.isoformat()!r})"
         )
 

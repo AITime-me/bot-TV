@@ -129,6 +129,7 @@ def _message_to_ingress(message: VkClientNormalizedMessage) -> VkClientIngressEv
 def _reply_to_ingress(
     reply: VkClientNormalizedMessageReply,
 ) -> VkClientMessageReplyIngressEvent:
+    provenance = reply.provenance
     return VkClientMessageReplyIngressEvent(
         channel="vk",
         external_event_id=reply.external_event_id,
@@ -140,5 +141,9 @@ def _reply_to_ingress(
         provider_message_id=reply.provider_message_id,
         occurred_at=reply.occurred_at,
         random_id=reply.random_id,
-        payload=reply.payload if type(reply.payload) in (dict, str) else None,
+        provenance_kind=provenance.kind.value,
+        provenance_v=provenance.v,
+        provenance_ns=provenance.ns,
+        provenance_oid=provenance.oid,
+        provenance_mac=provenance.mac,
     )

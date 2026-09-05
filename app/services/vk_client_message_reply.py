@@ -12,7 +12,9 @@ from app.channels.vk_client_external_takeover_config import (
     VkClientExternalTakeoverConfig,
 )
 from app.channels.vk_client_outbound_provenance import (
-    verify_vk_outbound_provenance_payload,
+    VkReplyPayloadKind,
+    VkReplyProvenanceTechnical,
+    verify_vk_outbound_provenance_technical,
 )
 from app.db.clock import db_statement_now
 from app.db.session import session_scope
@@ -21,6 +23,7 @@ from app.models.conversation import (
     Conversation,
     ConversationStatus,
 )
+from app.models.outbox import DeliveryStatus
 from app.repositories import conversations as conversation_repo
 from app.repositories import outbound as outbound_repo
 from app.repositories import reply_plans as reply_plan_repo
@@ -80,7 +83,9 @@ async def apply_vk_client_message_reply_in_session(
     external_conversation_id = envelope.get("external_conversation_id")
     provider_message_id = envelope.get("provider_message_id")
     conversation_message_id = envelope.get("conversation_message_id")
-    payload = envelope.get("payload")
+    provenance = VkReplyProvenanceTechnical.from_envelope_fragment(
+        envelope.get("provenance")
+    )
     if (
         type(external_conversation_id) is not str
         or not external_conversation_id
@@ -90,6 +95,7 @@ async def apply_vk_client_message_reply_in_session(
         or type(conversation_message_id) is not int
         or isinstance(conversation_message_id, bool)
         or conversation_message_id <= 0
+        or provenance is None
     ):
         raise ValueError("VK_CLIENT_REPLY_ENVELOPE_INVALID")
 
@@ -127,7 +133,7 @@ async def apply_vk_client_message_reply_in_session(
         session,
         conversation=conversation,
         provider_message_id=provider_message_id,
-        payload=payload,
+        provenance=provenance,
         provenance_key=takeover_config.provenance_key,
     )
     if own is VkClientReplyClassification.OWN_ECHO_RACE_RETRY:
@@ -210,37 +216,43 @@ async def _classify_own_echo(
     *,
     conversation: Conversation,
     provider_message_id: int,
-    payload: object,
+    provenance: VkReplyProvenanceTechnical,
     provenance_key: str | None,
 ) -> VkClientReplyClassification:
-    payload_present = (
-        (type(payload) is dict and len(payload) > 0)
-        or (type(payload) is str and len(payload) > 0)
-    )
+    # Foreign/non-Bot-TV payload present → EXTERNAL immediately.
+    if provenance.kind is VkReplyPayloadKind.FOREIGN:
+        return VkClientReplyClassification.EXTERNAL_ACTOR
 
-    # A: authenticated provenance marker (foreign payload never matches).
-    if type(provenance_key) is str and provenance_key:
-        outbound_id = verify_vk_outbound_provenance_payload(
-            payload,
+    # A+B: authenticated candidate must also exact-match durable provider id
+    # (or retry while ADMITTED receipt is still in flight).
+    if provenance.kind is VkReplyPayloadKind.BOT_TV_CANDIDATE:
+        if type(provenance_key) is not str or not provenance_key:
+            return VkClientReplyClassification.EXTERNAL_ACTOR
+        outbound_id = verify_vk_outbound_provenance_technical(
+            provenance,
             provenance_key=provenance_key,
         )
-        if outbound_id is not None:
-            row = await outbound_repo.find_vk_outbound_by_id(
-                session,
-                conversation_id=conversation.id,
-                outbound_id=outbound_id,
-            )
-            if row is not None:
+        if outbound_id is None:
+            # Forged / mac mismatch.
+            return VkClientReplyClassification.EXTERNAL_ACTOR
+        row = await outbound_repo.find_vk_outbound_by_id(
+            session,
+            conversation_id=conversation.id,
+            outbound_id=outbound_id,
+        )
+        if row is None:
+            return VkClientReplyClassification.EXTERNAL_ACTOR
+        if row.provider_message_id is not None:
+            if row.provider_message_id == provider_message_id:
                 return VkClientReplyClassification.OWN_TEYA_ECHO
-            # Marker authenticates but outbound missing for this conversation:
-            # fail closed as external (do not trust orphan marker alone).
             return VkClientReplyClassification.EXTERNAL_ACTOR
-        if payload_present:
-            # Explicit non-Bot-TV payload (e.g. SalesBot known_event) → external.
-            # Do not wait on in-flight own send receipt.
-            return VkClientReplyClassification.EXTERNAL_ACTOR
+        # Receipt not durable yet: only ADMITTED in-flight may retry.
+        if row.delivery_status == DeliveryStatus.ADMITTED.value:
+            return VkClientReplyClassification.OWN_ECHO_RACE_RETRY
+        # Marker replay against old/non-inflight row without matching id.
+        return VkClientReplyClassification.EXTERNAL_ACTOR
 
-    # B: durable provider message id receipt.
+    # B fallback: exact provider message id when payload absent/lost.
     by_id = await outbound_repo.find_vk_outbound_by_provider_message_id(
         session,
         conversation_id=conversation.id,
@@ -249,8 +261,7 @@ async def _classify_own_echo(
     if by_id is not None:
         return VkClientReplyClassification.OWN_TEYA_ECHO
 
-    # Race only when payload absent/unknown and ADMITTED send may still
-    # be persisting provider_message_id. random_id alone is never proof.
+    # ABSENT payload + ADMITTED send without receipt → race retry.
     if await outbound_repo.has_admitted_vk_outbound_without_provider_id(
         session,
         conversation_id=conversation.id,

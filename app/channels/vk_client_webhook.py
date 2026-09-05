@@ -7,6 +7,7 @@ import json
 from typing import Final
 
 from app.channels.vk_client_config import VkClientCallbackConfig
+from app.channels.vk_client_outbound_provenance import classify_vk_reply_payload
 from app.channels.vk_client_types import (
     VkClientNormalizedMessage,
     VkClientNormalizedMessageReply,
@@ -216,9 +217,7 @@ def _extract_private_message_reply(
         return None
 
     payload = message.get("payload")
-    # Accept dict/str/None only — never coerce free-form structures.
-    if payload is not None and type(payload) not in (dict, str):
-        payload = None
+    provenance = classify_vk_reply_payload(payload)
 
     try:
         return VkClientNormalizedMessageReply(
@@ -228,7 +227,7 @@ def _extract_private_message_reply(
             provider_message_id=provider_id,
             occurred_at=occurred,
             random_id=random_value,
-            payload=payload,
+            provenance=provenance,
         )
     except ValueError:
         return None

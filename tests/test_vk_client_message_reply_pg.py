@@ -32,7 +32,6 @@ from app.models.ingress import IngressEvent, IngressEventType, IngressStatus
 from app.models.outbox import DeliveryStatus, DestinationType, OutboxMessage
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus, ReplyPlanType
 from app.repositories import conversations as conversation_repo
-from app.repositories import outbound as outbound_repo
 from app.services.ingress import IngressWorker
 from app.services.vk_client_ingress import VkClientIngressAdapter
 from app.services.vk_client_message_reply import (
@@ -145,7 +144,11 @@ async def test_pg_external_reply_takeover_and_duplicate(
     claim = await worker.claim_one()
     assert claim is not None
     assert claim.event_type == IngressEventType.VK_CLIENT_MESSAGE_REPLY.value
-    assert "SECRET_MANAGER_BODY" not in json.dumps(claim.envelope_json)
+    dumped = json.dumps(claim.envelope_json)
+    assert "SECRET_MANAGER_BODY" not in dumped
+    assert "known_event" not in dumped
+    assert claim.envelope_json.get("provenance") == {"kind": "FOREIGN"}
+    assert "payload" not in claim.envelope_json
     await worker.process_claimed(claim)
 
     async with session_scope(session_factory) as session:
@@ -213,7 +216,7 @@ async def test_pg_external_reply_takeover_and_duplicate(
                 "external_conversation_id": _CONV,
                 "provider_message_id": 1,
                 "conversation_message_id": 100,
-                "payload": {"known_event": True},
+                "provenance": {"kind": "FOREIGN"},
             },
             handoff_pause_seconds=900,
             takeover_config=_takeover_all(),
@@ -234,7 +237,7 @@ async def test_pg_external_reply_takeover_and_duplicate(
                 "external_conversation_id": _CONV,
                 "provider_message_id": 999001,
                 "conversation_message_id": 3640,
-                "payload": {"known_event": True},
+                "provenance": {"kind": "FOREIGN"},
             },
             handoff_pause_seconds=900,
             takeover_config=_takeover_all(),
@@ -284,14 +287,21 @@ async def test_pg_own_echo_via_provenance_and_provider_id(
             provenance_key=_KEY,
         )
     )
+    provenance = {
+        "kind": "BOT_TV_CANDIDATE",
+        "v": marker["v"],
+        "ns": marker["ns"],
+        "oid": marker["oid"],
+        "mac": marker["mac"],
+    }
     async with session_scope(session_factory) as session:
         result = await apply_vk_client_message_reply_in_session(
             session,
             envelope={
                 "external_conversation_id": _CONV,
-                "provider_message_id": 1,
+                "provider_message_id": provider_id,
                 "conversation_message_id": 5000,
-                "payload": marker,
+                "provenance": provenance,
             },
             handoff_pause_seconds=900,
             takeover_config=_takeover_all(),
@@ -302,6 +312,21 @@ async def test_pg_own_echo_via_provenance_and_provider_id(
         )
         assert conversation.ownership == ConversationOwnership.BOT.value
 
+    # Replay same marker with different provider id → EXTERNAL.
+    async with session_scope(session_factory) as session:
+        result = await apply_vk_client_message_reply_in_session(
+            session,
+            envelope={
+                "external_conversation_id": _CONV,
+                "provider_message_id": provider_id + 1,
+                "conversation_message_id": 5002,
+                "provenance": provenance,
+            },
+            handoff_pause_seconds=900,
+            takeover_config=_takeover_all(),
+        )
+        assert result.classification is VkClientReplyClassification.EXTERNAL_ACTOR
+
     async with session_scope(session_factory) as session:
         result = await apply_vk_client_message_reply_in_session(
             session,
@@ -309,12 +334,98 @@ async def test_pg_own_echo_via_provenance_and_provider_id(
                 "external_conversation_id": _CONV,
                 "provider_message_id": provider_id,
                 "conversation_message_id": 5001,
-                "payload": None,
+                "provenance": {"kind": "ABSENT"},
             },
             handoff_pause_seconds=900,
             takeover_config=_takeover_all(),
         )
         assert result.classification is VkClientReplyClassification.OWN_TEYA_ECHO
+
+
+@pytest.mark.asyncio
+async def test_pg_callback_receipt_race_converges(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await truncate_foundation_tables(session_factory)
+    outbound_id = uuid.uuid4()
+    provider_id = 777001
+
+    async with session_scope(session_factory) as session:
+        conversation, _ = await conversation_repo.get_or_create(
+            session,
+            channel=Channel.VK,
+            external_conversation_id=_CONV,
+        )
+        session.add(
+            OutboxMessage(
+                id=outbound_id,
+                conversation_id=conversation.id,
+                destination_type=DestinationType.VK_CLIENT_OUTBOUND.value,
+                delivery_status=DeliveryStatus.ADMITTED.value,
+                admitted_at=datetime.now(timezone.utc),
+                provider_message_id=None,
+                payload_json={"schema": "vk.client.outbound.v1", "text": "x"},
+                context_version=0,
+                manager_epoch=0,
+                event_seq_hwm=0,
+            )
+        )
+        conv_id = conversation.id
+
+    marker = json.loads(
+        build_vk_outbound_provenance_payload(
+            outbound_id=outbound_id,
+            provenance_key=_KEY,
+        )
+    )
+    provenance = {
+        "kind": "BOT_TV_CANDIDATE",
+        "v": marker["v"],
+        "ns": marker["ns"],
+        "oid": marker["oid"],
+        "mac": marker["mac"],
+    }
+    from app.services.vk_client_message_reply import VkClientMessageReplyOwnEchoRace
+    from sqlalchemy import update
+
+    async with session_scope(session_factory) as session:
+        with pytest.raises(VkClientMessageReplyOwnEchoRace):
+            await apply_vk_client_message_reply_in_session(
+                session,
+                envelope={
+                    "external_conversation_id": _CONV,
+                    "provider_message_id": provider_id,
+                    "conversation_message_id": 6000,
+                    "provenance": provenance,
+                },
+                handoff_pause_seconds=900,
+                takeover_config=_takeover_all(),
+            )
+
+    async with session_scope(session_factory) as session:
+        await session.execute(
+            update(OutboxMessage)
+            .where(OutboxMessage.id == outbound_id)
+            .values(provider_message_id=provider_id)
+        )
+
+    async with session_scope(session_factory) as session:
+        result = await apply_vk_client_message_reply_in_session(
+            session,
+            envelope={
+                "external_conversation_id": _CONV,
+                "provider_message_id": provider_id,
+                "conversation_message_id": 6000,
+                "provenance": provenance,
+            },
+            handoff_pause_seconds=900,
+            takeover_config=_takeover_all(),
+        )
+        assert result.classification is VkClientReplyClassification.OWN_TEYA_ECHO
+        conversation = await conversation_repo.lock_for_update(
+            session, conversation_id=conv_id
+        )
+        assert conversation.ownership == ConversationOwnership.BOT.value
 
 
 @pytest.mark.asyncio
@@ -340,7 +451,7 @@ async def test_pg_closed_and_missing_and_feature_off(
                 "external_conversation_id": _CONV,
                 "provider_message_id": 10,
                 "conversation_message_id": 10,
-                "payload": {"known_event": True},
+                "provenance": {"kind": "FOREIGN"},
             },
             handoff_pause_seconds=900,
             takeover_config=_takeover_all(),
@@ -358,7 +469,7 @@ async def test_pg_closed_and_missing_and_feature_off(
                 "external_conversation_id": "vk-1-2",
                 "provider_message_id": 10,
                 "conversation_message_id": 10,
-                "payload": {"known_event": True},
+                "provenance": {"kind": "FOREIGN"},
             },
             handoff_pause_seconds=900,
             takeover_config=_takeover_all(),
@@ -377,9 +488,11 @@ async def test_pg_closed_and_missing_and_feature_off(
                 "external_conversation_id": _CONV,
                 "provider_message_id": 11,
                 "conversation_message_id": 11,
-                "payload": {"known_event": True},
+                "provenance": {"kind": "FOREIGN"},
             },
             handoff_pause_seconds=900,
             takeover_config=off,
         )
         assert result.classification is VkClientReplyClassification.FEATURE_OFF
+
+    await truncate_foundation_tables(session_factory)

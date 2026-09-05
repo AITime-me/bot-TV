@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -202,7 +203,12 @@ def test_parse_message_reply_private_outgoing() -> None:
     assert parsed.message_reply.external_conversation_id == f"vk-{_GROUP}-{_USER}"
     assert parsed.message_reply.provider_message_id == 82727
     assert "MANAGER_TEXT" not in repr(parsed.message_reply)
+    assert parsed.message_reply.provenance.kind.value == "FOREIGN"
+    assert parsed.message_reply.technical_envelope()["provenance"] == {
+        "kind": "FOREIGN"
+    }
     assert "MANAGER_TEXT" not in str(parsed.message_reply.technical_envelope())
+    assert "known_event" not in json.dumps(parsed.message_reply.technical_envelope())
 
 
 @pytest.mark.parametrize(

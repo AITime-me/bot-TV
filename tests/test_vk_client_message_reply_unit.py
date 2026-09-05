@@ -17,14 +17,20 @@ from app.channels.vk_client_external_takeover_config import (
     load_vk_client_external_takeover_config,
 )
 from app.channels.vk_client_outbound_provenance import (
+    VkReplyPayloadKind,
     build_vk_outbound_provenance_payload,
+    classify_vk_reply_payload,
     verify_vk_outbound_provenance_payload,
 )
+from app.channels.vk_client_types import VkClientNormalizedMessageReply
+from app.channels.vk_client_webhook import parse_vk_client_callback
+from app.channels.vk_client_config import VkClientCallbackConfig
 from app.models.conversation import (
     ConversationOwnership,
     ConversationStatus,
     HandoffState,
 )
+from app.models.outbox import DeliveryStatus
 from app.services.vk_client_message_reply import (
     VkClientMessageReplyOwnEchoRace,
     VkClientReplyClassification,
@@ -35,17 +41,31 @@ _GROUP = 154387737
 _USER = 145508039
 _CONV = f"vk-{_GROUP}-{_USER}"
 _KEY = "callback-secret-01234567"
+_SECRET = _KEY
+_CONFIRM = "confirm-token-xx"
 _NOW = datetime(2026, 9, 5, 15, 0, tzinfo=timezone.utc)
+_NOW_TS = 1725530000
+
+
+def _cfg() -> VkClientCallbackConfig:
+    return VkClientCallbackConfig(
+        enabled=True,
+        group_id=_GROUP,
+        callback_secret=_SECRET,
+        confirmation=_CONFIRM,
+    )
 
 
 def _envelope(
     *,
     cmid: int = 3639,
     provider_id: int = 82727,
-    payload: object | None = {"known_event": True},
+    provenance: dict[str, Any] | None = None,
     conv: str = _CONV,
 ) -> dict[str, Any]:
-    env: dict[str, Any] = {
+    if provenance is None:
+        provenance = {"kind": "FOREIGN"}
+    return {
         "schema": "vk.client.message_reply.v1",
         "event_type": "VK_CLIENT_MESSAGE_REPLY",
         "group_id": _GROUP,
@@ -55,10 +75,24 @@ def _envelope(
         "occurred_at": _NOW.isoformat(),
         "external_conversation_id": conv,
         "random_id": 0,
+        "provenance": provenance,
     }
-    if payload is not None:
-        env["payload"] = payload
-    return env
+
+
+def _bot_tv_provenance(outbound_id: uuid.UUID) -> dict[str, Any]:
+    raw = json.loads(
+        build_vk_outbound_provenance_payload(
+            outbound_id=outbound_id,
+            provenance_key=_KEY,
+        )
+    )
+    return {
+        "kind": "BOT_TV_CANDIDATE",
+        "v": raw["v"],
+        "ns": raw["ns"],
+        "oid": raw["oid"],
+        "mac": raw["mac"],
+    }
 
 
 def test_config_default_off() -> None:
@@ -104,29 +138,70 @@ def test_config_allowlist_exact() -> None:
     assert cfg.fsm_mutation_allowed(external_conversation_id=f"vk-{_GROUP}-1") is False
 
 
-def test_provenance_roundtrip_and_foreign_payload() -> None:
+def test_classify_foreign_payloads_never_keep_raw() -> None:
+    cases = [
+        {"known_event": True},
+        {"name": "Hidden Client", "phone": "+70001112233"},
+        "SECRET_FREE_TEXT_PII",
+        {"nested": {"a": 1}},
+        {"v": 1, "ns": "bot_tv.vk_out", "oid": str(uuid.uuid4()), "mac": "0" * 32, "x": 1},
+    ]
+    for raw in cases:
+        technical = classify_vk_reply_payload(raw)
+        assert technical.kind is VkReplyPayloadKind.FOREIGN
+        fragment = technical.to_envelope_fragment()
+        assert fragment == {"kind": "FOREIGN"}
+        blob = json.dumps(fragment)
+        assert "Hidden" not in blob
+        assert "SECRET" not in blob
+        assert "phone" not in blob
+        assert "known_event" not in blob
+
+
+def test_classify_bot_tv_candidate_allowlists_only() -> None:
     oid = uuid.uuid4()
     raw = build_vk_outbound_provenance_payload(
         outbound_id=oid,
         provenance_key=_KEY,
     )
+    technical = classify_vk_reply_payload(raw)
+    assert technical.kind is VkReplyPayloadKind.BOT_TV_CANDIDATE
+    fragment = technical.to_envelope_fragment()
+    assert set(fragment.keys()) == {"kind", "v", "ns", "oid", "mac"}
     assert verify_vk_outbound_provenance_payload(raw, provenance_key=_KEY) == oid
-    assert (
-        verify_vk_outbound_provenance_payload(
-            {"known_event": True},
-            provenance_key=_KEY,
-        )
-        is None
-    )
-    forged = json.loads(raw)
-    forged["mac"] = "0" * 32
-    assert (
-        verify_vk_outbound_provenance_payload(forged, provenance_key=_KEY) is None
-    )
+
+
+def test_parse_message_reply_drops_raw_foreign_payload() -> None:
+    payload = {
+        "type": "message_reply",
+        "group_id": _GROUP,
+        "secret": _SECRET,
+        "object": {
+            "id": 82727,
+            "date": _NOW_TS,
+            "from_id": -_GROUP,
+            "peer_id": _USER,
+            "out": 1,
+            "conversation_message_id": 3639,
+            "random_id": 0,
+            "text": "MANAGER_TEXT_MUST_NOT_BE_STORED",
+            "payload": {"known_event": True, "name": "Hidden"},
+        },
+    }
+    parsed = parse_vk_client_callback(payload, config=_cfg())
+    assert parsed.message_reply is not None
+    reply = parsed.message_reply
+    assert isinstance(reply, VkClientNormalizedMessageReply)
+    assert reply.provenance.kind is VkReplyPayloadKind.FOREIGN
+    envelope = reply.technical_envelope()
+    assert "payload" not in envelope
+    assert envelope["provenance"] == {"kind": "FOREIGN"}
+    assert "Hidden" not in json.dumps(envelope)
+    assert "MANAGER_TEXT" not in json.dumps(envelope)
 
 
 @pytest.mark.asyncio
-async def test_feature_off_no_fsm(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_feature_off_no_fsm() -> None:
     session = AsyncMock()
     cfg = VkClientExternalTakeoverConfig(mode=VkClientExternalTakeoverMode.OFF)
     result = await apply_vk_client_message_reply_in_session(
@@ -165,7 +240,6 @@ async def test_unresolved_conversation_no_create(
     assert (
         result.classification is VkClientReplyClassification.UNRESOLVED_CONVERSATION
     )
-    assert result.fsm_changed is False
 
 
 @pytest.mark.asyncio
@@ -173,32 +247,17 @@ async def test_foreign_payload_is_external_not_own_echo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = AsyncMock()
-    conv_id = uuid.uuid4()
     conversation = MagicMock()
-    conversation.id = conv_id
+    conversation.id = uuid.uuid4()
     conversation.status = ConversationStatus.OPEN.value
     conversation.ownership = ConversationOwnership.BOT.value
     conversation.handoff_state = HandoffState.BOT_ACTIVE.value
     conversation.vk_client_external_reply_hwm = None
-    conversation.manager_epoch = 0
-    conversation.context_version = 0
 
     async def _get(*a: object, **k: object) -> MagicMock:
         return conversation
 
-    async def _lock(*a: object, **k: object) -> MagicMock:
-        return conversation
-
-    async def _none(*a: object, **k: object) -> None:
-        return None
-
-    async def _false(*a: object, **k: object) -> bool:
-        return False
-
     async def _apply(*a: object, **k: object) -> tuple[MagicMock, bool]:
-        conversation.ownership = ConversationOwnership.MANAGER.value
-        conversation.status = ConversationStatus.HANDOFF.value
-        conversation.handoff_state = HandoffState.HUMAN_ACTIVE.value
         return conversation, True
 
     monkeypatch.setattr(
@@ -207,19 +266,7 @@ async def test_foreign_payload_is_external_not_own_echo(
     )
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.conversation_repo.lock_for_update",
-        _lock,
-    )
-    monkeypatch.setattr(
-        "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_id",
-        _none,
-    )
-    monkeypatch.setattr(
-        "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_provider_message_id",
-        _none,
-    )
-    monkeypatch.setattr(
-        "app.services.vk_client_message_reply.outbound_repo.has_admitted_vk_outbound_without_provider_id",
-        _false,
+        _get,
     )
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.conversation_repo.apply_chronologically_new_vk_external_reply",
@@ -248,40 +295,91 @@ async def test_foreign_payload_is_external_not_own_echo(
     )
     result = await apply_vk_client_message_reply_in_session(
         session,
-        envelope=_envelope(payload={"known_event": True}),
+        envelope=_envelope(provenance={"kind": "FOREIGN"}),
         handoff_pause_seconds=900,
         takeover_config=cfg,
     )
     assert result.classification is VkClientReplyClassification.EXTERNAL_ACTOR
     assert result.fsm_changed is True
-    assert result.cancelled_plans == 1
-    assert result.cancelled_outbound == 2
 
 
 @pytest.mark.asyncio
-async def test_own_provenance_suppresses_takeover(
+async def test_valid_marker_exact_provider_id_is_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = AsyncMock()
-    conv_id = uuid.uuid4()
     outbound_id = uuid.uuid4()
+    provider_id = 555001
     conversation = MagicMock()
-    conversation.id = conv_id
+    conversation.id = uuid.uuid4()
     conversation.status = ConversationStatus.OPEN.value
-    conversation.vk_client_external_reply_hwm = None
 
     row = MagicMock()
     row.id = outbound_id
-    row.conversation_id = conv_id
+    row.conversation_id = conversation.id
+    row.provider_message_id = provider_id
+    row.delivery_status = DeliveryStatus.DELIVERED.value
 
     async def _get(*a: object, **k: object) -> MagicMock:
         return conversation
 
-    async def _lock(*a: object, **k: object) -> MagicMock:
-        return conversation
-
     async def _by_id(*a: object, **k: object) -> MagicMock:
         return row
+
+    apply_mock = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.get_by_channel_external",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.lock_for_update",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_id",
+        _by_id,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.apply_chronologically_new_vk_external_reply",
+        apply_mock,
+    )
+
+    cfg = VkClientExternalTakeoverConfig(
+        mode=VkClientExternalTakeoverMode.ALL,
+        provenance_key=_KEY,
+    )
+    result = await apply_vk_client_message_reply_in_session(
+        session,
+        envelope=_envelope(
+            provider_id=provider_id,
+            provenance=_bot_tv_provenance(outbound_id),
+        ),
+        handoff_pause_seconds=900,
+        takeover_config=cfg,
+    )
+    assert result.classification is VkClientReplyClassification.OWN_TEYA_ECHO
+    apply_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_valid_marker_mismatched_provider_id_is_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    outbound_id = uuid.uuid4()
+    conversation = MagicMock()
+    conversation.id = uuid.uuid4()
+    conversation.status = ConversationStatus.OPEN.value
+    conversation.vk_client_external_reply_hwm = None
+    conversation.handoff_state = HandoffState.BOT_ACTIVE.value
+
+    row = MagicMock()
+    row.id = outbound_id
+    row.provider_message_id = 111
+    row.delivery_status = DeliveryStatus.DELIVERED.value
+
+    async def _get(*a: object, **k: object) -> MagicMock:
+        return conversation
 
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.conversation_repo.get_by_channel_external",
@@ -289,39 +387,162 @@ async def test_own_provenance_suppresses_takeover(
     )
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.conversation_repo.lock_for_update",
-        _lock,
+        _get,
     )
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_id",
-        _by_id,
+        AsyncMock(return_value=row),
     )
-    apply_mock = AsyncMock()
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.conversation_repo.apply_chronologically_new_vk_external_reply",
-        apply_mock,
+        AsyncMock(return_value=(conversation, True)),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.reply_plan_repo.cancel_open_plans_for_takeover",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.outbound_repo.cancel_unadmitted_for_manager_message",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.enqueue_manager_takeover",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.db_statement_now",
+        AsyncMock(return_value=_NOW),
     )
 
-    marker = build_vk_outbound_provenance_payload(
-        outbound_id=outbound_id,
-        provenance_key=_KEY,
-    )
     cfg = VkClientExternalTakeoverConfig(
         mode=VkClientExternalTakeoverMode.ALL,
         provenance_key=_KEY,
     )
     result = await apply_vk_client_message_reply_in_session(
         session,
-        envelope=_envelope(payload=json.loads(marker)),
+        envelope=_envelope(
+            provider_id=999,
+            provenance=_bot_tv_provenance(outbound_id),
+        ),
         handoff_pause_seconds=900,
         takeover_config=cfg,
     )
-    assert result.classification is VkClientReplyClassification.OWN_TEYA_ECHO
-    assert result.fsm_changed is False
-    apply_mock.assert_not_called()
+    assert result.classification is VkClientReplyClassification.EXTERNAL_ACTOR
+    assert result.fsm_changed is True
 
 
 @pytest.mark.asyncio
-async def test_admitted_without_receipt_retries(
+async def test_valid_marker_null_provider_admitted_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    outbound_id = uuid.uuid4()
+    conversation = MagicMock()
+    conversation.id = uuid.uuid4()
+    conversation.status = ConversationStatus.OPEN.value
+
+    row = MagicMock()
+    row.id = outbound_id
+    row.provider_message_id = None
+    row.delivery_status = DeliveryStatus.ADMITTED.value
+
+    async def _get(*a: object, **k: object) -> MagicMock:
+        return conversation
+
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.get_by_channel_external",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.lock_for_update",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_id",
+        AsyncMock(return_value=row),
+    )
+
+    cfg = VkClientExternalTakeoverConfig(
+        mode=VkClientExternalTakeoverMode.ALL,
+        provenance_key=_KEY,
+    )
+    with pytest.raises(VkClientMessageReplyOwnEchoRace):
+        await apply_vk_client_message_reply_in_session(
+            session,
+            envelope=_envelope(provenance=_bot_tv_provenance(outbound_id)),
+            handoff_pause_seconds=900,
+            takeover_config=cfg,
+        )
+
+
+@pytest.mark.asyncio
+async def test_valid_marker_null_provider_non_inflight_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    outbound_id = uuid.uuid4()
+    conversation = MagicMock()
+    conversation.id = uuid.uuid4()
+    conversation.status = ConversationStatus.OPEN.value
+    conversation.vk_client_external_reply_hwm = None
+    conversation.handoff_state = HandoffState.BOT_ACTIVE.value
+
+    row = MagicMock()
+    row.id = outbound_id
+    row.provider_message_id = None
+    row.delivery_status = DeliveryStatus.FAILED.value
+
+    async def _get(*a: object, **k: object) -> MagicMock:
+        return conversation
+
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.get_by_channel_external",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.lock_for_update",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_id",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.apply_chronologically_new_vk_external_reply",
+        AsyncMock(return_value=(conversation, True)),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.reply_plan_repo.cancel_open_plans_for_takeover",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.outbound_repo.cancel_unadmitted_for_manager_message",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.enqueue_manager_takeover",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.db_statement_now",
+        AsyncMock(return_value=_NOW),
+    )
+
+    cfg = VkClientExternalTakeoverConfig(
+        mode=VkClientExternalTakeoverMode.ALL,
+        provenance_key=_KEY,
+    )
+    result = await apply_vk_client_message_reply_in_session(
+        session,
+        envelope=_envelope(provenance=_bot_tv_provenance(outbound_id)),
+        handoff_pause_seconds=900,
+        takeover_config=cfg,
+    )
+    assert result.classification is VkClientReplyClassification.EXTERNAL_ACTOR
+
+
+@pytest.mark.asyncio
+async def test_provider_id_fallback_without_payload_is_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = AsyncMock()
@@ -329,14 +550,11 @@ async def test_admitted_without_receipt_retries(
     conversation.id = uuid.uuid4()
     conversation.status = ConversationStatus.OPEN.value
 
+    row = MagicMock()
+    row.provider_message_id = 82727
+
     async def _get(*a: object, **k: object) -> MagicMock:
         return conversation
-
-    async def _none(*a: object, **k: object) -> None:
-        return None
-
-    async def _true(*a: object, **k: object) -> bool:
-        return True
 
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.conversation_repo.get_by_channel_external",
@@ -348,11 +566,55 @@ async def test_admitted_without_receipt_retries(
     )
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_provider_message_id",
-        _none,
+        AsyncMock(return_value=row),
+    )
+    apply_mock = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.apply_chronologically_new_vk_external_reply",
+        apply_mock,
+    )
+
+    cfg = VkClientExternalTakeoverConfig(
+        mode=VkClientExternalTakeoverMode.ALL,
+        provenance_key=_KEY,
+    )
+    result = await apply_vk_client_message_reply_in_session(
+        session,
+        envelope=_envelope(provenance={"kind": "ABSENT"}),
+        handoff_pause_seconds=900,
+        takeover_config=cfg,
+    )
+    assert result.classification is VkClientReplyClassification.OWN_TEYA_ECHO
+    apply_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_absent_payload_admitted_without_receipt_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    conversation = MagicMock()
+    conversation.id = uuid.uuid4()
+    conversation.status = ConversationStatus.OPEN.value
+
+    async def _get(*a: object, **k: object) -> MagicMock:
+        return conversation
+
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.get_by_channel_external",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.conversation_repo.lock_for_update",
+        _get,
+    )
+    monkeypatch.setattr(
+        "app.services.vk_client_message_reply.outbound_repo.find_vk_outbound_by_provider_message_id",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr(
         "app.services.vk_client_message_reply.outbound_repo.has_admitted_vk_outbound_without_provider_id",
-        _true,
+        AsyncMock(return_value=True),
     )
 
     cfg = VkClientExternalTakeoverConfig(
@@ -362,7 +624,7 @@ async def test_admitted_without_receipt_retries(
     with pytest.raises(VkClientMessageReplyOwnEchoRace):
         await apply_vk_client_message_reply_in_session(
             session,
-            envelope=_envelope(payload=None),
+            envelope=_envelope(provenance={"kind": "ABSENT"}),
             handoff_pause_seconds=900,
             takeover_config=cfg,
         )

@@ -6,9 +6,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.channels.vk_client_types import VK_CLIENT_TEXT_MAX_LEN
+from app.channels.vk_client_outbound_provenance import (
+    VkReplyPayloadKind,
+    VkReplyProvenanceTechnical,
+)
 from app.core.pii_gateway import safe_fingerprint
 from app.models.conversation import Channel
 from app.models.ingress import IngressChannel, IngressEventType
@@ -128,8 +132,12 @@ class VkClientMessageReplyIngressEvent(BaseModel):
     provider_message_id: int = Field(gt=0)
     occurred_at: datetime
     random_id: int | None = Field(default=None, ge=0)
-    # Bounded technical provenance only (dict or JSON string).
-    payload: dict[str, Any] | str | None = None
+    # Technical provenance only — never raw foreign payload / free text.
+    provenance_kind: Literal["ABSENT", "FOREIGN", "BOT_TV_CANDIDATE"]
+    provenance_v: int | None = None
+    provenance_ns: str | None = None
+    provenance_oid: str | None = None
+    provenance_mac: str | None = None
     correlation_id: uuid.UUID | None = None
 
     @field_validator("external_event_id", "external_conversation_id")
@@ -139,10 +147,37 @@ class VkClientMessageReplyIngressEvent(BaseModel):
             raise ValueError("external id must be alphanumeric with -/_")
         return value
 
+    @model_validator(mode="after")
+    def _provenance_technical_only(self) -> VkClientMessageReplyIngressEvent:
+        if self.provenance_kind != "BOT_TV_CANDIDATE":
+            if (
+                self.provenance_v is not None
+                or self.provenance_ns is not None
+                or self.provenance_oid is not None
+                or self.provenance_mac is not None
+            ):
+                raise ValueError("INVALID_PROVENANCE_TECHNICAL")
+        # Validates allowlisted candidate shape/types/lengths.
+        self.provenance_technical()
+        return self
+
     def correlation_id_or_new(self) -> uuid.UUID:
         return self.correlation_id if self.correlation_id is not None else uuid.uuid4()
 
+    def provenance_technical(self) -> VkReplyProvenanceTechnical:
+        kind = VkReplyPayloadKind(self.provenance_kind)
+        if kind is VkReplyPayloadKind.BOT_TV_CANDIDATE:
+            return VkReplyProvenanceTechnical(
+                kind=kind,
+                v=self.provenance_v,
+                ns=self.provenance_ns,
+                oid=self.provenance_oid,
+                mac=self.provenance_mac,
+            )
+        return VkReplyProvenanceTechnical(kind=kind)
+
     def safe_envelope(self) -> dict[str, Any]:
+        provenance = self.provenance_technical()
         envelope: dict[str, Any] = {
             "schema": "vk.client.message_reply.v1",
             "event_type": self.event_type,
@@ -154,14 +189,10 @@ class VkClientMessageReplyIngressEvent(BaseModel):
             if self.occurred_at.tzinfo is not None
             else self.occurred_at.replace(tzinfo=timezone.utc).isoformat(),
             "external_conversation_id": self.external_conversation_id,
+            "provenance": provenance.to_envelope_fragment(),
         }
         if self.random_id is not None:
             envelope["random_id"] = self.random_id
-        if self.payload is not None:
-            if type(self.payload) is dict and len(self.payload) <= 8:
-                envelope["payload"] = self.payload
-            elif type(self.payload) is str and 0 < len(self.payload) <= 1000:
-                envelope["payload"] = self.payload
         return envelope
 
     def redacted_view(self) -> dict[str, Any]:
@@ -177,7 +208,7 @@ class VkClientMessageReplyIngressEvent(BaseModel):
             ),
             "event_type": self.event_type,
             "group_id": self.group_id,
-            "payload": "<redacted>" if self.payload is not None else None,
+            "provenance_kind": self.provenance_kind,
         }
 
     def __repr__(self) -> str:
