@@ -10,6 +10,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
 
 from app.amocrm_chat_webhook import build_amocrm_chat_router
+from app.amocrm_native_outgoing_capture_webhook import (
+    build_amocrm_native_outgoing_capture_router,
+)
 from app.channels.vk_client_config import VkClientCallbackConfig, VkClientConfigError
 from app.channels.vk_client_http import build_vk_client_router
 from app.channels.vk_master_config import VkMasterAdapterConfig, VkMasterConfigError
@@ -21,6 +24,10 @@ from app.closed_test_router import (
 )
 from app.config import Settings
 from app.core.amocrm_chat_config import AmoCrmChatConfig, AmoCrmChatConfigError
+from app.core.amocrm_native_outgoing_capture_config import (
+    AmoCrmNativeOutgoingCaptureConfig,
+    AmoCrmNativeOutgoingCaptureConfigError,
+)
 from app.core.booking_eligibility_factory import (
     build_booking_flow_from_settings,
     build_booking_s2s_clients,
@@ -238,6 +245,13 @@ def create_app(
         engine=engine,
     )
 
+    # Native CRM Platform outgoing_message CAPTURE-ONLY (default-off).
+    _register_amocrm_native_outgoing_capture_routes(
+        application,
+        settings=loaded_settings,
+        engine=engine,
+    )
+
     return application
 
 
@@ -301,6 +315,35 @@ def _register_amocrm_chat_routes(
     session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
     application.include_router(
         build_amocrm_chat_router(config=config, session_factory=session_factory)
+    )
+
+
+def _register_amocrm_native_outgoing_capture_routes(
+    application: FastAPI,
+    *,
+    settings: Settings,
+    engine: AsyncEngine | None,
+) -> None:
+    """Register native outgoing CAPTURE webhook only when fully configured.
+
+    Enabled + incomplete/invalid config fails closed (raises). Disabled → no
+    routes. Path token is ephemeral URL secrecy only — not Chat HMAC.
+    """
+
+    config = AmoCrmNativeOutgoingCaptureConfig.from_env()
+    if not config.enabled:
+        return
+    if engine is None or settings.database_url is None:
+        raise AmoCrmNativeOutgoingCaptureConfigError(
+            "AMOCRM_NATIVE_OUTGOING_CAPTURE_DATABASE_REQUIRED"
+        ) from None
+
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    application.include_router(
+        build_amocrm_native_outgoing_capture_router(
+            config=config,
+            session_factory=session_factory,
+        )
     )
 
 

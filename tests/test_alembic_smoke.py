@@ -17,6 +17,7 @@ from app.models import (
     AmocrmCrmOauthToken,
     AmocrmEntityLink,
     AmocrmMessageProjection,
+    AmocrmNativeOutgoingCapture,
     AttachmentSpoolObject,
     CanonicalIdentity,
     ControlPlaneSnapshot,
@@ -364,6 +365,7 @@ def test_alembic_metadata_imports() -> None:
     assert ExternalIdentityLink.__tablename__ == "external_identity_links"
     assert AmocrmChatBinding.__tablename__ == "amocrm_chat_bindings"
     assert AmocrmMessageProjection.__tablename__ == "amocrm_message_projections"
+    assert AmocrmNativeOutgoingCapture.__tablename__ == "amocrm_native_outgoing_captures"
     assert AmocrmCrmOauthToken.__tablename__ == "amocrm_crm_oauth_tokens"
     assert AmocrmEntityLink.__tablename__ == "amocrm_entity_links"
     assert IdentityReviewCase.__tablename__ == "identity_review_cases"
@@ -396,6 +398,7 @@ def test_alembic_metadata_imports() -> None:
         "external_identity_links",
         "amocrm_chat_bindings",
         "amocrm_message_projections",
+        "amocrm_native_outgoing_captures",
         "amocrm_crm_oauth_tokens",
         "amocrm_entity_links",
         "identity_review_cases",
@@ -561,6 +564,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260905_40_vk_client_outbound"].down_revision
         == "20260904_39_shadow_drafts"
     )
+    assert "20260905_41_amo_nat_out_cap" in by_id
+    assert (
+        by_id["20260905_41_amo_nat_out_cap"].down_revision
+        == "20260905_40_vk_client_outbound"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -595,6 +603,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260903_38_vk_client_ingress",
         "20260904_39_shadow_drafts",
         "20260905_40_vk_client_outbound",
+        "20260905_41_amo_nat_out_cap",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -658,7 +667,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260904_39_shadow_drafts") <= 32
     assert "20260905_40_vk_client_outbound" in revision_ids
     assert len("20260905_40_vk_client_outbound") <= 32
-    assert heads == ["20260905_40_vk_client_outbound"]
+    assert "20260905_41_amo_nat_out_cap" in revision_ids
+    assert len("20260905_41_amo_nat_out_cap") <= 32
+    assert heads == ["20260905_41_amo_nat_out_cap"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -757,6 +768,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_40 = (
         root / "alembic" / "versions" / "20260905_40_vk_client_outbound.py"
+    ).read_text(encoding="utf-8")
+    migration_41 = (
+        root / "alembic" / "versions" / "20260905_41_amo_nat_out_cap.py"
     ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
@@ -1082,6 +1096,13 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert model_checks[name] == sql
         for token in re.findall(r"'[A-Z_]+'", sql):
             assert token in migration_40, f"{name} missing {token} in 40"
+
+    assert "amocrm_native_outgoing_captures" in migration_41
+    assert "uq_amocrm_native_outgoing_captures_message_id" in migration_41
+    assert "type = 'outgoing'" in migration_41
+    assert "message_type = 'text'" in migration_41
+    assert "body_text" not in migration_41
+    assert 'op.drop_table("amocrm_native_outgoing_captures")' in migration_41
 
 
 def test_alembic_env_fileconfig_call_site_disables_existing_loggers_false() -> None:

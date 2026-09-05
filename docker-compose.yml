@@ -37,6 +37,17 @@ x-amocrm-environment: &amocrm-environment
   AMOCRM_CRM_DEAL_STATUS_ID: ${AMOCRM_CRM_DEAL_STATUS_ID:-}
   AMOCRM_CRM_OAUTH_ACTIVE_KEY_ID: ${AMOCRM_CRM_OAUTH_ACTIVE_KEY_ID:-}
 
+# Native CRM Platform outgoing_message CAPTURE-ONLY — api only. Default-off.
+# Ephemeral path_token must never be attached to worker/migrate.
+x-amocrm-native-outgoing-capture-environment: &amocrm-native-outgoing-capture-environment
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_ENABLED: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_ENABLED:-false}
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_PATH_TOKEN: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_PATH_TOKEN:-}
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_TALK_ID: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_TALK_ID:-}
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_CHAT_ID: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_CHAT_ID:-}
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_CONTACT_ID: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_CONTACT_ID:-}
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_ORIGIN: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_ORIGIN:-}
+  AMOCRM_NATIVE_OUTGOING_CAPTURE_SOURCE_ID: ${AMOCRM_NATIVE_OUTGOING_CAPTURE_SOURCE_ID:-}
+
 x-amocrm-oauth-keys-env-file: &amocrm-oauth-keys-env-file
   - path: ${AMOCRM_CRM_OAUTH_KEYS_ENV_FILE:-/etc/bot-tv/amocrm-crm-oauth-keys.env}
     required: false
@@ -109,7 +120,13 @@ services:
       - --port
       - "8000"
     environment:
-      <<: [*runtime-environment, *amocrm-environment, *vk-client-environment]
+      <<:
+        [
+          *runtime-environment,
+          *amocrm-environment,
+          *vk-client-environment,
+          *amocrm-native-outgoing-capture-environment,
+        ]
     env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening
     depends_on:

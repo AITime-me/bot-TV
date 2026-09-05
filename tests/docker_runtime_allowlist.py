@@ -48,6 +48,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260903_38_vk_client_ingress.py",
     "!alembic/versions/20260904_39_shadow_drafts.py",
     "!alembic/versions/20260905_40_vk_client_outbound.py",
+    "!alembic/versions/20260905_41_amo_nat_out_cap.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -146,6 +147,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/core/amocrm_buyer_card_read_flow.py",
     "!app/core/amocrm_buyer_card_bind.py",
     "!app/core/amocrm_manager_ids.py",
+    "!app/core/amocrm_native_outgoing_capture_config.py",
     "!app/core/master_channel_binding.py",
     "!app/core/identity_resolution.py",
     "!app/core/identity_provider_port.py",
@@ -172,6 +174,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/closed_test_router.py",
     "!app/teya_ops_router.py",
     "!app/amocrm_chat_webhook.py",
+    "!app/amocrm_native_outgoing_capture_webhook.py",
     "!app/identity_glue_ops.py",
     "!app/shadow_draft_eval.py",
     "!app/amocrm_buyer_card_bind_ops.py",
@@ -183,6 +186,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/models/amocrm_mirror.py",
     "!app/models/amocrm_chat_binding.py",
     "!app/models/amocrm_message_projection.py",
+    "!app/models/amocrm_native_outgoing_capture.py",
     "!app/models/amocrm_crm_oauth_token.py",
     "!app/models/amocrm_entity_link.py",
     "!app/models/conversation.py",
@@ -213,6 +217,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/repositories/__init__.py",
     "!app/repositories/amocrm_mirror.py",
     "!app/repositories/amocrm_chat_bindings.py",
+    "!app/repositories/amocrm_native_outgoing_captures.py",
     "!app/repositories/amocrm_message_projections.py",
     "!app/repositories/amocrm_crm_oauth_tokens.py",
     "!app/repositories/amocrm_entity_links.py",
@@ -248,6 +253,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/schemas/self_booking_confirm_action.py",
     "!app/schemas/closed_test.py",
     "!app/schemas/amocrm_manager_ingress.py",
+    "!app/schemas/amocrm_native_outgoing_capture.py",
     "!app/schemas/vk_client_ingress.py",
     "!app/services/",
     "!app/services/__init__.py",
@@ -440,6 +446,16 @@ AMO01A_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "app/repositories/amocrm_chat_bindings.py",
     "app/schemas/amocrm_manager_ingress.py",
     "app/services/amocrm_manager_ingress.py",
+)
+
+# Native CRM Platform outgoing_message CAPTURE-ONLY paths.
+AMO_NATIVE_OUTGOING_CAPTURE_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
+    "alembic/versions/20260905_41_amo_nat_out_cap.py",
+    "app/core/amocrm_native_outgoing_capture_config.py",
+    "app/amocrm_native_outgoing_capture_webhook.py",
+    "app/models/amocrm_native_outgoing_capture.py",
+    "app/repositories/amocrm_native_outgoing_captures.py",
+    "app/schemas/amocrm_native_outgoing_capture.py",
 )
 
 # AMO-01B1 Chat projection paths.
