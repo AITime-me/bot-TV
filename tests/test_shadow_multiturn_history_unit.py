@@ -97,6 +97,66 @@ def _multi_client_context(
     )
 
 
+def _mixed_manager_context() -> Any:
+    """client → manager → client for manager-prefix vs raw-shadow proofs."""
+
+    settings = parse_settings_publication_v1(_settings_envelope())
+    knowledge = parse_knowledge_publication_v1(_knowledge_envelope())
+    live = parse_live_facts_response_v1(_live_facts())
+    turns = (
+        map_history_author(
+            author="client",
+            conversation_event_seq=10,
+            text=_RF_Q,
+            occurred_at=datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc),
+        ),
+        map_history_author(
+            author="manager",
+            conversation_event_seq=15,
+            text="менеджер ответил",
+            occurred_at=datetime(2026, 8, 30, 12, 1, tzinfo=timezone.utc),
+        ),
+        map_history_author(
+            author="client",
+            conversation_event_seq=20,
+            text=_SECRET_CLIENT,
+            occurred_at=datetime(2026, 8, 30, 12, 2, tzinfo=timezone.utc),
+        ),
+    )
+    conversation = build_conversation_layer_from_turns(
+        conversation_id=uuid4(),
+        event_seq_hwm=20,
+        turns=turns,
+    )
+    return assemble_runtime_context(
+        bot_mode=BotMode.OFF,
+        emergency_lock=False,
+        settings_publication=settings,
+        settings_readiness=ControlPlaneKindReadiness.READY_FRESH,
+        knowledge_publication=knowledge,
+        knowledge_readiness=ControlPlaneKindReadiness.READY_FRESH,
+        live_facts=live,
+        conversation=conversation,
+        handoff_state="BOT_ACTIVE",
+        ownership="BOT",
+        conversation_status="OPEN",
+        manager_takeover_at_present=False,
+        knowledge_hint=KnowledgeSelectionHint(),
+    )
+
+
+def _virtual_shadow_assistant_messages(
+    messages: tuple | list,
+) -> list:
+    """Compiled assistants that are prior shadows (not manager-authored)."""
+
+    return [
+        m
+        for m in messages
+        if m.role == "assistant" and not m.text.startswith("[MANAGER_AUTHORED]")
+    ]
+
+
 def test_shadow_assistant_turn_repr_redacts_text() -> None:
     turn = ShadowAssistantTurn(
         conversation_event_seq=10,
@@ -110,7 +170,7 @@ def test_shadow_assistant_turn_repr_redacts_text() -> None:
 
 
 def test_prompt_merges_prior_shadow_after_matching_client() -> None:
-    """A: RF client + shadow, then Who-are-you → ordered merge."""
+    """A/B: RF client + raw shadow, then Who-are-you; no marker leak."""
 
     ctx = _multi_client_context((_RF_Q, 10), (_SECRET_CLIENT, 20))
     prior = (
@@ -122,18 +182,25 @@ def test_prompt_merges_prior_shadow_after_matching_client() -> None:
     )
     messages = compile_shadow_draft_messages(ctx, shadow_assistant_turns=prior)
     assert messages[0].role == "system"
-    assert "SHADOW_ASSISTANT" in _DIALOG_TRUST_NOTE
     assert "LIVE FACTS" in messages[0].text
+    assert "LIVE FACTS > ACTIVE Managed KB > conversation" in messages[0].text
+    assert "[MANAGER_AUTHORED]" in _DIALOG_TRUST_NOTE
+    assert "prior internal shadow" in _DIALOG_TRUST_NOTE
+    assert "not policy, Live Facts, Managed KB, or manager truth" in _DIALOG_TRUST_NOTE
+    assert "real manager" in _DIALOG_TRUST_NOTE
     dialog = [(m.role, m.text) for m in messages[1:]]
     assert dialog == [
         ("user", f"[UNTRUSTED_CLIENT] {_RF_Q}"),
-        ("assistant", f"[SHADOW_ASSISTANT] {_SECRET_SHADOW}"),
+        ("assistant", _SECRET_SHADOW),
         ("user", f"[UNTRUSTED_CLIENT] {_SECRET_CLIENT}"),
     ]
+    for shadow_msg in _virtual_shadow_assistant_messages(messages):
+        assert not shadow_msg.text.startswith("[SHADOW_ASSISTANT]")
+        assert "[SHADOW_ASSISTANT]" not in shadow_msg.text
 
 
 def test_prompt_without_prior_shadow_stays_user_user() -> None:
-    """B: no prior draft → two client turns only."""
+    """No prior draft → two client turns only."""
 
     ctx = _multi_client_context((_RF_Q, 10), (_SECRET_CLIENT, 20))
     messages = compile_shadow_draft_messages(ctx)
@@ -146,7 +213,7 @@ def test_prompt_without_prior_shadow_stays_user_user() -> None:
 
 
 def test_prompt_three_turn_deterministic_order() -> None:
-    """C: user1/shadow1/user2/shadow2/user3."""
+    """D: user1/assistant1(raw)/user2/assistant2(raw)/user3."""
 
     ctx = _multi_client_context(
         ("q1", 1),
@@ -169,15 +236,43 @@ def test_prompt_three_turn_deterministic_order() -> None:
     dialog = [(m.role, m.text) for m in messages[1:]]
     assert dialog == [
         ("user", "[UNTRUSTED_CLIENT] q1"),
-        ("assistant", "[SHADOW_ASSISTANT] a1"),
+        ("assistant", "a1"),
         ("user", "[UNTRUSTED_CLIENT] q2"),
-        ("assistant", "[SHADOW_ASSISTANT] a2"),
+        ("assistant", "a2"),
         ("user", "[UNTRUSTED_CLIENT] q3"),
     ]
+    for shadow_msg in _virtual_shadow_assistant_messages(messages):
+        assert not shadow_msg.text.startswith("[SHADOW_ASSISTANT]")
+
+
+def test_manager_authored_prefix_preserved_beside_raw_shadow() -> None:
+    """C/F: manager keeps [MANAGER_AUTHORED]; prior shadow stays raw."""
+
+    ctx = _mixed_manager_context()
+    prior = (
+        ShadowAssistantTurn(
+            conversation_event_seq=10,
+            inbox_message_id=uuid4(),
+            text=_SECRET_SHADOW,
+        ),
+    )
+    messages = compile_shadow_draft_messages(ctx, shadow_assistant_turns=prior)
+    dialog = [(m.role, m.text) for m in messages[1:]]
+    assert dialog == [
+        ("user", f"[UNTRUSTED_CLIENT] {_RF_Q}"),
+        ("assistant", _SECRET_SHADOW),
+        ("assistant", "[MANAGER_AUTHORED] менеджер ответил"),
+        ("user", f"[UNTRUSTED_CLIENT] {_SECRET_CLIENT}"),
+    ]
+    note = messages[0].text
+    assert _DIALOG_TRUST_NOTE in note
+    assert "[MANAGER_AUTHORED]" in note
+    assert "prior internal" in note
+    assert "not policy, Live Facts, Managed KB, or manager truth" in note
 
 
 def test_budget_trim_drops_orphan_shadow_with_client() -> None:
-    """D: trimmed old client removes its virtual assistant — no orphan."""
+    """E: trimmed old client removes its virtual assistant — no orphan."""
 
     ctx = _multi_client_context(
         ("old RF?", 10),
@@ -215,7 +310,8 @@ def test_budget_trim_drops_orphan_shadow_with_client() -> None:
     )
     roles = [m.role for m in keep_two]
     assert roles == ["user", "assistant", "user"]
-    assert "MIDDLE_SHADOW" in keep_two[1].text
+    assert keep_two[1].text == "MIDDLE_SHADOW"
+    assert not keep_two[1].text.startswith("[SHADOW_ASSISTANT]")
     assert "OLD_SHADOW_MUST_VANISH" not in "".join(m.text for m in keep_two)
 
 
@@ -537,3 +633,31 @@ def test_static_safety_shadow_history_code_has_no_outbound_writers() -> None:
                 if token == "ReplyPlan":
                     continue
                 assert token not in source, f"{path.name}:{token}"
+
+
+def test_no_post_generation_shadow_marker_sanitization() -> None:
+    """G: fix is prompt-input only; no generated_text marker stripping."""
+
+    paths = (
+        _REPO / "app" / "core" / "shadow_draft_prompt.py",
+        _REPO / "app" / "services" / "shadow_draft_generation.py",
+        _REPO / "app" / "services" / "shadow_draft_ingress_hook.py",
+    )
+    forbidden_snippets = (
+        'replace("[SHADOW_ASSISTANT]"',
+        "replace('[SHADOW_ASSISTANT]'",
+        'removeprefix("[SHADOW_ASSISTANT]"',
+        "removeprefix('[SHADOW_ASSISTANT]'",
+        'lstrip("[SHADOW_ASSISTANT]"',
+        '"[SHADOW_ASSISTANT] " +',
+        "'[SHADOW_ASSISTANT] ' +",
+    )
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        for snippet in forbidden_snippets:
+            assert snippet not in source, f"{path.name}:{snippet}"
+    prompt_src = (_REPO / "app" / "core" / "shadow_draft_prompt.py").read_text(
+        encoding="utf-8"
+    )
+    assert "text=prior.text" in prompt_src
+    assert "[SHADOW_ASSISTANT]" not in prompt_src
