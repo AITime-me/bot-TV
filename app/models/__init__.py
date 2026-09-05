@@ -32,6 +32,7 @@ from app.models.amocrm_message_projection import (
     AmocrmProjectionSourceKind,
     AmocrmProjectionStatus,
 )
+from app.models.amocrm_native_outgoing_capture import AmocrmNativeOutgoingCapture
 from app.models.conversation import (
     Channel,
     Conversation,
@@ -140,6 +141,7 @@ __all__ = [
     "AmocrmEntityLink",
     "AmocrmEntityLinkStatus",
     "AmocrmMessageProjection",
+    "AmocrmNativeOutgoingCapture",
     "AmocrmProjectionSkipReason",
     "AmocrmProjectionSourceKind",
     "AmocrmProjectionStatus",

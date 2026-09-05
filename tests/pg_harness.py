@@ -156,6 +156,12 @@ async def truncate_foundation_tables(
                     "IS NOT NULL"
                 )
             )
+            has_amocrm_native_outgoing_captures = await session.scalar(
+                text(
+                    "SELECT to_regclass('public.amocrm_native_outgoing_captures') "
+                    "IS NOT NULL"
+                )
+            )
             has_amocrm_projections = await session.scalar(
                 text(
                     "SELECT to_regclass('public.amocrm_message_projections') "
@@ -251,6 +257,8 @@ async def truncate_foundation_tables(
                 tables.insert(0, "canonical_identities")
             if has_amocrm_projections:
                 tables.insert(0, "amocrm_message_projections")
+            if has_amocrm_native_outgoing_captures:
+                tables.insert(0, "amocrm_native_outgoing_captures")
             if has_amocrm_chat_bindings:
                 tables.insert(0, "amocrm_chat_bindings")
             if has_amocrm_entity_links:
