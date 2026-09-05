@@ -5,6 +5,25 @@ not recreate or restart API, worker, database, Chat, or any queue consumer.
 It is intentionally a plan until a technical test lead and its automation
 isolation are proven read-only.
 
+## Recorded safety gate (5 September 2026)
+
+The initial read-only inventory found no active `TECHNICAL_DEAL` link that can
+serve as a proof target.  Salesbot inventory was empty, but one enabled
+account-level webhook subscribes to both lead-update and lead-status events.
+That subscription can notify an external receiver for either a field change or
+a stage change, independently of local queue state.  Consequently this runbook
+is **not executable** yet: do not create a substitute lead or apply any plan
+until an owner-designated technical object and a documented exclusion of that
+webhook (and any applicable Digital Pipeline automation) are available.
+
+The required future authority is one controlled production decision covering:
+
+1. the exact isolated technical lead and its original reversible value;
+2. evidence that the applicable webhook and pipeline automation will not run;
+3. merge/deployment of PR #100's disposable profile; and
+4. one dry-run, one single-action apply, independent read-back, and one
+   separately reviewed inverse action.
+
 ## Preconditions
 
 1. PR #100 is merged and the exact merged source is available on the production
