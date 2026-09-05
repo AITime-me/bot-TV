@@ -114,6 +114,9 @@ services:
     entrypoint: ["python", "-B", "-m", "app.amocrm_crm_ops"]
     environment:
       <<: [*runtime-environment, *amocrm-environment]
+      # Per-invocation only. It is intentionally not inherited by api/worker;
+      # the offline CLI still additionally requires an explicit --apply.
+      AMOCRM_CRM_ON_DEMAND_WRITE_ENABLED: ${AMOCRM_CRM_ON_DEMAND_WRITE_ENABLED:-false}
     env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening
     depends_on:

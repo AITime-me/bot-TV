@@ -400,6 +400,25 @@ class AmoCrmCrmOpsService:
             refresh_once=_refresh_once,
         ).execute(lead_id=lead_id, complete_till=complete_till, apply=apply)
 
+    async def run_fenced_on_demand_write(
+        self, *, plan: Mapping[str, object], apply: bool, enabled: bool
+    ) -> "FencedWriteReceipt":
+        """Offline-only generic PATCH gate; requires a per-run env opt-in."""
+        from app.services.amocrm_fenced_on_demand_write import (
+            FencedOnDemandWriteExecutor,
+            FencedWriteReceipt,
+        )
+        if not enabled:
+            return FencedWriteReceipt("REFUSED", error_code="FENCED_WRITE_DISABLED")
+        if not self._rest.enabled or self._oauth is None:
+            return FencedWriteReceipt("REFUSED", error_code="AMOCRM_CRM_REST_DISABLED")
+        async def _refresh_once() -> bool:
+            return (await self._oauth.refresh_tokens()).outcome is AmoCrmCrmRestOutcome.SUCCESS
+        return await FencedOnDemandWriteExecutor(
+            api_base_url=self._rest.api_base_url, transport=self._transport,
+            token_loader=self._load_access_token, refresh_once=_refresh_once,
+        ).execute(plan=plan, apply=apply)
+
     async def run_controlled_move_only(self, *, lead_id: int, apply: bool) -> "ControlledRevisionReceipt":
         from app.services.amocrm_controlled_revision import ControlledRevisionExecutor
         if not self._rest.enabled or self._oauth is None:
