@@ -62,13 +62,44 @@ class OutboundClaim:
         )
 
 
+def _db_uuid(value: object) -> uuid.UUID:
+    """Canonical stdlib UUID from ORM/asyncpg driver values.
+
+    asyncpg may return ``pgproto.UUID`` (subclass of ``uuid.UUID``). Transport
+    contracts use ``type(x) is uuid.UUID``, so normalize at the repository
+    claim boundary — not in senders or helpers.
+    """
+
+    if type(value) is uuid.UUID:
+        return value
+    if isinstance(value, uuid.UUID):
+        try:
+            return uuid.UUID(int=value.int)
+        except Exception:
+            raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+    if type(value) is str:
+        if not value or any(ch.isspace() for ch in value):
+            raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+    raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+
+
+def _db_uuid_optional(value: object) -> uuid.UUID | None:
+    if value is None:
+        return None
+    return _db_uuid(value)
+
+
 def _row_to_claim(row: OutboxMessage) -> OutboundClaim:
     if row.lease_token is None or row.lease_owner is None or row.lease_until is None:
         raise RuntimeError("OUTBOUND_LEASE_INCOMPLETE")
     return OutboundClaim(
-        outbound_id=row.id,
-        conversation_id=row.conversation_id,
-        reply_plan_id=row.reply_plan_id,
+        outbound_id=_db_uuid(row.id),
+        conversation_id=_db_uuid(row.conversation_id),
+        reply_plan_id=_db_uuid_optional(row.reply_plan_id),
         context_version=row.context_version,
         manager_epoch=row.manager_epoch,
         event_seq_hwm=row.event_seq_hwm,
@@ -79,16 +110,26 @@ def _row_to_claim(row: OutboxMessage) -> OutboundClaim:
         attempt_count=row.attempt_count,
         max_attempts=row.max_attempts,
         lease_owner=row.lease_owner,
-        lease_token=row.lease_token,
+        lease_token=_db_uuid(row.lease_token),
         lease_version=row.lease_version,
         lease_until=row.lease_until,
-        correlation_id=row.correlation_id,
+        correlation_id=_db_uuid_optional(row.correlation_id),
         payload_json=dict(row.payload_json),
     )
 
 
 def synthetic_outbound_idempotency_key(reply_plan_id: uuid.UUID) -> str:
     return f"synthetic-outbound:reply-plan:{reply_plan_id}"
+
+
+def vk_client_outbound_idempotency_key(reply_plan_id: uuid.UUID) -> str:
+    return f"vk-client-outbound:reply-plan:{reply_plan_id}"
+
+
+_CLAIMABLE_DESTINATIONS = (
+    DestinationType.SYNTHETIC_OUTBOUND.value,
+    DestinationType.VK_CLIENT_OUTBOUND.value,
+)
 
 
 async def get_by_id(
@@ -161,6 +202,60 @@ async def insert_synthetic_outbound_if_absent(
     return row, inserted is not None
 
 
+async def insert_vk_client_outbound_if_absent(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    reply_plan_id: uuid.UUID,
+    context_version: int,
+    payload_json: dict[str, Any],
+    correlation_id: uuid.UUID,
+    not_before: datetime,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    manager_epoch: int = 0,
+    event_seq_hwm: int = 0,
+) -> tuple[OutboxMessage, bool]:
+    """Idempotently create VK_CLIENT_OUTBOUND for a ReplyPlan. Does not commit."""
+
+    key = vk_client_outbound_idempotency_key(reply_plan_id)
+    existing = await get_by_idempotency_key(session, idempotency_key=key)
+    if existing is not None:
+        return existing, False
+
+    new_id = uuid.uuid4()
+    stmt = (
+        insert(OutboxMessage)
+        .values(
+            id=new_id,
+            conversation_id=conversation_id,
+            source_inbox_id=None,
+            reply_plan_id=reply_plan_id,
+            idempotency_key=key,
+            context_version=context_version,
+            manager_epoch=manager_epoch,
+            event_seq_hwm=event_seq_hwm,
+            destination_type=DestinationType.VK_CLIENT_OUTBOUND.value,
+            payload_json=payload_json,
+            delivery_status=DeliveryStatus.PENDING.value,
+            not_before=not_before,
+            attempt_count=0,
+            max_attempts=max_attempts,
+            lease_owner=None,
+            lease_token=None,
+            lease_version=0,
+            lease_until=None,
+            correlation_id=correlation_id,
+        )
+        .on_conflict_do_nothing(constraint="uq_outbox_idempotency_key")
+        .returning(OutboxMessage.id)
+    )
+    inserted = await session.scalar(stmt)
+    row = await get_by_idempotency_key(session, idempotency_key=key)
+    if row is None:
+        raise RuntimeError("OUTBOUND_LOOKUP_FAILED")
+    return row, inserted is not None
+
+
 async def cancel_unadmitted_for_manager_message(
     session: AsyncSession,
     *,
@@ -178,13 +273,12 @@ async def cancel_unadmitted_for_conversation(
     *,
     conversation_id: uuid.UUID,
 ) -> int:
-    """Cancel every synthetic row still on the reversible side of admission."""
+    """Cancel every claimable outbound still on the reversible side of admission."""
     stmt = (
         update(OutboxMessage)
         .where(
             OutboxMessage.conversation_id == conversation_id,
-            OutboxMessage.destination_type
-            == DestinationType.SYNTHETIC_OUTBOUND.value,
+            OutboxMessage.destination_type.in_(_CLAIMABLE_DESTINATIONS),
             OutboxMessage.delivery_status.in_(
                 (
                     DeliveryStatus.PENDING.value,
@@ -215,8 +309,7 @@ async def recover_exhausted_leases(
     stmt = (
         update(OutboxMessage)
         .where(
-            OutboxMessage.destination_type
-            == DestinationType.SYNTHETIC_OUTBOUND.value,
+            OutboxMessage.destination_type.in_(_CLAIMABLE_DESTINATIONS),
             OutboxMessage.delivery_status == DeliveryStatus.PROCESSING.value,
             OutboxMessage.lease_until.is_not(None),
             OutboxMessage.lease_until < moment,
@@ -252,7 +345,7 @@ async def claim_next(
         WITH candidate AS (
             SELECT id
             FROM outbox_messages
-            WHERE destination_type = 'SYNTHETIC_OUTBOUND'
+            WHERE destination_type IN ('SYNTHETIC_OUTBOUND', 'VK_CLIENT_OUTBOUND')
               AND (
                     delivery_status = 'ADMITTED'
                  OR attempt_count < max_attempts

@@ -8,6 +8,17 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.channels.vk_client_outbound_config import (
+    VkClientOutboundConfig,
+    VkClientPeerResolutionError,
+    parse_vk_client_peer_id,
+    vk_client_outbound_send_allowed,
+)
+from app.channels.vk_client_outbound_http import (
+    NullVkClientSender,
+    VkClientSender,
+    VkClientSendOutcome,
+)
 from app.config import Settings
 from app.core.outbound_policy import OutboundAction, is_automatic_outbound_allowed
 from app.db.clock import resolve_moment
@@ -34,9 +45,17 @@ from app.services.synthetic_outbound import (
     SyntheticOutboundAdapter,
     SyntheticOutboundOutcome,
     SyntheticOutboundRequest,
+    SyntheticOutboundResult,
 )
 
 logger = logging.getLogger(__name__)
+
+_LIVE_DESTINATIONS = frozenset(
+    {
+        DestinationType.SYNTHETIC_OUTBOUND.value,
+        DestinationType.VK_CLIENT_OUTBOUND.value,
+    }
+)
 
 
 class OutboundArbiterDenied(RuntimeError):
@@ -90,10 +109,11 @@ class ArbiterAdmitResult:
 
 
 class OutboundArbiter:
-    """Single gate for synthetic outbound delivery.
+    """Single gate for SYNTHETIC_OUTBOUND and VK_CLIENT_OUTBOUND delivery.
 
-    No repository shortcut may mark SYNTHETIC_OUTBOUND as DELIVERED outside
-    this service. Real channel sends remain impossible under fail-closed policy.
+    No repository shortcut may mark these destinations DELIVERED outside this
+    service. Global ``is_automatic_outbound_allowed`` stays fail-closed; VK
+    sends use a separate narrow allowlist gate after durable ADMITTED.
     """
 
     def __init__(
@@ -102,10 +122,14 @@ class OutboundArbiter:
         *,
         settings: Settings | None = None,
         sink: SyntheticOutboundAdapter | None = None,
+        vk_config: VkClientOutboundConfig | None = None,
+        vk_sender: VkClientSender | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings if settings is not None else Settings()
         self._sink = sink if sink is not None else SyntheticOutboundAdapter()
+        self._vk_config = vk_config
+        self._vk_sender = vk_sender if vk_sender is not None else NullVkClientSender()
 
     @property
     def sink(self) -> SyntheticOutboundAdapter:
@@ -117,7 +141,7 @@ class OutboundArbiter:
         *,
         now: datetime | None = None,
     ) -> ArbiterAdmitResult:
-        """Durably admit, then invoke the idempotent synthetic sink outside SQL.
+        """Durably admit, then invoke the destination sink outside SQL.
 
         ``now`` exists so callers that already drive a controlled timeline reuse
         it; otherwise the PostgreSQL clock decides whether not_before elapsed.
@@ -137,16 +161,21 @@ class OutboundArbiter:
                 await self._fail_claim(claim, error_code=type(exc).__name__)
                 raise
 
-        # This call is deliberately outside every database transaction. A live
-        # adapter may replace the synthetic sink only when it honors outbound_id
-        # as an idempotency key.
-        result = self._sink.deliver(request)
+        # Transport is deliberately outside every database transaction.
+        if claim.destination_type == DestinationType.SYNTHETIC_OUTBOUND.value:
+            result = self._sink.deliver(request)
+        elif claim.destination_type == DestinationType.VK_CLIENT_OUTBOUND.value:
+            result = await self._deliver_vk_client(claim, request)
+        else:
+            await self._fail_admitted_delivery(claim, permanent=True, now=now)
+            raise OutboundArbiterDenied("UNSUPPORTED_DESTINATION")
+
         if result.outcome is SyntheticOutboundOutcome.TRANSIENT_ERROR:
             await self._fail_admitted_delivery(claim, permanent=False, now=now)
-            raise OutboundArbiterDenied(result.error_code or "SYNTHETIC_TRANSIENT")
+            raise OutboundArbiterDenied(result.error_code or "TRANSPORT_TRANSIENT")
         if result.outcome is SyntheticOutboundOutcome.PERMANENT_ERROR:
             await self._fail_admitted_delivery(claim, permanent=True, now=now)
-            raise OutboundArbiterDenied(result.error_code or "SYNTHETIC_PERMANENT")
+            raise OutboundArbiterDenied(result.error_code or "TRANSPORT_PERMANENT")
 
         async with session_scope(self._session_factory) as session:
             # Preserve global lock order even though manager ownership can no
@@ -200,29 +229,94 @@ class OutboundArbiter:
             delivered_id = delivered.id
             delivered_conversation_id = delivered.conversation_id
             delivered_status = delivered.delivery_status
+            delivered_destination = delivered.destination_type
 
-        # AMO-01B1b: post-commit BOT_OUTBOUND projection enqueue only.
-        # Failure here must never roll back DELIVERED or re-invoke the sink.
-        try:
-            async with session_scope(self._session_factory) as session:
-                await enqueue_bot_outbound_projection(
-                    session,
-                    conversation_id=delivered_conversation_id,
-                    outbound_id=delivered_id,
-                    correlation_id=correlation_id,
+        # AMO-01B1b: post-commit BOT_OUTBOUND projection for SYNTHETIC only.
+        # First VK_CLIENT_OUTBOUND closed proof intentionally skips Chat
+        # projection — native VK↔amoCRM visibility must be verified first to
+        # avoid duplicate manager-visible messages (ADR-003 supplement).
+        if delivered_destination == DestinationType.SYNTHETIC_OUTBOUND.value:
+            try:
+                async with session_scope(self._session_factory) as session:
+                    await enqueue_bot_outbound_projection(
+                        session,
+                        conversation_id=delivered_conversation_id,
+                        outbound_id=delivered_id,
+                        correlation_id=correlation_id,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "amocrm bot outbound projection enqueue failed "
+                    "outbound_id=%s error_code=%s",
+                    delivered_id,
+                    type(exc).__name__,
                 )
-        except Exception as exc:
-            logger.error(
-                "amocrm bot outbound projection enqueue failed "
-                "outbound_id=%s error_code=%s",
-                delivered_id,
-                type(exc).__name__,
-            )
 
         return ArbiterAdmitResult(
             admitted=True,
             outbound_id=delivered_id,
             delivery_status=delivered_status,
+        )
+
+    async def _deliver_vk_client(
+        self,
+        claim: OutboundClaim,
+        request: SyntheticOutboundRequest,
+    ) -> SyntheticOutboundResult:
+        async with session_scope(self._session_factory) as session:
+            conversation = await conversation_repo.get_by_id_for_update(
+                session,
+                conversation_id=claim.conversation_id,
+            )
+            if conversation is None:
+                return SyntheticOutboundResult(
+                    outcome=SyntheticOutboundOutcome.PERMANENT_ERROR,
+                    error_code="CONVERSATION_MISSING",
+                )
+            external_id = conversation.external_conversation_id
+
+        config = self._vk_config
+        if config is None or not vk_client_outbound_send_allowed(
+            self._settings,
+            config,
+            external_conversation_id=external_id,
+        ):
+            return SyntheticOutboundResult(
+                outcome=SyntheticOutboundOutcome.PERMANENT_ERROR,
+                error_code="VK_CLIENT_SEND_GATE_DENIED",
+            )
+        assert config.group_id is not None
+        try:
+            peer_id = parse_vk_client_peer_id(
+                external_conversation_id=external_id,
+                expected_group_id=config.group_id,
+            )
+        except VkClientPeerResolutionError:
+            return SyntheticOutboundResult(
+                outcome=SyntheticOutboundOutcome.PERMANENT_ERROR,
+                error_code="VK_CLIENT_PEER_INVALID",
+            )
+        text = request._text
+        if type(text) is not str or not text:
+            return SyntheticOutboundResult(
+                outcome=SyntheticOutboundOutcome.PERMANENT_ERROR,
+                error_code="OUTBOUND_REPLY_TEXT_MISSING",
+            )
+        send_result = self._vk_sender.send_text(
+            peer_id=peer_id,
+            text=text,
+            outbound_id=claim.outbound_id,
+        )
+        if send_result.outcome is VkClientSendOutcome.SUCCESS:
+            return SyntheticOutboundResult(outcome=SyntheticOutboundOutcome.SUCCESS)
+        if send_result.outcome is VkClientSendOutcome.TRANSIENT_ERROR:
+            return SyntheticOutboundResult(
+                outcome=SyntheticOutboundOutcome.TRANSIENT_ERROR,
+                error_code=send_result.error_code or "VK_CLIENT_SEND_TRANSIENT",
+            )
+        return SyntheticOutboundResult(
+            outcome=SyntheticOutboundOutcome.PERMANENT_ERROR,
+            error_code=send_result.error_code or "VK_CLIENT_SEND_PERMANENT",
         )
 
     async def _admit_in_session(
@@ -234,8 +328,8 @@ class OutboundArbiter:
     ) -> SyntheticOutboundRequest:
         moment = await resolve_moment(session, now)
 
-        # Safety mode: automatic outbound to real channels is always false.
-        # Arbiter only allows the in-process synthetic sink.
+        # Safety mode: global automatic outbound remains fail-closed.
+        # VK uses a separate narrow allowlist gate after ADMITTED.
         if is_automatic_outbound_allowed(
             self._settings,
             OutboundAction.SEND_MESSAGE,
@@ -270,7 +364,7 @@ class OutboundArbiter:
             or outbound.lease_version != claim.lease_version
         ):
             raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
-        if outbound.destination_type != DestinationType.SYNTHETIC_OUTBOUND.value:
+        if outbound.destination_type not in _LIVE_DESTINATIONS:
             raise OutboundArbiterDenied("UNSUPPORTED_DESTINATION")
         if outbound.delivery_status == DeliveryStatus.DELIVERED.value:
             raise OutboundArbiterDenied("ALREADY_DELIVERED")
@@ -339,7 +433,7 @@ class OutboundArbiter:
                 or outbound.lease_version != claim.lease_version
             ):
                 raise StaleOutboundLeaseError("OUTBOUND_STALE_LEASE")
-            if outbound.destination_type != DestinationType.SYNTHETIC_OUTBOUND.value:
+            if outbound.destination_type not in _LIVE_DESTINATIONS:
                 raise OutboundArbiterDenied("UNSUPPORTED_DESTINATION")
             return _request_from_outbound(outbound)
 

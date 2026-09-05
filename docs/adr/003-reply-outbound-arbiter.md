@@ -64,10 +64,14 @@ Statuses: `PENDING → READY → PROCESSING → DISPATCHED`, with
 - Manager takeover cancels open plans and blocks new bot plans.
 
 ### OutboundMessage
-- `SYNTHETIC_OUTBOUND` is distinct from `INTERNAL_DRAFT`.
-- Idempotency key `synthetic-outbound:reply-plan:{plan_id}` is unique.
-- `ADMITTED` is the durable cancellation boundary; `DELIVERED` means acceptance
-  by the synthetic sink only. `SENT` remains forbidden.
+- `SYNTHETIC_OUTBOUND` is distinct from `INTERNAL_DRAFT` and from
+  `VK_CLIENT_OUTBOUND` (first real channel destination; closed proof only).
+- Idempotency key `synthetic-outbound:reply-plan:{plan_id}` is unique for
+  synthetic; `vk-client-outbound:reply-plan:{plan_id}` for VK client.
+- `ADMITTED` is the durable cancellation boundary and the pre-send boundary.
+- `DELIVERED` means the destination transport/sink confirmed success
+  (`SYNTHETIC_OUTBOUND`: in-process synthetic sink; `VK_CLIENT_OUTBOUND`:
+  successful VK `messages.send`). `SENT` remains forbidden.
 - Authoritative user-facing bot reply body is `outbox_messages.payload_json.text`
   (BOT-REPLY-DURABLE-01). It is rendered from the booking domain client-message
   path and written into the immutable outbound payload **before** INSERT.
@@ -77,8 +81,11 @@ Statuses: `PENDING → READY → PROCESSING → DISPATCHED`, with
   `OFFER_DAYS` may omit `text`; missing/invalid text otherwise fails closed.
   After authoritative `DELIVERED` commits (with mirror meta), AMO-01B1b may
   enqueue a Chat projection of that same persisted `text` in a **separate**
-  post-commit transaction (not a second client-delivery path). Projection
-  enqueue failure must not roll back `DELIVERED` or re-invoke the sink.
+  post-commit transaction (not a second client-delivery path) for
+  **SYNTHETIC_OUTBOUND only**. First `VK_CLIENT_OUTBOUND` closed proof
+  intentionally suppresses BOT_OUTBOUND Chat projection pending verification
+  that native VK↔amoCRM already shows the outgoing message (avoid duplicates).
+  Projection enqueue failure must not roll back `DELIVERED` or re-invoke the sink.
   Id-scoped repair (`repair-bot-outbound --outbound-id`) may restore a missing
   projection row only; no bulk backfill and no Chat HTTP from the repair itself.
 
@@ -110,9 +117,23 @@ An expired `ADMITTED` lease is always recoverable even if the claim counter has
 reached the configured limit: a crash is not evidence of a provider rejection.
 The next confirmed transient/permanent sink result applies the terminal limit.
 
-### Out of scope
-Real VK/MAX/Telegram/site adapters, n8n, AI, public webhooks, real sends, and
-online-zapis-tv integration.
+### Out of scope (baseline 01C)
+MAX/Telegram/site adapters, n8n, AI, public webhooks beyond registered Callback,
+and online-zapis-tv integration.
+
+## Supplement: VK_CLIENT_OUTBOUND closed proof (2026-09-05)
+
+- First real channel destination under Arbiter; does not weaken manager /
+  context / event_seq fences.
+- Exact single-conversation allowlist (`VK_CLIENT_OUTBOUND_ALLOW_CONVERSATION`).
+- Real send requires `VK_CLIENT_OUTBOUND_ENABLED`, complete client token/config,
+  `BOT_MODE=AUTO_WRITE`, `EMERGENCY_LOCK=false`.
+- Global `is_automatic_outbound_allowed` remains fail-closed (not flipped true).
+- Closed-proof ReplyPlan only for exact trigger text; shadow drafts never create
+  ReplyPlan / outbox / send.
+- VK `random_id` is deterministic from `outbound_id` (not `0`, not `hash()`).
+- BOT_OUTBOUND Chat projection suppressed for VK until native CRM visibility is
+  verified; SYNTHETIC_OUTBOUND projection unchanged.
 
 ## Consequences
 

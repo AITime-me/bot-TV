@@ -339,11 +339,37 @@ def build_default_loop_specs(
     except EphemeralPiiError:
         # Partial/invalid EPHEMERAL_PII_* must not abort the worker process.
         ingress_pii_store = None
+
+    vk_outbound_config = None
+    vk_sender = None
+    try:
+        from app.channels.vk_client_config import VkClientCallbackConfig
+        from app.channels.vk_client_outbound_config import VkClientOutboundConfig
+        from app.channels.vk_client_outbound_http import (
+            NullVkClientSender,
+            VkClientHttpSender,
+        )
+
+        callback_cfg = VkClientCallbackConfig.from_env()
+        vk_outbound_config = VkClientOutboundConfig.from_env(callback=callback_cfg)
+        if vk_outbound_config.outbound_enabled and vk_outbound_config.send_config_complete():
+            vk_sender = VkClientHttpSender(vk_outbound_config)
+        else:
+            vk_sender = NullVkClientSender()
+    except Exception:
+        # Incomplete/invalid VK client outbound config must not abort the worker.
+        vk_outbound_config = None
+        from app.channels.vk_client_outbound_http import NullVkClientSender
+
+        vk_sender = NullVkClientSender()
+
     ingress = IngressWorker(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "ingress"),
         handoff_pause_seconds=settings.handoff_pause_seconds,
         pii_store=ingress_pii_store,
+        settings=settings,
+        vk_outbound_config=vk_outbound_config,
     )
     handoff = HandoffExpiryWorker(session_factory)
     reply_plan = ReplyPlanWorker(
@@ -351,7 +377,12 @@ def build_default_loop_specs(
         worker_id=_lease_worker_id(worker_id, "reply"),
         booking_flow=resolved_booking_flow,
     )
-    arbiter = OutboundArbiter(session_factory, settings=settings)
+    arbiter = OutboundArbiter(
+        session_factory,
+        settings=settings,
+        vk_config=vk_outbound_config,
+        vk_sender=vk_sender,
+    )
     outbound = OutboundWorker(
         session_factory,
         worker_id=_lease_worker_id(worker_id, "outbound"),
