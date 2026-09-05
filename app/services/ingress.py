@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import Settings
 from app.db.session import session_scope
 from app.models.conversation import Conversation
 from app.models.ingress import IngressEvent, IngressEventType
@@ -29,6 +30,10 @@ from app.schemas.vk_client_ingress import VkClientInboundEvent
 from app.services.inbound import InboundService
 from app.services.manager_messages import apply_manager_message_in_session
 from app.services.vk_client_inbound import VkClientInboundService
+from app.channels.vk_client_outbound_config import VkClientOutboundConfig
+from app.services.vk_client_outbound_proof import (
+    maybe_create_vk_client_proof_reply_plan,
+)
 
 
 class IngressPersistError(RuntimeError):
@@ -141,6 +146,8 @@ class IngressWorker:
         retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
         handoff_pause_seconds: int = 15 * 60,
         pii_store: object | None = None,
+        settings: Settings | None = None,
+        vk_outbound_config: VkClientOutboundConfig | None = None,
     ) -> None:
         if not 10 * 60 <= handoff_pause_seconds <= 15 * 60:
             raise ValueError("handoff_pause_seconds must be between 600 and 900")
@@ -150,6 +157,8 @@ class IngressWorker:
         self._retry_delay_seconds = retry_delay_seconds
         self._handoff_pause_seconds = handoff_pause_seconds
         self._pii_store = pii_store
+        self._settings = settings if settings is not None else Settings()
+        self._vk_outbound_config = vk_outbound_config
 
     async def claim_one(self) -> IngressClaim | None:
         async with session_scope(self._session_factory) as session:
@@ -218,12 +227,21 @@ class IngressWorker:
             raise
 
     async def _process_vk_client(self, claim: IngressClaim) -> IngressProcessResult:
-        """Observer path: VK conversation + inbox only. No CRM / outbound."""
+        """VK observer + optional closed-proof ReplyPlan (same UoW). No direct send."""
 
         inbound = _vk_envelope_to_inbound(claim)
         try:
             async with session_scope(self._session_factory) as session:
                 accept = await VkClientInboundService(session).accept(inbound)
+                await maybe_create_vk_client_proof_reply_plan(
+                    session,
+                    settings=self._settings,
+                    config=self._vk_outbound_config,
+                    conversation=accept.conversation,
+                    inbox=accept.inbox,
+                    inbound_text=inbound.text,
+                    created_inbox=accept.created_inbox,
+                )
                 event = await ingress_repo.complete_with_lease(
                     session,
                     event_id=claim.event_id,

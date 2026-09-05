@@ -241,6 +241,14 @@ _EXPECTED_CHECKS_01C = {
     ),
 }
 
+_EXPECTED_CHECKS_40 = {
+    "ck_outbox_destination_type": (
+        "destination_type IN ("
+        "'INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND', 'VK_CLIENT_OUTBOUND'"
+        ")"
+    ),
+}
+
 _EXPECTED_UNIQUES_01C = {
     "uq_reply_plans_conversation_context_version",
     "uq_outbox_idempotency_key",
@@ -548,6 +556,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260904_39_shadow_drafts"].down_revision
         == "20260903_38_vk_client_ingress"
     )
+    assert "20260905_40_vk_client_outbound" in by_id
+    assert (
+        by_id["20260905_40_vk_client_outbound"].down_revision
+        == "20260904_39_shadow_drafts"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -581,6 +594,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260829_37_control_plane",
         "20260903_38_vk_client_ingress",
         "20260904_39_shadow_drafts",
+        "20260905_40_vk_client_outbound",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -642,7 +656,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260903_38_vk_client_ingress") <= 32
     assert "20260904_39_shadow_drafts" in revision_ids
     assert len("20260904_39_shadow_drafts") <= 32
-    assert heads == ["20260904_39_shadow_drafts"]
+    assert "20260905_40_vk_client_outbound" in revision_ids
+    assert len("20260905_40_vk_client_outbound") <= 32
+    assert heads == ["20260905_40_vk_client_outbound"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -739,6 +755,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     migration_39 = (
         root / "alembic" / "versions" / "20260904_39_shadow_drafts.py"
     ).read_text(encoding="utf-8")
+    migration_40 = (
+        root / "alembic" / "versions" / "20260905_40_vk_client_outbound.py"
+    ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
     ).read_text(encoding="utf-8")
@@ -810,7 +829,7 @@ def test_model_migration_check_and_unique_parity() -> None:
     # 01A historically created the narrow outbox checks; 01C replaces them.
     assert "destination_type IN ('INTERNAL_DRAFT')" in migration_01a
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in migration_01a
-    assert model_checks["ck_outbox_destination_type"] == _EXPECTED_CHECKS_01C[
+    assert model_checks["ck_outbox_destination_type"] == _EXPECTED_CHECKS_40[
         "ck_outbox_destination_type"
     ]
     assert "DELIVERED" in model_checks["ck_outbox_delivery_status"]
@@ -838,6 +857,10 @@ def test_model_migration_check_and_unique_parity() -> None:
         assert name in migration_01c
         if name == "ck_outbox_delivery_status":
             assert "'ADMITTED'" in model_checks[name]
+        elif name == "ck_outbox_destination_type":
+            # 01C historically synthetic-only; 40 adds VK_CLIENT_OUTBOUND.
+            assert model_checks[name] == _EXPECTED_CHECKS_40[name]
+            assert "'VK_CLIENT_OUTBOUND'" in model_checks[name]
         else:
             assert model_checks[name] == sql
         # Migration may split long CHECK literals across adjacent strings.
@@ -1049,6 +1072,16 @@ def test_model_migration_check_and_unique_parity() -> None:
     ):
         assert complex_check in migration_11
         assert complex_check in model_checks
+
+    assert "VK_CLIENT_OUTBOUND" in migration_40
+    assert "ck_outbox_destination_type" in migration_40
+    assert "ck_outbox_admitted_destination" in migration_40
+    assert "ck_outbox_delivered_after_admission" in migration_40
+    assert "'SENT'" not in migration_40
+    for name, sql in _EXPECTED_CHECKS_40.items():
+        assert model_checks[name] == sql
+        for token in re.findall(r"'[A-Z_]+'", sql):
+            assert token in migration_40, f"{name} missing {token} in 40"
 
 
 def test_alembic_env_fileconfig_call_site_disables_existing_loggers_false() -> None:

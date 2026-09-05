@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.clock import resolve_moment
 from app.db.session import session_scope
-from app.models.conversation import ConversationOwnership, HandoffState
+from app.models.conversation import Channel, ConversationOwnership, HandoffState
+from app.models.outbox import DestinationType
 from app.models.reply_plan import ReplyPlan, ReplyPlanStatus
 from app.repositories import conversations as conversation_repo
 from app.repositories import outbound as outbound_repo
@@ -36,6 +37,10 @@ from app.services.booking_synthetic import (
     sanitize_booking_result_fields,
 )
 from app.services.outbound_arbiter import ArbiterAdmitResult, OutboundArbiter
+from app.services.vk_client_outbound_proof import (
+    is_vk_client_proof_reply_plan,
+    vk_client_outbound_payload,
+)
 
 
 @dataclass(frozen=True, repr=False)
@@ -149,30 +154,71 @@ class ReplyPlanWorker:
 
         async with session_scope(self._session_factory) as session:
             plan_row = await self._lock_and_validate(session, claim)
-            existing = await outbound_repo.get_by_idempotency_key(
+            conversation = await conversation_repo.get_by_id_for_update(
                 session,
-                idempotency_key=outbound_repo.synthetic_outbound_idempotency_key(
-                    claim.plan_id
-                ),
+                conversation_id=claim.conversation_id,
             )
-            if existing is not None:
-                outbound, created = existing, False
-            else:
-                outbound_payload = build_synthetic_outbound_payload(claim.payload_json)
-                outbound, created = (
-                    await outbound_repo.insert_synthetic_outbound_if_absent(
-                        session,
-                        conversation_id=claim.conversation_id,
-                        reply_plan_id=claim.plan_id,
-                        context_version=claim.context_version,
-                        manager_epoch=claim.manager_epoch,
-                        event_seq_hwm=claim.event_seq_hwm,
-                        payload_json=outbound_payload,
-                        correlation_id=claim.correlation_id,
-                        not_before=claim.not_before,
-                        max_attempts=plan_row.max_attempts,
-                    )
+            if conversation is None:
+                raise RuntimeError("CONVERSATION_MISSING")
+
+            if is_vk_client_proof_reply_plan(claim.payload_json):
+                if conversation.channel != Channel.VK.value:
+                    raise RuntimeError("VK_OUTBOUND_CHANNEL_MISMATCH")
+                text = claim.payload_json.get("text")
+                if type(text) is not str or not text:
+                    raise RuntimeError("VK_OUTBOUND_TEXT_MISSING")
+                key = outbound_repo.vk_client_outbound_idempotency_key(claim.plan_id)
+                existing = await outbound_repo.get_by_idempotency_key(
+                    session,
+                    idempotency_key=key,
                 )
+                if existing is not None:
+                    outbound, created = existing, False
+                else:
+                    outbound, created = (
+                        await outbound_repo.insert_vk_client_outbound_if_absent(
+                            session,
+                            conversation_id=claim.conversation_id,
+                            reply_plan_id=claim.plan_id,
+                            context_version=claim.context_version,
+                            manager_epoch=claim.manager_epoch,
+                            event_seq_hwm=claim.event_seq_hwm,
+                            payload_json=vk_client_outbound_payload(text=text),
+                            correlation_id=claim.correlation_id,
+                            not_before=claim.not_before,
+                            max_attempts=plan_row.max_attempts,
+                        )
+                    )
+                if outbound.destination_type != DestinationType.VK_CLIENT_OUTBOUND.value:
+                    raise RuntimeError("VK_OUTBOUND_DESTINATION_MISMATCH")
+            else:
+                if conversation.channel == Channel.VK.value:
+                    # Fail closed: non-proof VK plans must not become synthetic send.
+                    raise RuntimeError("VK_OUTBOUND_PROOF_REQUIRED")
+                existing = await outbound_repo.get_by_idempotency_key(
+                    session,
+                    idempotency_key=outbound_repo.synthetic_outbound_idempotency_key(
+                        claim.plan_id
+                    ),
+                )
+                if existing is not None:
+                    outbound, created = existing, False
+                else:
+                    outbound_payload = build_synthetic_outbound_payload(claim.payload_json)
+                    outbound, created = (
+                        await outbound_repo.insert_synthetic_outbound_if_absent(
+                            session,
+                            conversation_id=claim.conversation_id,
+                            reply_plan_id=claim.plan_id,
+                            context_version=claim.context_version,
+                            manager_epoch=claim.manager_epoch,
+                            event_seq_hwm=claim.event_seq_hwm,
+                            payload_json=outbound_payload,
+                            correlation_id=claim.correlation_id,
+                            not_before=claim.not_before,
+                            max_attempts=plan_row.max_attempts,
+                        )
+                    )
             return await self._complete_dispatched(
                 session,
                 claim=claim,

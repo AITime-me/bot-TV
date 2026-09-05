@@ -47,6 +47,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!alembic/versions/20260829_37_control_plane.py",
     "!alembic/versions/20260903_38_vk_client_ingress.py",
     "!alembic/versions/20260904_39_shadow_drafts.py",
+    "!alembic/versions/20260905_40_vk_client_outbound.py",
     "!app/",
     "!app/__init__.py",
     "!app/channels/",
@@ -60,6 +61,8 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/channels/vk_client_types.py",
     "!app/channels/vk_client_webhook.py",
     "!app/channels/vk_client_http.py",
+    "!app/channels/vk_client_outbound_config.py",
+    "!app/channels/vk_client_outbound_http.py",
     "!app/config.py",
     "!app/core/",
     "!app/core/__init__.py",
@@ -302,6 +305,7 @@ EXPECTED_DOCKER_ALLOW_RULES: tuple[str, ...] = (
     "!app/services/vk_master_adapter.py",
     "!app/services/vk_client_ingress.py",
     "!app/services/vk_client_inbound.py",
+    "!app/services/vk_client_outbound_proof.py",
     "!app/services/outbound_arbiter.py",
     "!app/services/reply_outbound.py",
     "!app/services/synthetic_outbound.py",
@@ -357,13 +361,17 @@ CURSOR29_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
 # VK CLIENT shadow observer ingress paths that must be present in Docker build.
 VK_CLIENT_DOCKER_RUNTIME_PATHS: tuple[str, ...] = (
     "alembic/versions/20260903_38_vk_client_ingress.py",
+    "alembic/versions/20260905_40_vk_client_outbound.py",
     "app/channels/vk_client_config.py",
     "app/channels/vk_client_types.py",
     "app/channels/vk_client_webhook.py",
     "app/channels/vk_client_http.py",
+    "app/channels/vk_client_outbound_config.py",
+    "app/channels/vk_client_outbound_http.py",
     "app/schemas/vk_client_ingress.py",
     "app/services/vk_client_ingress.py",
     "app/services/vk_client_inbound.py",
+    "app/services/vk_client_outbound_proof.py",
 )
 
 # CURSOR-30 Identity Resolution paths that must be present in Docker build context.

@@ -69,6 +69,7 @@ Thumbs.db
 !alembic/versions/20260829_37_control_plane.py
 !alembic/versions/20260903_38_vk_client_ingress.py
 !alembic/versions/20260904_39_shadow_drafts.py
+!alembic/versions/20260905_40_vk_client_outbound.py
 !app/
 !app/__init__.py
 !app/channels/
@@ -82,6 +83,8 @@ Thumbs.db
 !app/channels/vk_client_types.py
 !app/channels/vk_client_webhook.py
 !app/channels/vk_client_http.py
+!app/channels/vk_client_outbound_config.py
+!app/channels/vk_client_outbound_http.py
 !app/config.py
 !app/core/
 !app/core/__init__.py
@@ -324,6 +327,7 @@ Thumbs.db
 !app/services/vk_master_adapter.py
 !app/services/vk_client_ingress.py
 !app/services/vk_client_inbound.py
+!app/services/vk_client_outbound_proof.py
 !app/services/outbound_arbiter.py
 !app/services/reply_outbound.py
 !app/services/synthetic_outbound.py

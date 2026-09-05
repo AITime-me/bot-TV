@@ -59,13 +59,25 @@ x-yandex-shadow-environment: &yandex-shadow-environment
   YANDEX_LLM_MAX_TOKENS: ${YANDEX_LLM_MAX_TOKENS:-1024}
 
 # VK CLIENT shadow Callback — api only. Default-off / fail-closed.
-# Never attach to worker: callback secrets are not needed for durable processing.
+# Never attach callback secrets to worker.
 # Separate from VK_MASTER_* (master command channel).
 x-vk-client-environment: &vk-client-environment
   VK_CLIENT_CALLBACK_ENABLED: ${VK_CLIENT_CALLBACK_ENABLED:-false}
   VK_CLIENT_GROUP_ID: ${VK_CLIENT_GROUP_ID:-}
   VK_CLIENT_CALLBACK_SECRET: ${VK_CLIENT_CALLBACK_SECRET:-}
   VK_CLIENT_CONFIRMATION: ${VK_CLIENT_CONFIRMATION:-}
+
+# VK CLIENT outbound closed proof — worker only (send token). Default-off.
+x-vk-client-outbound-environment: &vk-client-outbound-environment
+  VK_CLIENT_GROUP_ID: ${VK_CLIENT_GROUP_ID:-}
+  VK_CLIENT_OUTBOUND_ENABLED: ${VK_CLIENT_OUTBOUND_ENABLED:-false}
+  VK_CLIENT_ACCESS_TOKEN: ${VK_CLIENT_ACCESS_TOKEN:-}
+  VK_CLIENT_OUTBOUND_ALLOW_CONVERSATION: ${VK_CLIENT_OUTBOUND_ALLOW_CONVERSATION:-}
+  VK_CLIENT_OUTBOUND_PROOF_ENABLED: ${VK_CLIENT_OUTBOUND_PROOF_ENABLED:-false}
+  VK_CLIENT_OUTBOUND_PROOF_TRIGGER: ${VK_CLIENT_OUTBOUND_PROOF_TRIGGER:-}
+  VK_CLIENT_OUTBOUND_PROOF_REPLY: ${VK_CLIENT_OUTBOUND_PROOF_REPLY:-}
+  VK_CLIENT_API_VERSION: ${VK_CLIENT_API_VERSION:-5.199}
+  VK_CLIENT_API_BASE_URL: ${VK_CLIENT_API_BASE_URL:-https://api.vk.com}
 
 x-runtime-hardening: &runtime-hardening
   read_only: true
@@ -118,7 +130,7 @@ services:
       context: .
     command: ["python", "-m", "app.worker"]
     environment:
-      <<: [*runtime-environment, *amocrm-environment, *yandex-shadow-environment]
+      <<: [*runtime-environment, *amocrm-environment, *yandex-shadow-environment, *vk-client-outbound-environment]
       WORKER_INSTANCE_ID: bot-tv-worker
     env_file: *amocrm-oauth-keys-env-file
     <<: *runtime-hardening

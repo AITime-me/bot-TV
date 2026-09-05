@@ -177,7 +177,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     ),
     "ck_outbox_destination_type": (
         "destination_type",
-        frozenset({"INTERNAL_DRAFT", "SYNTHETIC_OUTBOUND"}),
+        frozenset({"INTERNAL_DRAFT", "SYNTHETIC_OUTBOUND", "VK_CLIENT_OUTBOUND"}),
     ),
     "ck_outbox_delivery_status": (
         "delivery_status",
@@ -203,6 +203,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset(
             {
                 "SYNTHETIC_OUTBOUND",
+                "VK_CLIENT_OUTBOUND",
                 "ADMITTED",
                 "DELIVERED",
                 "DEAD",
@@ -211,11 +212,11 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     ),
     "ck_outbox_admitted_state": (
         "delivery_status",
-        frozenset({"ADMITTED", "SYNTHETIC_OUTBOUND"}),
+        frozenset({"ADMITTED", "SYNTHETIC_OUTBOUND", "VK_CLIENT_OUTBOUND"}),
     ),
     "ck_outbox_delivered_after_admission": (
         "admitted_at",
-        frozenset({"SYNTHETIC_OUTBOUND", "DELIVERED"}),
+        frozenset({"SYNTHETIC_OUTBOUND", "VK_CLIENT_OUTBOUND", "DELIVERED"}),
     ),
     "ck_outbox_lease_complete": ("lease_token", frozenset()),
     "ck_outbox_unleased_states": (

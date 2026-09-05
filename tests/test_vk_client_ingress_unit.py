@@ -578,10 +578,13 @@ def test_compose_vk_client_api_only_not_worker() -> None:
     for key in (
         "VK_CLIENT_CALLBACK_ENABLED",
         "VK_CLIENT_CALLBACK_SECRET",
-        "VK_CLIENT_GROUP_ID",
         "VK_CLIENT_CONFIRMATION",
     ):
         assert key not in worker_env
+    # Worker receives outbound send vars (not callback secret).
+    assert "VK_CLIENT_OUTBOUND_ENABLED" in worker_env
+    assert "VK_CLIENT_ACCESS_TOKEN" in worker_env
+    assert "VK_CLIENT_ACCESS_TOKEN" not in api_env
 
 
 def test_vk_master_adapter_unchanged_entry() -> None:

@@ -595,6 +595,9 @@ def test_outbox_has_no_sent_status() -> None:
     assert DestinationType.SYNTHETIC_OUTBOUND.value in {
         item.value for item in DestinationType
     }
+    assert DestinationType.VK_CLIENT_OUTBOUND.value in {
+        item.value for item in DestinationType
+    }
 
 
 def test_inbound_service_has_no_client_sender() -> None:
@@ -708,6 +711,9 @@ def test_metadata_contains_all_check_and_unique_constraints() -> None:
         "delivery_status IN ('PENDING', 'PROCESSING', 'ADMITTED', "
         "'DELIVERED', 'FAILED', 'DEAD', 'CANCELLED')"
     ) in rendered
-    assert "destination_type IN ('INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND')" in rendered
+    assert "destination_type IN (" in rendered
+    assert "'INTERNAL_DRAFT'" in rendered
+    assert "'SYNTHETIC_OUTBOUND'" in rendered
+    assert "'VK_CLIENT_OUTBOUND'" in rendered
     assert "'SENT'" not in rendered
     assert "delivery_status IN ('PENDING', 'CANCELLED', 'SENT')" not in rendered

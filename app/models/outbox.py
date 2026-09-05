@@ -31,6 +31,7 @@ from app.db.base import Base
 class DestinationType(str, enum.Enum):
     INTERNAL_DRAFT = "INTERNAL_DRAFT"
     SYNTHETIC_OUTBOUND = "SYNTHETIC_OUTBOUND"
+    VK_CLIENT_OUTBOUND = "VK_CLIENT_OUTBOUND"
 
 
 class DeliveryStatus(str, enum.Enum):
@@ -38,12 +39,13 @@ class DeliveryStatus(str, enum.Enum):
     PROCESSING = "PROCESSING"
     # ADMITTED is the durable point after which manager events cannot cancel.
     ADMITTED = "ADMITTED"
-    # DELIVERED means accepted by the synthetic sink only — never a real channel send.
+    # DELIVERED = destination transport/sink confirmed success.
+    # SYNTHETIC_OUTBOUND: in-process synthetic sink. VK_CLIENT_OUTBOUND: VK send.
     DELIVERED = "DELIVERED"
     FAILED = "FAILED"
     DEAD = "DEAD"
     CANCELLED = "CANCELLED"
-    # SENT remains intentionally absent: no transport/channel sender exists.
+    # SENT remains intentionally absent.
 
 
 OUTBOUND_TRANSITIONS: dict[DeliveryStatus, frozenset[DeliveryStatus]] = {
@@ -111,7 +113,9 @@ class OutboxMessage(Base):
             name="uq_outbox_reply_plan_destination",
         ),
         CheckConstraint(
-            "destination_type IN ('INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND')",
+            "destination_type IN ("
+            "'INTERNAL_DRAFT', 'SYNTHETIC_OUTBOUND', 'VK_CLIENT_OUTBOUND'"
+            ")",
             name="ck_outbox_destination_type",
         ),
         CheckConstraint(
@@ -141,19 +145,20 @@ class OutboxMessage(Base):
         ),
         CheckConstraint(
             "admitted_at IS NULL OR ("
-            "destination_type = 'SYNTHETIC_OUTBOUND' "
+            "destination_type IN ('SYNTHETIC_OUTBOUND', 'VK_CLIENT_OUTBOUND') "
             "AND delivery_status IN ('ADMITTED', 'DELIVERED', 'DEAD')"
             ")",
             name="ck_outbox_admitted_destination",
         ),
         CheckConstraint(
             "delivery_status <> 'ADMITTED' OR ("
-            "destination_type = 'SYNTHETIC_OUTBOUND' AND admitted_at IS NOT NULL"
+            "destination_type IN ('SYNTHETIC_OUTBOUND', 'VK_CLIENT_OUTBOUND') "
+            "AND admitted_at IS NOT NULL"
             ")",
             name="ck_outbox_admitted_state",
         ),
         CheckConstraint(
-            "destination_type <> 'SYNTHETIC_OUTBOUND' "
+            "destination_type NOT IN ('SYNTHETIC_OUTBOUND', 'VK_CLIENT_OUTBOUND') "
             "OR delivery_status <> 'DELIVERED' "
             "OR admitted_at IS NOT NULL",
             name="ck_outbox_delivered_after_admission",
