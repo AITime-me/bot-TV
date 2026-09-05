@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -184,6 +184,8 @@ async def test_proof_trigger_creates_one_vk_outbound_and_delivers(
     out_claim = await out_worker.claim_one(now=due)
     assert out_claim is not None
     assert out_claim.destination_type == DestinationType.VK_CLIENT_OUTBOUND.value
+    # Claim boundary must yield stdlib UUID (not asyncpg pgproto subclass).
+    assert type(out_claim.outbound_id) is UUID
     admit = await out_worker.process_claimed(out_claim, now=due)
     assert admit.admitted is True
     assert admit.delivery_status == DeliveryStatus.DELIVERED.value
@@ -191,8 +193,9 @@ async def test_proof_trigger_creates_one_vk_outbound_and_delivers(
     assert sender.calls[0]["peer_id"] == _USER
     assert sender.calls[0]["text"] == _REPLY
     assert sender.calls[0]["outbound_id"] == outbound_id
+    # Expected random_id from claim boundary UUID (stdlib), never raw ORM id.
     assert sender.calls[0]["random_id"] == vk_client_random_id_from_outbound_id(
-        outbound_id
+        out_claim.outbound_id
     )
 
     async with session_scope(session_factory) as session:
@@ -347,6 +350,41 @@ async def test_vk_permanent_goes_dead(
         row = await session.get(OutboxMessage, claim.outbound_id)
         assert row is not None
         assert row.delivery_status == DeliveryStatus.DEAD.value
+
+
+@pytest.mark.asyncio
+async def test_claim_next_outbound_id_is_stdlib_uuid(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """PG/runtime claim must expose stdlib UUID for VK random_id contract."""
+
+    await _ingest_and_process(session_factory, cmid=707, text=_TRIGGER)
+    async with session_scope(session_factory) as session:
+        plan = (await session.scalars(select(ReplyPlan))).one()
+        due = plan.not_before + timedelta(seconds=1)
+
+    plan_worker = ReplyPlanWorker(session_factory, worker_id="vk-plan-uuid")
+    plan_claim = await plan_worker.claim_one(now=due)
+    assert plan_claim is not None
+    await plan_worker.dispatch_claimed(plan_claim)
+
+    out_worker = OutboundWorker(
+        session_factory,
+        worker_id="vk-out-uuid",
+        arbiter=OutboundArbiter(
+            session_factory,
+            settings=_settings(),
+            vk_config=_outbound_cfg(),
+            vk_sender=_RecordingVkSender(),  # type: ignore[arg-type]
+        ),
+    )
+    claim = await out_worker.claim_one(now=due)
+    assert claim is not None
+    assert type(claim.outbound_id) is UUID
+    assert type(claim.lease_token) is UUID
+    assert type(claim.conversation_id) is UUID
+    # Transport helper must accept claim.outbound_id without TypeError.
+    _ = vk_client_random_id_from_outbound_id(claim.outbound_id)
 
 
 @pytest.mark.asyncio

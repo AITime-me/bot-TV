@@ -62,13 +62,44 @@ class OutboundClaim:
         )
 
 
+def _db_uuid(value: object) -> uuid.UUID:
+    """Canonical stdlib UUID from ORM/asyncpg driver values.
+
+    asyncpg may return ``pgproto.UUID`` (subclass of ``uuid.UUID``). Transport
+    contracts use ``type(x) is uuid.UUID``, so normalize at the repository
+    claim boundary — not in senders or helpers.
+    """
+
+    if type(value) is uuid.UUID:
+        return value
+    if isinstance(value, uuid.UUID):
+        try:
+            return uuid.UUID(int=value.int)
+        except Exception:
+            raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+    if type(value) is str:
+        if not value or any(ch.isspace() for ch in value):
+            raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+    raise RuntimeError("OUTBOUND_UUID_INVALID") from None
+
+
+def _db_uuid_optional(value: object) -> uuid.UUID | None:
+    if value is None:
+        return None
+    return _db_uuid(value)
+
+
 def _row_to_claim(row: OutboxMessage) -> OutboundClaim:
     if row.lease_token is None or row.lease_owner is None or row.lease_until is None:
         raise RuntimeError("OUTBOUND_LEASE_INCOMPLETE")
     return OutboundClaim(
-        outbound_id=row.id,
-        conversation_id=row.conversation_id,
-        reply_plan_id=row.reply_plan_id,
+        outbound_id=_db_uuid(row.id),
+        conversation_id=_db_uuid(row.conversation_id),
+        reply_plan_id=_db_uuid_optional(row.reply_plan_id),
         context_version=row.context_version,
         manager_epoch=row.manager_epoch,
         event_seq_hwm=row.event_seq_hwm,
@@ -79,10 +110,10 @@ def _row_to_claim(row: OutboxMessage) -> OutboundClaim:
         attempt_count=row.attempt_count,
         max_attempts=row.max_attempts,
         lease_owner=row.lease_owner,
-        lease_token=row.lease_token,
+        lease_token=_db_uuid(row.lease_token),
         lease_version=row.lease_version,
         lease_until=row.lease_until,
-        correlation_id=row.correlation_id,
+        correlation_id=_db_uuid_optional(row.correlation_id),
         payload_json=dict(row.payload_json),
     )
 
@@ -99,6 +130,7 @@ _CLAIMABLE_DESTINATIONS = (
     DestinationType.SYNTHETIC_OUTBOUND.value,
     DestinationType.VK_CLIENT_OUTBOUND.value,
 )
+
 
 async def get_by_id(
     session: AsyncSession,

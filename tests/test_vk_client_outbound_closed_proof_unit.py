@@ -727,3 +727,93 @@ def test_idempotency_key_stable() -> None:
     assert outbound_repo.synthetic_outbound_idempotency_key(plan_id) == (
         f"synthetic-outbound:reply-plan:{plan_id}"
     )
+
+
+def test_db_uuid_normalizes_asyncpg_subclass_for_claim_boundary() -> None:
+    """Regression: driver UUID subclass must become stdlib UUID on OutboundClaim."""
+
+    from app.repositories.outbound import _db_uuid, _row_to_claim
+
+    std = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    assert type(_db_uuid(std)) is uuid.UUID
+    assert _db_uuid(std) is std
+    assert _db_uuid(str(std)) == std
+
+    class _DriverUuid(uuid.UUID):
+        """Stand-in for asyncpg.pgproto.UUID (subclass, not exact type)."""
+
+    driver = _DriverUuid(str(std))
+    assert type(driver) is not uuid.UUID
+    assert isinstance(driver, uuid.UUID)
+    coerced = _db_uuid(driver)
+    assert type(coerced) is uuid.UUID
+    assert coerced == std
+
+    # Strict transport contract still holds after claim boundary normalization.
+    assert vk_client_random_id_from_outbound_id(coerced) == (
+        vk_client_random_id_from_outbound_id(std)
+    )
+
+    row = MagicMock()
+    row.id = driver
+    row.conversation_id = _DriverUuid(str(uuid.uuid4()))
+    row.reply_plan_id = None
+    row.context_version = 1
+    row.manager_epoch = 0
+    row.event_seq_hwm = 1
+    row.idempotency_key = "vk-client-outbound:reply-plan:x"
+    row.destination_type = DestinationType.VK_CLIENT_OUTBOUND.value
+    row.delivery_status = DeliveryStatus.PROCESSING.value
+    row.not_before = _FIXED_NOW
+    row.attempt_count = 1
+    row.max_attempts = 5
+    row.lease_owner = "w"
+    row.lease_token = _DriverUuid(str(uuid.uuid4()))
+    row.lease_version = 1
+    row.lease_until = _FIXED_NOW
+    row.correlation_id = None
+    row.payload_json = {"schema": "vk.client.outbound.v1", "text": "t"}
+
+    claim = _row_to_claim(row)
+    assert type(claim.outbound_id) is uuid.UUID
+    assert type(claim.conversation_id) is uuid.UUID
+    assert type(claim.lease_token) is uuid.UUID
+    assert claim.outbound_id == std
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        "",
+        "not-a-uuid",
+        " 12345678-1234-5678-1234-567812345678",
+        12345,
+        True,
+        False,
+        object(),
+        b"12345678-1234-5678-1234-567812345678",
+    ],
+)
+def test_db_uuid_rejects_invalid(bad: object) -> None:
+    from app.repositories.outbound import _db_uuid
+
+    with pytest.raises(RuntimeError, match="OUTBOUND_UUID_INVALID"):
+        _db_uuid(bad)
+
+
+def test_db_uuid_optional_none_and_subclass() -> None:
+    from app.repositories.outbound import _db_uuid_optional
+
+    assert _db_uuid_optional(None) is None
+
+    std = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+    class _DriverUuid(uuid.UUID):
+        """Stand-in for asyncpg.pgproto.UUID (subclass, not exact type)."""
+
+    driver = _DriverUuid(str(std))
+    coerced = _db_uuid_optional(driver)
+    assert coerced is not None
+    assert type(coerced) is uuid.UUID
+    assert coerced == std
