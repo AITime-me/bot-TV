@@ -8,18 +8,28 @@ isolation are proven read-only.
 ## Recorded safety gate (5 September 2026)
 
 The initial read-only inventory found no active `TECHNICAL_DEAL` link that can
-serve as a proof target.  Salesbot inventory was empty, but one enabled
-account-level webhook subscribes to both lead-update and lead-status events.
-That subscription can notify an external receiver for either a field change or
-a stage change, independently of local queue state.  Consequently this runbook
-is **not executable** yet: do not create a substitute lead or apply any plan
-until an owner-designated technical object and a documented exclusion of that
-webhook (and any applicable Digital Pipeline automation) are available.
+serve as a proof target. Salesbot inventory was empty. Two enabled account
+webhooks were traced to their receivers:
+
+- the Salebot receiver subscribes only to `add_unsorted`, so a PATCH or stage
+  update would not invoke it;
+- the Wazzup receiver is external to this contour and subscribes to
+  `add_lead`, `update_lead`, `status_lead`, `responsible_lead`,
+  `delete_lead`, and `restore_lead` (as well as contact/company events).
+
+The Wazzup subscription can notify its external receiver for a field change or
+a stage change, independently of local queue state. Its receiver logic and any
+filtering are not controlled by bot-TV or observable through the amoCRM API.
+Consequently this runbook is **not executable** yet: do not create a substitute
+lead or apply any plan until an owner-designated technical object and a
+documented Wazzup exclusion (and any applicable Digital Pipeline automation)
+are available.
 
 The required future authority is one controlled production decision covering:
 
 1. the exact isolated technical lead and its original reversible value;
-2. evidence that the applicable webhook and pipeline automation will not run;
+2. evidence that the applicable Wazzup webhook and pipeline automation will
+   not run;
 3. merge/deployment of PR #100's disposable profile; and
 4. one dry-run, one single-action apply, independent read-back, and one
    separately reviewed inverse action.
