@@ -103,6 +103,7 @@ class VkClientOutboundConfig:
     proof_trigger: str | None = None
     proof_reply: str | None = None
     group_id: int | None = None
+    provenance_key: str | None = None
     api_version: str = _DEFAULT_API_VERSION
     api_base_url: str = _DEFAULT_API_BASE
 
@@ -114,6 +115,7 @@ class VkClientOutboundConfig:
             f"group_id={self.group_id!r}, "
             f"allow_conversation={self.allow_conversation!r}, "
             "access_token=<redacted>, "
+            "provenance_key=<redacted>, "
             "proof_trigger=<redacted>, "
             "proof_reply=<redacted>, "
             f"api_version={self.api_version!r}, "
@@ -128,6 +130,8 @@ class VkClientOutboundConfig:
             and bool(self.access_token)
             and type(self.allow_conversation) is str
             and bool(self.allow_conversation)
+            and type(self.provenance_key) is str
+            and bool(self.provenance_key)
         )
 
     def proof_config_complete(self) -> bool:
@@ -229,6 +233,24 @@ class VkClientOutboundConfig:
                 raise VkClientOutboundConfigError() from None
             reply = reply_raw
 
+        provenance_raw = _optional_str(
+            source.get("VK_CLIENT_OUTBOUND_PROVENANCE_KEY")
+        )
+        if provenance_raw is None:
+            provenance_raw = _optional_str(source.get("VK_CLIENT_CALLBACK_SECRET"))
+        if (
+            provenance_raw is None
+            and callback is not None
+            and type(callback.callback_secret) is str
+            and callback.callback_secret
+        ):
+            provenance_raw = callback.callback_secret
+        provenance_key: str | None = None
+        if provenance_raw is not None:
+            provenance_key = _require_printable_secret(
+                provenance_raw, min_len=8, max_len=_TOKEN_MAX
+            )
+
         if type(api_version) is not str or not api_version or len(api_version) > 16:
             raise VkClientOutboundConfigError() from None
         if type(api_base) is not str or not api_base.startswith("https://"):
@@ -242,6 +264,7 @@ class VkClientOutboundConfig:
             proof_trigger=trigger,
             proof_reply=reply,
             group_id=group_id,
+            provenance_key=provenance_key,
             api_version=api_version,
             api_base_url=api_base.rstrip("/"),
         )

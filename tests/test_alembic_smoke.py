@@ -569,6 +569,11 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         by_id["20260905_41_amo_nat_out_cap"].down_revision
         == "20260905_40_vk_client_outbound"
     )
+    assert "20260906_42_vk_msg_reply_ext" in by_id
+    assert (
+        by_id["20260906_42_vk_msg_reply_ext"].down_revision
+        == "20260905_41_amo_nat_out_cap"
+    )
 
     for revision_id in (
         "20260727_01a_foundation",
@@ -604,6 +609,7 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
         "20260904_39_shadow_drafts",
         "20260905_40_vk_client_outbound",
         "20260905_41_amo_nat_out_cap",
+        "20260906_42_vk_msg_reply_ext",
     ):
         rev = by_id[revision_id]
         assert callable(rev.module.upgrade)
@@ -669,7 +675,9 @@ def test_alembic_migration_has_upgrade_and_downgrade() -> None:
     assert len("20260905_40_vk_client_outbound") <= 32
     assert "20260905_41_amo_nat_out_cap" in revision_ids
     assert len("20260905_41_amo_nat_out_cap") <= 32
-    assert heads == ["20260905_41_amo_nat_out_cap"]
+    assert "20260906_42_vk_msg_reply_ext" in revision_ids
+    assert len("20260906_42_vk_msg_reply_ext") <= 32
+    assert heads == ["20260906_42_vk_msg_reply_ext"]
 
     foundation = Path(by_id["20260727_01a_foundation"].path).read_text(encoding="utf-8")
     assert "delivery_status IN ('PENDING', 'CANCELLED')" in foundation
@@ -771,6 +779,9 @@ def test_model_migration_check_and_unique_parity() -> None:
     ).read_text(encoding="utf-8")
     migration_41 = (
         root / "alembic" / "versions" / "20260905_41_amo_nat_out_cap.py"
+    ).read_text(encoding="utf-8")
+    migration_42 = (
+        root / "alembic" / "versions" / "20260906_42_vk_msg_reply_ext.py"
     ).read_text(encoding="utf-8")
     migration_20 = (
         root / "alembic" / "versions" / "20260812_20_amocrm_mgr_ingress.py"
@@ -966,10 +977,30 @@ def test_model_migration_check_and_unique_parity() -> None:
 
     for name, sql in _EXPECTED_CHECKS_38.items():
         assert name in migration_38
+        if name in {
+            "ck_ingress_event_type",
+            "ck_ingress_channel_event_pairing",
+        }:
+            # VK message_reply widens again in 20260906_42.
+            assert sql in migration_38
+            continue
         assert model_checks[name] == sql
         # Migration may keep long CHECK SQL in a module constant / split literals.
         for token in re.findall(r"'[A-Za-z0-9_]+'", sql):
             assert token in migration_38, f"{name} missing {token}"
+
+    assert "VK_CLIENT_MESSAGE_REPLY" in migration_42
+    assert model_checks["ck_ingress_event_type"] == (
+        "event_type IN ("
+        "'SYNTHETIC_MESSAGE', 'AMOCRM_MANAGER_MESSAGE', "
+        "'VK_CLIENT_MESSAGE', 'VK_CLIENT_MESSAGE_REPLY'"
+        ")"
+    )
+    assert "VK_CLIENT_MESSAGE_REPLY" in model_checks["ck_ingress_channel_event_pairing"]
+    assert "ck_outbox_provider_message_id_positive" in model_checks
+    assert "provider_message_id IS NULL OR provider_message_id > 0" in model_checks[
+        "ck_outbox_provider_message_id_positive"
+    ]
 
     for name, sql in _EXPECTED_CHECKS_21.items():
         assert name in migration_21
@@ -1103,6 +1134,11 @@ def test_model_migration_check_and_unique_parity() -> None:
     assert "message_type = 'text'" in migration_41
     assert "body_text" not in migration_41
     assert 'op.drop_table("amocrm_native_outgoing_captures")' in migration_41
+    assert "VK_CLIENT_MESSAGE_REPLY" in migration_42
+    assert "provider_message_id" in migration_42
+    assert "vk_client_external_reply_hwm" in migration_42
+    assert "uq_outbox_vk_provider_message_id" in migration_42
+    assert "op.drop_column" in migration_42
 
 
 def test_alembic_env_fileconfig_call_site_disables_existing_loggers_false() -> None:

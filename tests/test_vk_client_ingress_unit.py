@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -145,7 +146,7 @@ def test_parse_message_new_private() -> None:
         _message_payload(cmid=None),
         _message_payload(secret="wrong-secret-value"),
         _message_payload(group_id=_GROUP + 1),
-        _message_payload(event_type="message_reply"),
+        _message_payload(event_type="message_typing_state"),
     ],
 )
 def test_parse_ignores_or_rejects_non_client(payload: dict[str, Any]) -> None:
@@ -155,6 +156,78 @@ def test_parse_ignores_or_rejects_non_client(payload: dict[str, Any]) -> None:
         VkClientWebhookKind.REJECTED,
     }
     assert parsed.message is None
+    assert parsed.message_reply is None
+
+
+def _reply_payload(
+    *,
+    out: int = 1,
+    from_id: int | None = None,
+    peer_id: int = _USER,
+    cmid: int = _CMID + 100,
+    provider_id: int = 82727,
+    payload: object | None = None,
+    event_type: str = "message_reply",
+    group_id: int = _GROUP,
+    secret: str = _SECRET,
+    date: int = _NOW_TS,
+    random_id: int = 0,
+) -> dict[str, Any]:
+    obj: dict[str, Any] = {
+        "id": provider_id,
+        "date": date,
+        "from_id": -group_id if from_id is None else from_id,
+        "peer_id": peer_id,
+        "out": out,
+        "conversation_message_id": cmid,
+        "random_id": random_id,
+        "text": "MANAGER_TEXT_MUST_NOT_BE_STORED",
+    }
+    if payload is not None:
+        obj["payload"] = payload
+    return {
+        "type": event_type,
+        "group_id": group_id,
+        "secret": secret,
+        "object": obj,
+    }
+
+
+def test_parse_message_reply_private_outgoing() -> None:
+    parsed = parse_vk_client_callback(
+        _reply_payload(payload={"known_event": True}),
+        config=_cfg(),
+    )
+    assert parsed.kind is VkClientWebhookKind.MESSAGE_REPLY
+    assert parsed.message_reply is not None
+    assert parsed.message_reply.external_conversation_id == f"vk-{_GROUP}-{_USER}"
+    assert parsed.message_reply.provider_message_id == 82727
+    assert "MANAGER_TEXT" not in repr(parsed.message_reply)
+    assert parsed.message_reply.provenance.kind.value == "FOREIGN"
+    assert parsed.message_reply.technical_envelope()["provenance"] == {
+        "kind": "FOREIGN"
+    }
+    assert "MANAGER_TEXT" not in str(parsed.message_reply.technical_envelope())
+    assert "known_event" not in json.dumps(parsed.message_reply.technical_envelope())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _reply_payload(out=0),
+        _reply_payload(from_id=_USER),
+        _reply_payload(peer_id=2_000_000_001),
+        _reply_payload(group_id=_GROUP + 1),
+        _reply_payload(secret="wrong-secret-value"),
+    ],
+)
+def test_parse_message_reply_fail_closed(payload: dict[str, Any]) -> None:
+    parsed = parse_vk_client_callback(payload, config=_cfg())
+    assert parsed.kind in {
+        VkClientWebhookKind.IGNORED,
+        VkClientWebhookKind.REJECTED,
+    }
+    assert parsed.message_reply is None
 
 
 def test_master_secret_cannot_authorize_client_callback() -> None:

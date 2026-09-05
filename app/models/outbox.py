@@ -186,8 +186,21 @@ class OutboxMessage(Base):
             ")",
             name="ck_outbox_processing_lease",
         ),
+        CheckConstraint(
+            "provider_message_id IS NULL OR provider_message_id > 0",
+            name="ck_outbox_provider_message_id_positive",
+        ),
         Index("ix_outbox_messages_status_not_before", "delivery_status", "not_before"),
         Index("ix_outbox_messages_lease_until", "lease_until"),
+        Index(
+            "uq_outbox_vk_provider_message_id",
+            "provider_message_id",
+            unique=True,
+            postgresql_where=text(
+                "provider_message_id IS NOT NULL "
+                "AND destination_type = 'VK_CLIENT_OUTBOUND'"
+            ),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -271,6 +284,10 @@ class OutboxMessage(Base):
     )
     admitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+    )
+    provider_message_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         nullable=True,
     )
     correlation_id: Mapped[uuid.UUID | None] = mapped_column(

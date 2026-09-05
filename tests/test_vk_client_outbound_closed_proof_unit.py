@@ -65,6 +65,7 @@ def _full_env(**overrides: str) -> dict[str, str]:
         "VK_CLIENT_OUTBOUND_PROOF_TRIGGER": "PROOF_TRIGGER",
         "VK_CLIENT_OUTBOUND_PROOF_REPLY": "PROOF_REPLY_OK",
         "VK_CLIENT_GROUP_ID": str(_GROUP),
+        "VK_CLIENT_OUTBOUND_PROVENANCE_KEY": "prov-key-01234567",
     }
     base.update(overrides)
     return base
@@ -516,7 +517,10 @@ async def test_arbiter_vk_no_sender_before_admitted(
             call_order.append("send")
             assert kwargs["outbound_id"] == claim.outbound_id
             assert kwargs["peer_id"] == _USER
-            return VkClientSendResult(outcome=VkClientSendOutcome.SUCCESS)
+            return VkClientSendResult(
+                outcome=VkClientSendOutcome.SUCCESS,
+                provider_message_id=424242,
+            )
 
     session = AsyncMock()
 
@@ -612,7 +616,10 @@ async def test_arbiter_vk_gate_denied_no_http(
 
         def send_text(self, **kwargs: Any) -> VkClientSendResult:
             self.called = True
-            return VkClientSendResult(outcome=VkClientSendOutcome.SUCCESS)
+            return VkClientSendResult(
+                outcome=VkClientSendOutcome.SUCCESS,
+                provider_message_id=424242,
+            )
 
     sender = _Sender()
     session = AsyncMock()
@@ -698,6 +705,7 @@ def test_static_no_shadow_to_send_and_no_master_token_cross() -> None:
         "vk_master_http.py",
         "vk_client_outbound_http.py",
         "vk_client_outbound_config.py",  # docstring only
+        "vk_client_outbound_provenance.py",  # payload marker helper
     }
     for path in (_REPO / "app").rglob("*.py"):
         text = path.read_text(encoding="utf-8")

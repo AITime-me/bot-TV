@@ -31,8 +31,15 @@ from app.services.inbound import InboundService
 from app.services.manager_messages import apply_manager_message_in_session
 from app.services.vk_client_inbound import VkClientInboundService
 from app.channels.vk_client_outbound_config import VkClientOutboundConfig
+from app.channels.vk_client_external_takeover_config import (
+    load_vk_client_external_takeover_config,
+)
 from app.services.vk_client_outbound_proof import (
     maybe_create_vk_client_proof_reply_plan,
+)
+from app.services.vk_client_message_reply import (
+    VkClientMessageReplyOwnEchoRace,
+    apply_vk_client_message_reply_in_session,
 )
 
 
@@ -181,13 +188,15 @@ class IngressWorker:
                 raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
             return await self._process_amocrm_manager(claim)
         if claim.channel == "vk":
-            if claim.event_type != IngressEventType.VK_CLIENT_MESSAGE.value:
-                await self.fail_claimed(
-                    claim,
-                    error_code="INGRESS_CHANNEL_EVENT_MISMATCH",
-                )
-                raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
-            return await self._process_vk_client(claim)
+            if claim.event_type == IngressEventType.VK_CLIENT_MESSAGE.value:
+                return await self._process_vk_client(claim)
+            if claim.event_type == IngressEventType.VK_CLIENT_MESSAGE_REPLY.value:
+                return await self._process_vk_client_message_reply(claim)
+            await self.fail_claimed(
+                claim,
+                error_code="INGRESS_CHANNEL_EVENT_MISMATCH",
+            )
+            raise ValueError("INGRESS_CHANNEL_EVENT_MISMATCH")
         if (
             claim.channel != "synthetic"
             or claim.event_type != IngressEventType.SYNTHETIC_MESSAGE.value
@@ -256,6 +265,58 @@ class IngressWorker:
                     outbox_id=None,
                     conversation_id=accept.conversation.id,
                 )
+        except StaleIngressLeaseError:
+            raise
+        except Exception as exc:
+            await self.fail_claimed(claim, error_code=type(exc).__name__)
+            raise
+
+    async def _process_vk_client_message_reply(
+        self,
+        claim: IngressClaim,
+    ) -> IngressProcessResult:
+        """External/own message_reply → optional takeover. No conversation create."""
+
+        try:
+            takeover_config = load_vk_client_external_takeover_config()
+        except Exception:
+            await self.fail_claimed(
+                claim,
+                error_code="VK_CLIENT_EXTERNAL_TAKEOVER_CONFIG_INVALID",
+            )
+            raise ValueError("VK_CLIENT_EXTERNAL_TAKEOVER_CONFIG_INVALID")
+
+        try:
+            async with session_scope(self._session_factory) as session:
+                envelope = claim.envelope_json
+                if type(envelope) is not dict:
+                    raise ValueError("VK_CLIENT_REPLY_ENVELOPE_INVALID")
+                result = await apply_vk_client_message_reply_in_session(
+                    session,
+                    envelope=envelope,  # type: ignore[arg-type]
+                    handoff_pause_seconds=self._handoff_pause_seconds,
+                    takeover_config=takeover_config,
+                )
+                event = await ingress_repo.complete_with_lease(
+                    session,
+                    event_id=claim.event_id,
+                    lease_token=claim.lease_token,
+                    lease_version=claim.lease_version,
+                )
+                return IngressProcessResult(
+                    event_id=event.id,
+                    status=event.status,
+                    duplicate_business=False,
+                    inbox_id=None,
+                    outbox_id=None,
+                    conversation_id=result.conversation_id,
+                )
+        except VkClientMessageReplyOwnEchoRace:
+            await self.fail_claimed(
+                claim,
+                error_code="VK_CLIENT_OWN_ECHO_RACE",
+            )
+            raise
         except StaleIngressLeaseError:
             raise
         except Exception as exc:

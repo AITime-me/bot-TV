@@ -37,6 +37,7 @@ class SyntheticOutboundRequest:
 class SyntheticOutboundResult:
     outcome: SyntheticOutboundOutcome
     error_code: str | None = None
+    provider_message_id: int | None = None
 
 
 class SyntheticOutboundAdapter:

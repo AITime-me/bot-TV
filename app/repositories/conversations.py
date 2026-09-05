@@ -306,6 +306,54 @@ async def apply_chronologically_new_manager_message(
     return conversation, entered_from_bot
 
 
+async def apply_chronologically_new_vk_external_reply(
+    session: AsyncSession,
+    *,
+    conversation: Conversation,
+    provider_sequence: int,
+    moment: datetime,
+    handoff_pause_seconds: int,
+) -> tuple[Conversation, bool]:
+    """Apply ordered VK message_reply external activity (no fake manager text).
+
+    Uses ``vk_client_external_reply_hwm`` (conversation_message_id namespace),
+    not amoCRM ``manager_sequence_hwm``.
+    """
+    if not 10 * 60 <= handoff_pause_seconds <= 15 * 60:
+        raise ValueError("handoff_pause_seconds must be between 600 and 900")
+    await clear_active_handoff_quarantine_for_manager_message(
+        session,
+        conversation=conversation,
+        moment=moment,
+    )
+    entered_from_bot = conversation.handoff_state == HandoffState.BOT_ACTIVE.value
+    stmt = (
+        update(Conversation)
+        .where(Conversation.id == conversation.id)
+        .values(
+            ownership=ConversationOwnership.MANAGER.value,
+            status=ConversationStatus.HANDOFF.value,
+            handoff_state=HandoffState.HUMAN_ACTIVE.value,
+            context_version=Conversation.context_version + 1,
+            manager_epoch=Conversation.manager_epoch + 1,
+            vk_client_external_reply_hwm=provider_sequence,
+            manager_takeover_at=func.coalesce(
+                Conversation.manager_takeover_at,
+                moment,
+            ),
+            handoff_deadline_at=moment
+            + timedelta(seconds=handoff_pause_seconds),
+            human_pause_anchor_at=None,
+            active_reply_plan_id=None,
+            updated_at=moment,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(stmt)
+    await session.refresh(conversation)
+    return conversation, entered_from_bot
+
+
 async def append_conversation_ops_event(
     session: AsyncSession,
     *,

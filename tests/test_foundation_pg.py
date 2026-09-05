@@ -231,7 +231,12 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
     "ck_ingress_event_type": (
         "event_type",
         frozenset(
-            {"SYNTHETIC_MESSAGE", "AMOCRM_MANAGER_MESSAGE", "VK_CLIENT_MESSAGE"}
+            {
+                "SYNTHETIC_MESSAGE",
+                "AMOCRM_MANAGER_MESSAGE",
+                "VK_CLIENT_MESSAGE",
+                "VK_CLIENT_MESSAGE_REPLY",
+            }
         ),
     ),
     "ck_ingress_channel_event_pairing": (
@@ -244,6 +249,7 @@ _EXPECTED_CHECKS: dict[str, tuple[str, frozenset[str]]] = {
                 "AMOCRM_MANAGER_MESSAGE",
                 "vk",
                 "VK_CLIENT_MESSAGE",
+                "VK_CLIENT_MESSAGE_REPLY",
             }
         ),
     ),
